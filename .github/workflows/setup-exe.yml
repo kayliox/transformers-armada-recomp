@@ -9,7 +9,7 @@ name: Setup program
 on:
   push:
     branches: [main]
-    paths: ["installer/**", ".github/workflows/setup-exe.yml", "VERSION"]
+    paths: ["installer/**", ".github/workflows/setup-exe.yml", "VERSION", "recomplauncher.json"]
   workflow_dispatch:
 
 permissions:
@@ -24,6 +24,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Test setup and launcher entry points
+        shell: pwsh
+        run: cargo test --locked --manifest-path installer/Cargo.toml
       - name: "Build tfa-setup.exe (no build-machine paths in it, deterministic: installer/build.ps1)"
         shell: pwsh
         run: ./installer/build.ps1

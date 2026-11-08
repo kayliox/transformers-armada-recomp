@@ -131,6 +131,7 @@ $env:GIT_CONFIG_KEY_1 = "safe.directory"; $env:GIT_CONFIG_VALUE_1 = "*"
 # mark in %LOCALAPPDATA% is shared with the setup. It starts the install folder's tfa-setup.exe (the game when the
 # install is finished) with the game's icon, else the game's exe itself.
 function Add-DesktopShortcutOnce([string]$Repo, [string]$Port) {
+    if ($env:RECOMPLAUNCHER -eq '1') { return }
     try {
         $markDir = Join-Path $env:LOCALAPPDATA "TransformersArmadaSetup"
         $mark = Join-Path $markDir "desktop_shortcut_made"

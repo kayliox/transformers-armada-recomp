@@ -1,0 +1,421 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "repo": "kayliox/transformers-armada-recomp",
+  "game": {
+    "kind": "iso",
+    "label": "Your Transformers USA PlayStation 2 disc image (.iso), serial SLUS-20668.",
+    "check": {
+      "iso9660": "SLUS_206.68"
+    }
+  },
+  "prepare": {
+    "program": [
+      "tfa-setup.exe"
+    ],
+    "args": [
+      "--prepare",
+      "--iso",
+      "{game}",
+      "--folder",
+      "{install}"
+    ],
+    "label": "Building Transformers from your disc (first build: 15–25 minutes)",
+    "timeout": 7200
+  },
+  "start": {
+    "program": [
+      "tfa-setup.exe"
+    ],
+    "args": [
+      "--launch",
+      "--iso",
+      "{game}",
+      "--folder",
+      "{install}",
+      "--"
+    ]
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "ini",
+      "file": [
+        {
+          "path": "{install}/transformers-armada-recomp/settings.ini"
+        }
+      ]
+    }
+  ],
+  "saves": [
+    "{install}/transformers-armada-recomp/game/mc0",
+    "{install}/transformers-armada-recomp/game/mc1",
+    "{install}/transformers-armada-recomp/settings.ini"
+  ],
+  "folders": {
+    "saves": [
+      {
+        "path": "{install}/transformers-armada-recomp/game/mc0"
+      }
+    ],
+    "settings": [
+      {
+        "path": "{install}/transformers-armada-recomp"
+      }
+    ]
+  },
+  "actions": [
+    {
+      "id": "saves",
+      "label": "Saves",
+      "open": "saves"
+    }
+  ],
+  "looks": {
+    "allowed": false,
+    "reason": "Visual filters are unavailable with this setup-based release."
+  },
+  "settings": [
+    {
+      "id": "fullscreen",
+      "label": "Display mode",
+      "group": "Display",
+      "choices": [
+        {
+          "label": "Window",
+          "set": {
+            "PS2X_FULLSCREEN": "0"
+          }
+        },
+        {
+          "label": "Borderless full screen",
+          "set": {
+            "PS2X_FULLSCREEN": "1"
+          }
+        },
+        {
+          "label": "Exclusive full screen",
+          "set": {
+            "PS2X_FULLSCREEN": "2"
+          }
+        }
+      ],
+      "defaults": {
+        "PS2X_FULLSCREEN": "0"
+      }
+    },
+    {
+      "id": "aspect",
+      "label": "Picture shape",
+      "group": "Display",
+      "help": "Widescreen adds more at the sides; movies keep their original shape.",
+      "choices": [
+        {
+          "label": "4:3 (original)",
+          "set": {
+            "PS2X_WIDESCREEN": "0",
+            "TF_ASPECT": "screen"
+          }
+        },
+        {
+          "label": "16:9",
+          "set": {
+            "PS2X_WIDESCREEN": "1",
+            "TF_ASPECT": "16:9"
+          }
+        },
+        {
+          "label": "21:9",
+          "set": {
+            "PS2X_WIDESCREEN": "1",
+            "TF_ASPECT": "21:9"
+          }
+        },
+        {
+          "label": "Match the window",
+          "set": {
+            "PS2X_WIDESCREEN": "1",
+            "TF_ASPECT": "screen"
+          }
+        },
+        {
+          "label": "2.4:1",
+          "set": {
+            "PS2X_WIDESCREEN": "1",
+            "TF_ASPECT": "2.4"
+          }
+        }
+      ],
+      "defaults": {
+        "PS2X_WIDESCREEN": "1",
+        "TF_ASPECT": "screen"
+      }
+    },
+    {
+      "id": "fov",
+      "label": "Field of view",
+      "group": "Display",
+      "choices": [
+        {
+          "label": "90%",
+          "set": {
+            "TF_FOV": "0.9"
+          }
+        },
+        {
+          "label": "100% (original)",
+          "set": {
+            "TF_FOV": "1"
+          }
+        },
+        {
+          "label": "110%",
+          "set": {
+            "TF_FOV": "1.1"
+          }
+        },
+        {
+          "label": "120%",
+          "set": {
+            "TF_FOV": "1.2"
+          }
+        },
+        {
+          "label": "130%",
+          "set": {
+            "TF_FOV": "1.3"
+          }
+        },
+        {
+          "label": "140%",
+          "set": {
+            "TF_FOV": "1.4"
+          }
+        }
+      ],
+      "defaults": {
+        "TF_FOV": "1"
+      }
+    },
+    {
+      "id": "fps",
+      "label": "Frame rate cap",
+      "group": "Graphics",
+      "help": "Limits drawing while the game keeps its true speed.",
+      "choices": [
+        {
+          "label": "30 fps",
+          "set": {
+            "TF_FPS_CAP": "30"
+          }
+        },
+        {
+          "label": "60 fps",
+          "set": {
+            "TF_FPS_CAP": "60"
+          }
+        },
+        {
+          "label": "90 fps",
+          "set": {
+            "TF_FPS_CAP": "90"
+          }
+        },
+        {
+          "label": "120 fps",
+          "set": {
+            "TF_FPS_CAP": "120"
+          }
+        },
+        {
+          "label": "144 fps",
+          "set": {
+            "TF_FPS_CAP": "144"
+          }
+        },
+        {
+          "label": "165 fps",
+          "set": {
+            "TF_FPS_CAP": "165"
+          }
+        },
+        {
+          "label": "240 fps",
+          "set": {
+            "TF_FPS_CAP": "240"
+          }
+        },
+        {
+          "label": "Unlimited",
+          "set": {
+            "TF_FPS_CAP": "0"
+          }
+        }
+      ],
+      "defaults": {
+        "TF_FPS_CAP": "240"
+      }
+    },
+    {
+      "id": "quality",
+      "label": "Graphics quality",
+      "group": "Graphics",
+      "help": "Controls texture filtering and HD texture size; takes effect after restarting.",
+      "choices": [
+        {
+          "label": "Automatic",
+          "set": {
+            "TF_NATIVE_QUALITY": "auto"
+          }
+        },
+        {
+          "label": "Low",
+          "set": {
+            "TF_NATIVE_QUALITY": "low"
+          }
+        },
+        {
+          "label": "Medium",
+          "set": {
+            "TF_NATIVE_QUALITY": "medium"
+          }
+        },
+        {
+          "label": "High",
+          "set": {
+            "TF_NATIVE_QUALITY": "high"
+          }
+        },
+        {
+          "label": "Ultra",
+          "set": {
+            "TF_NATIVE_QUALITY": "ultra"
+          }
+        }
+      ],
+      "defaults": {
+        "TF_NATIVE_QUALITY": "auto"
+      }
+    },
+    {
+      "id": "aa",
+      "label": "Anti-aliasing",
+      "group": "Graphics",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "TF_NATIVE_AA": "0"
+          }
+        },
+        {
+          "label": "FXAA",
+          "set": {
+            "TF_NATIVE_AA": "1"
+          }
+        },
+        {
+          "label": "SMAA 1x",
+          "set": {
+            "TF_NATIVE_AA": "2"
+          }
+        }
+      ],
+      "defaults": {
+        "TF_NATIVE_AA": "1"
+      }
+    },
+    {
+      "id": "ssaa",
+      "label": "Supersampling",
+      "group": "Graphics",
+      "help": "Draws at 1.5 times the resolution for smoother edges; needs more GPU power.",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "TF_NATIVE_SSAA": "0"
+          }
+        },
+        {
+          "label": "1.5x",
+          "set": {
+            "TF_NATIVE_SSAA": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "TF_NATIVE_SSAA": "0"
+      }
+    },
+    {
+      "id": "pad",
+      "label": "Controller backend",
+      "group": "Controls",
+      "help": "Use Other gamepads when Steam Input handles your PlayStation controller.",
+      "choices": [
+        {
+          "label": "Automatic",
+          "set": {
+            "PS2X_GAMEPAD_BACKEND": "auto"
+          }
+        },
+        {
+          "label": "PlayStation only",
+          "set": {
+            "PS2X_GAMEPAD_BACKEND": "sony"
+          }
+        },
+        {
+          "label": "Other gamepads",
+          "set": {
+            "PS2X_GAMEPAD_BACKEND": "glfw"
+          }
+        }
+      ],
+      "defaults": {
+        "PS2X_GAMEPAD_BACKEND": "auto"
+      }
+    },
+    {
+      "id": "rumble",
+      "label": "Vibration",
+      "group": "Controls",
+      "choices": [
+        {
+          "label": "Off",
+          "set": {
+            "PS2X_SONYPAD_RUMBLE": "0"
+          }
+        },
+        {
+          "label": "25%",
+          "set": {
+            "PS2X_SONYPAD_RUMBLE": "25"
+          }
+        },
+        {
+          "label": "50%",
+          "set": {
+            "PS2X_SONYPAD_RUMBLE": "50"
+          }
+        },
+        {
+          "label": "75%",
+          "set": {
+            "PS2X_SONYPAD_RUMBLE": "75"
+          }
+        },
+        {
+          "label": "100%",
+          "set": {
+            "PS2X_SONYPAD_RUMBLE": "100"
+          }
+        }
+      ],
+      "defaults": {
+        "PS2X_SONYPAD_RUMBLE": "100"
+      }
+    }
+  ]
+}

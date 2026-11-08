@@ -77,6 +77,8 @@ if ($DryRun) {
     Write-Host "Existing setup releases for v$($version): $(if ($mine) { $mine -join ', ' } else { 'none' })"
     exit 0
 }
-& gh release create $tag $Exe @repoArgs --target $Commit --title $title --notes $notes --latest
+$zip = & (Join-Path $PSScriptRoot 'package_recomplauncher.ps1') -Exe $Exe
+if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) { throw 'RecompLauncher package was not created' }
+& gh release create $tag $Exe $zip @repoArgs --target $Commit --title $title --notes $notes --latest
 if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
 Write-Host "publish_release: $tag published."

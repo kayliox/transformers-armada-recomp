@@ -154,6 +154,11 @@ Prefer the command line, or want to build it yourself? See **[docs/BUILDING.md](
 
 ## Play from Steam, another launcher, or a Steam Deck
 
+**RecompLauncher:** use the Windows ZIP from Releases. It includes the setup and a
+`recomplauncher.json` manifest, so [RecompLauncher](https://github.com/elripalda/RecompLauncher)
+can build from your USA disc, show settings and back up saves. See
+[the integration guide](docs/RECOMPLAUNCHER.md).
+
 Once the game is built, starting `tfa-setup.exe` again starts the game itself, so a launcher such as
 [Quiver](https://quiverlauncher.com) that keeps the setup can use it as the game's Play button. Hold **Shift** while
 starting it to open the setup's window instead (updates, repair).

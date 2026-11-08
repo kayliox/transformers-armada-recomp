@@ -19,6 +19,7 @@
 #![windows_subsystem = "windows"]
 
 mod winapi;
+mod launcher;
 
 use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
 use std::io::{BufRead, BufReader};
@@ -250,6 +251,8 @@ impl App {
             update: self.update,
             play: self.play,
             wait_pid: self.wait_pid,
+            source_ref: None,
+            managed: false,
         };
         std::thread::spawn(move || {
             let result = job.run(&tx);
@@ -382,6 +385,8 @@ struct Job {
     update: bool,
     play: bool,
     wait_pid: u32,
+    source_ref: Option<String>, // RecompLauncher releases build the source embedded by CI.
+    managed: bool,             // no standalone shortcuts or remembered install folder
 }
 
 impl Job {
@@ -448,7 +453,20 @@ Git could not be installed or found. Install Git from git-scm.com and run the se
 
         let _ = tx.send(Msg::Step(STEP_DOWNLOAD));
         let repo = self.folder.join(repo_name(&self.repo_url));
-        if repo.join(".git").exists() {
+        if self.managed {
+            // Settings may already exist here: initialize around them rather than requiring an
+            // empty clone destination. Checkout refuses conflicting files instead of deleting them.
+            let r = repo.to_string_lossy().to_string();
+            if !repo.join(".git").exists() {
+                std::fs::create_dir_all(&repo).map_err(|e| e.to_string())?;
+                self.exec("git", &["init", &r], None, &path_env, tx, STEP_DOWNLOAD, &log)?;
+                self.exec("git", &["-C", &r, "remote", "add", "origin", &self.repo_url], None, &path_env, tx, STEP_DOWNLOAD, &log)?;
+            }
+            let revision = self.source_ref.as_deref().unwrap_or("HEAD");
+            self.exec("git", &["-C", &r, "fetch", "--depth", "1", &self.repo_url, revision], None, &path_env, tx, STEP_DOWNLOAD, &log)?;
+            self.exec("git", &["-C", &r, "checkout", "--detach", "FETCH_HEAD"], None, &path_env, tx, STEP_DOWNLOAD, &log)?;
+            self.exec("git", &["-C", &r, "submodule", "update", "--init", "--recursive"], None, &path_env, tx, STEP_DOWNLOAD, &log)?;
+        } else if repo.join(".git").exists() {
             let _ = tx.send(Msg::Detail(STEP_DOWNLOAD, "already there: the newest changes pulled".into()));
             let r = repo.to_string_lossy().to_string();
             // Edits in the install folder (a player's, or an AI helper's fix) would stop the pull:
@@ -482,9 +500,9 @@ Git could not be installed or found. Install Git from git-scm.com and run the se
             match self.exec("powershell", &refs, Some(&repo), &path_env, tx, STEP_TOOLS, &log) {
                 Ok(()) => {
                     copy_self(&self.folder);
-                    remember_folder(&self.folder);
+                    if !self.managed { remember_folder(&self.folder); }
                     let _ = std::fs::remove_file(self.folder.join(UNFINISHED_MARK));
-                    desktop_shortcut_once(&self.folder, &repo);
+                    if !self.managed { desktop_shortcut_once(&self.folder, &repo); }
                     return Ok(());
                 }
                 Err(e) if attempt == 0 && e.contains("prerequisites installed") => {
@@ -538,6 +556,7 @@ Git could not be installed or found. Install Git from git-scm.com and run the se
         cmd.env("GIT_CONFIG_KEY_1", "safe.directory").env("GIT_CONFIG_VALUE_1", "*");
         // (update.ps1 on a failure: no 30 s pause in a window nobody sees)
         cmd.env("TFA_UPDATE_NO_PAUSE", "1");
+        if self.managed { cmd.env("RECOMPLAUNCHER", "1"); }
         cmd.args(args).env("PATH", path_env).env_remove("PSModulePath").stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null()).creation_flags_no_window();
         if let Some(d) = dir {
             cmd.current_dir(d);
@@ -1462,6 +1481,11 @@ impl App {
 }
 
 fn main() -> eframe::Result {
+    // Handle the launcher's entry points before creating a window or probing the GPU.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--prepare" || a == "--launch") {
+        std::process::exit(launcher::run(&args));
+    }
     let mut viewport = egui::ViewportBuilder::default().with_inner_size([760.0, 560.0]).with_min_inner_size([640.0, 520.0]).with_title("Transformers Armada - Setup");
     // (tests on a worker: --offscreen puts the window where no screen is, out of the taskbar)
     if std::env::args().any(|a| a == "--offscreen") {

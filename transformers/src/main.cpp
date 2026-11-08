@@ -251,6 +251,16 @@ int main(int argc, char *argv[])
     // The settings panel's choices (settings.ini, F5 while playing) into the environment before
     // anything reads it: a variable already set wins (ps2_settings.h).
     ps2_settings::loadFile();
+    // Respect saved display choices; a first launch from the couch starts full screen.
+    if (const char *mode = std::getenv("RECOMPLAUNCHER_MODE"); mode && std::string(mode) == "bigpicture" &&
+        !std::getenv("PS2X_FULLSCREEN"))
+    {
+#if defined(_WIN32)
+        _putenv_s("PS2X_FULLSCREEN", "1");
+#else
+        setenv("PS2X_FULLSCREEN", "1", 0);
+#endif
+    }
     // (TODO 219) An HD set still being made: the sign that the game runs (the upscale waits), the window that carries on
     // with it when nothing does, and the watcher that tells the renderer and the F1 menu (hd_progress.h).
     hd_progress::start();
