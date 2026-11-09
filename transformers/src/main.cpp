@@ -333,6 +333,10 @@ int main(int argc, char *argv[])
     hd_progress::start();
 #if defined(__linux__)
     chooseGlDriver(); // (after settings.ini: TF_ZINK there counts; before any GL)
+    // Steam's Gaming Mode (gamescope, a Steam Deck): full screen unless settings.ini says otherwise - a window there is
+    // scaled up to the screen, the game and its F1 menu drawn at a lower resolution than the screen's.
+    if (std::getenv("GAMESCOPE_WAYLAND_DISPLAY"))
+        setenv("PS2X_FULLSCREEN", "1", 0);
 #endif
     // (TODO 163) The renderer the settings choose by default: the native one (N1, the port's own - Emulated stays a
     // choice). Set before anything reads TF_RENDERER (the scale below, the native renderer's install, VU1's); a

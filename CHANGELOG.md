@@ -18,6 +18,10 @@
   text and numbers it formats come out as on Windows.
 - Linux: the main menu has a Quit Game item, as PC games do.
 - Steam Deck: the button prompts show the Deck's A / B / X / Y (the bundle carries the sharp fonts and prompts).
+- Linux: the F1 menu uses the system's own font (Noto Sans or DejaVu Sans) instead of a blocky pixel font, and on a
+  handheld (a Steam Deck) its text is a third larger.
+- Steam Deck (Gaming Mode): the game starts full screen, at the screen's own resolution (Display mode in F1 still
+  decides once you change it).
 
 **Fixed**
 - The first level (Amazon Basin) no longer stops with "Generic fatal error" on Linux: a C library function the game

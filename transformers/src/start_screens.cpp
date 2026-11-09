@@ -377,21 +377,25 @@ namespace start_screens
         void startMenuUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
 #if !defined(_WIN32)
-            // The front end's shared list already has room for seven rows; its fifth is unused here.
+            // The front end's shared list already has room for seven rows; its fifth is unused here. State 0 too: the
+            // main list starts in it (its first ~16 frames) and returns to it briefly - the row came late without it.
             const uint32_t menu = getRegU32(ctx, 4);
-            if (g_quitInstalled && read32(rdram, menu + kMenuState) == kMainList &&
-                (read32(rdram, menu + kMenuCount) == kQuitRow || read32(rdram, menu + kMenuCount) == kQuitRow + 1u))
+            const auto addQuitRow = [&]
             {
-                if (uint8_t *count = getMemPtr(rdram, menu + kMenuCount))
+                const uint32_t state = read32(rdram, menu + kMenuState), count = read32(rdram, menu + kMenuCount);
+                if (!g_quitInstalled || (state != kMainList && state != 0u) || (count != kQuitRow && count != kQuitRow + 1u))
+                    return;
+                if (uint8_t *at = getMemPtr(rdram, menu + kMenuCount))
                 {
                     const uint32_t five = kQuitRow + 1u;
-                    std::memcpy(count, &five, sizeof(five));
+                    std::memcpy(at, &five, sizeof(five));
                 }
                 if (uint8_t *skip = getMemPtr(rdram, menu + 0x828u + kQuitRow))
                     *skip = 0u;
                 if (uint8_t *slider = getMemPtr(rdram, menu + 0x584u + kQuitRow))
                     *slider = 0u;
-            }
+            };
+            addQuitRow();
 #endif
 
             if (!g_menuReached)
