@@ -9133,6 +9133,18 @@ namespace
         }
         guest_code::writeAll(runtime.memory().getRDRAM());
     }
+
+    // The PAL release (SLES-52388): only what does not depend on the USA executable's addresses,
+    // until each hook's PAL address has been checked (transformers/config/versions/SLES-52388).
+    constexpr uint32_t kPalElfCrc32 = 0xA0DBA384u;
+
+    void applyTransformersPal(PS2Runtime &runtime)
+    {
+        ps2_stubs::setMpegGuestBuffersStream(true);
+        ps2_stubs::setVarArgSlotBytes(8u); // (GCC's variadic slots: see applyTransformers)
+        // (the SDK library is at the same addresses: the PAL analyzer names _sceSifLoadModuleBuffer here too)
+        runtime.registerFunction(kSifLoadModuleBuffer, sifLoadModuleBufferFromIop);
+    }
 }
 
 namespace tf::port
@@ -9251,3 +9263,4 @@ namespace tf::port
 }
 
 PS2_REGISTER_GAME_OVERRIDE("Transformers (USA)", "SLUS_206.68", kEntry, kElfCrc32, applyTransformers);
+PS2_REGISTER_GAME_OVERRIDE("Transformers (Europe)", "SLES_523.88", kEntry, kPalElfCrc32, applyTransformersPal);
