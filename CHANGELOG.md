@@ -7,8 +7,9 @@
   `./play.sh`, update with `./update.sh` (or F1 > About > Update now).
 - Linux: the native renderer works, drawn through Vulkan by vkd3d (Wine's Direct3D 12), with the HD textures and
   sharp fonts (`./tools/make_hd_textures.sh`). The build makes vkd3d itself; without the tools it needs (setup.sh
-  lists them) the game has the emulated renderer only. On graphics drivers with double precision the grass is drawn
-  by the CPU there for now (vkd3d cannot yet compile that version of the grass shader).
+  lists them) the game has the emulated renderer only. vkd3d cannot yet compile the grass shader's double-precision
+  version, so the grass uses its single-precision version there (checked on a Steam Deck: the same picture, 0.1% of
+  pixels apart at blade edges).
 - Linux: OpenGL goes through Mesa's Zink driver when the usual driver lacks a feature the GPU renderer needs (AMD,
   the Steam Deck). `TF_ZINK=0` turns this off.
 - Linux: the mouse in the menus, the F1 menu's typing and scrolling, Xbox-controller vibration and the HD movies work
