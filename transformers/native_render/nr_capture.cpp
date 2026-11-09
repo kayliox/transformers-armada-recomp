@@ -6637,6 +6637,22 @@ namespace nr
         startLivePicture();
     }
 
+    // (PAL, SLES-52388) The native renderer without the game's render calls wrapped - their addresses are the USA
+    // executable's until each is checked: what the game draws outside its frames (menus, text, films: looseGif), the
+    // device and the live picture. TF_NATIVE_RENDER=1 (and TF_NATIVE_LIVE=1 to show it); nothing otherwise.
+    void installDisplayOnly(PS2Runtime &runtime)
+    {
+        const char *env = std::getenv("TF_NATIVE_RENDER");
+        g_enabled = env && *env && *env != '0';
+        if (!g_enabled)
+            return;
+        g_displayRuntime = &runtime;
+        ps2_host_display::setGifObserver(&looseGif);
+        std::fprintf(stderr, "[native render] display only: the game's render calls are not wrapped (PAL)\n");
+        d3d::prepare();
+        startLivePicture();
+    }
+
     // (Roadmap N3b) The picture the display circuit shows, read from GS memory. The movies the game plays on their own
     // (the story intro, the level films: taFMVSystem with its pictures DMA'd into the display buffers, no frame of the
     // render device) never pass the native renderer; their pictures are host-to-local uploads, which the GS keeps in

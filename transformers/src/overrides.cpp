@@ -9201,6 +9201,7 @@ namespace
         native_disc::install(runtime);
         native_sound::install(runtime);
         native_sound::installState();
+        nr::installDisplayOnly(runtime); // (TF_NATIVE_RENDER=1: Direct3D 12 for what needs no game address)
     }
 }
 
