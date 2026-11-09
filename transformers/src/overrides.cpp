@@ -9209,6 +9209,12 @@ namespace
         native_disc::install(runtime);
         native_sound::install(runtime);
         native_sound::installState();
+        // The frame-end VU1 counter declared unobserved, as in the USA build (see applyTransformers): the PAL code reads it
+        // at the same place (0x25BF54: lwc1 from 0x1100C0B0, stored to gp-0x4088 = 0x6CF068, cleared).
+        ps2vif1::setUnobservedWord(0x1100C0B0u);
+        // VU1 batches whose routines are known run natively (vu1_native.cpp: by the VU1 program, no EE address - the
+        // microcode is the same in SLES_523.88); the warp tunnel's load screen is drawn natively through it.
+        tf::port::installVu1Native();
         // The native PC renderer (native_render/), as in the USA build: its 160 guest addresses checked against PAL's
         // function list - the same but for nine, given by TF_VA (game_version.h).
         nr::install(runtime);
