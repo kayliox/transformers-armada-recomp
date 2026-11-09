@@ -908,7 +908,7 @@ index fe1bb57..c58a14b 100644
      {
          std::lock_guard<std::mutex> lock(m_wakeMutex);
 diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
-index 9a50e70..b2f14e4 100644
+index 677c486..3118136 100644
 --- a/ps2xRuntime/src/lib/ps2_pad.cpp
 +++ b/ps2xRuntime/src/lib/ps2_pad.cpp
 @@ -45,6 +45,9 @@ namespace
@@ -944,7 +944,7 @@ index 9a50e70..b2f14e4 100644
  
  namespace
  {
-@@ -749,6 +761,20 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+@@ -930,6 +942,20 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
      }
  
      const int gamepad = live && !sonyPad && ps2x::sonypad::glfwGamepadsAllowed() ? firstGamepad() : -1;
@@ -965,7 +965,7 @@ index 9a50e70..b2f14e4 100644
      // (TODO 200: a GLFW gamepad gets the game's vibration through XInput, ps2_xinput_rumble.h)
      ps2x::xinput::notePadRead(gamepad >= 0);
      if (gamepad >= 0)
-@@ -787,11 +813,18 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+@@ -968,11 +994,18 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
      // The stick as the pad gives it: "the gamepad was used" (below) is judged on this, so the response's
      // lift does not let a resting stick's small drift take the prompts from the keyboard.
      const float padLx = lx, padLy = ly, padRx = rx, padRy = ry;
@@ -984,7 +984,7 @@ index 9a50e70..b2f14e4 100644
      }
  
      // The triggers as the pad has them (gamepadTriggers).
-@@ -903,5 +936,21 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+@@ -1088,5 +1121,21 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
      data[5] = axisByte(ry);
      data[6] = axisByte(lx);
      data[7] = axisByte(ly);
@@ -1045,10 +1045,10 @@ index a72105b..3323574 100644
  }
  
 diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
-index 89262ae..0aeff2c 100644
+index edd6bee..e1f2ee5 100644
 --- a/ps2xRuntime/src/lib/ps2_runtime.cpp
 +++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
-@@ -3759,6 +3759,9 @@ void PS2Runtime::run()
+@@ -3763,6 +3763,9 @@ void PS2Runtime::run()
          m_debugUiInitialized = false;
      }
      UnloadTexture(frameTex);

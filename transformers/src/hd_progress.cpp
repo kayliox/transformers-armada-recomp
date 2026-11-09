@@ -455,7 +455,7 @@ namespace hd_progress
         (void)whilePlaying; // (TODO 267: the game's own window never waits for the game - it is made while the game is open)
         return "Making them in a small window while the game is open. Closing the game stops it; the next start carries on.";
 #else
-        return "Run tools/make_hd_textures.ps1";
+        return "Run tools/make_hd_textures.sh";
 #endif
     }
 
