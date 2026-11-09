@@ -311,6 +311,35 @@ namespace nr
                     sharedH = sp.height;
                     has3D = sp.has3D;
                     d3d::sharedHeld(sp.index);
+                    // The import checked by what GL reads from it: Intel's driver (the N100's UHD Graphics, 2026-11-10)
+                    // imports the shared textures without an error and reads zeros - the window stayed black while the
+                    // game ran (a player's report). Every 10th picture is read back until one shows anything (a picture
+                    // the renderer made is opaque, even a black one); six reads of nothing but zeros (60 pictures, a
+                    // second or two) and the CPU hand-over takes over for the session. TF_NATIVE_SHARE_CHECK=0: no check.
+                    static const bool check = !(std::getenv("TF_NATIVE_SHARE_CHECK") && *std::getenv("TF_NATIVE_SHARE_CHECK") == '0');
+                    static int checked = 0, zeroReads = 0;
+                    static bool verified = false;
+                    if (check && !verified && share == 1 && ++checked % 10 == 1)
+                    {
+                        unsigned colour = 0u, alpha = 0u;
+                        if (glshare::readBack(im.texture, sp.width, sp.height, colour, alpha))
+                        {
+                            if (colour != 0u || alpha != 0u)
+                            {
+                                verified = true;
+                                std::fprintf(stderr, "[native render] the window reads the shared pictures (colour up to %u, alpha up to %u)\n",
+                                             colour, alpha);
+                            }
+                            else if (++zeroReads >= 6)
+                            {
+                                std::fprintf(stderr, "[native render] the window's GL reads only zeros from the shared pictures (%d pictures): "
+                                                     "the CPU hand-over from now on\n",
+                                             checked);
+                                share = -1;
+                                d3d::setSharedPictures(false);
+                            }
+                        }
+                    }
                 }
                 else
                     d3d::sharedHeld(sharedShown); // (not imported: the one still shown stays held - latestShared marked the new one)
