@@ -18,6 +18,7 @@
 #include "photo_mode.h"
 #include "view_turn.h"
 #include "fast_load.h"
+#include "language.h"
 #include "hq_rate.h"
 #include "hq_animation_tween.h"
 #include "port_ext.h"
@@ -7352,6 +7353,7 @@ namespace
         ultrawide::addSettings();   // Graphics: the picture's shape (ultrawide.h)
         native_sound::addSettings(); // Sound: the native sound server (native_sound.h)
         fast_load::addSettings();   // Gameplay: fast loading (fast_load.h)
+        language::addSettings();    // Gameplay: the PAL release's language (language.h)
         mod_menu::addSettings();    // Controls: driving with W / S (mod_menu.h)
         small_crosshair::addSettings(); // Display: the small crosshair (small_crosshair.h)
         crisp_text::addSettings();  // Display: sharp text and PS5 button symbols (crisp_text.h, TODO 119)
@@ -9043,6 +9045,7 @@ namespace
         // and picture rules only where they were before.
         if ((g_executorLoop = runtime.lookupFunction(kExecutorLoop)) != nullptr)
             runtime.registerFunction(kExecutorLoop, executorLoop);
+        language::install(runtime); // (the PAL release's language: language.h)
         if ((g_preGameEnd = runtime.lookupFunction(kPreGameEnd)) != nullptr)
             runtime.registerFunction(kPreGameEnd, preGameEnd);
         // (TF_CAR_LOG at the console's 30: the cars' step wrapped for its log alone - g_levelRate 0 passes it through)
