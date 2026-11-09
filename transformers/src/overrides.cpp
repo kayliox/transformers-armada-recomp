@@ -9153,8 +9153,36 @@ namespace
         g_genericFatal(rdram, ctx, runtime);
     }
 
+    // The PAL frame hook (the game's frame kick, 0x25D2B0 in both releases): only the scripted test input
+    // (TF_INPUT, TF_QUIT_VSYNC) for now; the USA hook's frame-rate, display and HUD work needs PAL addresses.
+    void frameKickPal(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint64_t tick = runtime->eeScheduler().currentVSyncTick();
+        if (g_quitTick != 0u && tick >= g_quitTick)
+            runtime->requestStop();
+        uint8_t sticks = 0u, stickPercent = 100u;
+        const uint16_t pressed = scriptedButtons(tick, sticks, stickPercent);
+        const bool overriding = pressed != 0u || sticks != 0u;
+        const auto axis = [sticks, stickPercent](unsigned low, unsigned high)
+        {
+            const int reach = 127 * stickPercent / 100;
+            return static_cast<uint8_t>((sticks & (1u << low)) ? 0x80 - reach - (stickPercent == 100u ? 1 : 0)
+                                                               : ((sticks & (1u << high)) ? 0x80 + reach : 0x80));
+        };
+        if (overriding)
+            ps2_stubs::setPadOverrideState(static_cast<uint16_t>(0xFFFFu & ~pressed), axis(3, 1), axis(0, 2), axis(7, 5),
+                                           axis(4, 6));
+        else if (g_padOverridden)
+            ps2_stubs::clearPadOverrideState();
+        g_padOverridden = overriding;
+        g_frameKick(rdram, ctx, runtime);
+    }
+
     void applyTransformersPal(PS2Runtime &runtime)
     {
+        parseInputScript(); // (TF_INPUT / TF_QUIT_VSYNC: the presses by VBlank tick)
+        if ((g_frameKick = runtime.lookupFunction(kFrameKick)) != nullptr)
+            runtime.registerFunction(kFrameKick, frameKickPal);
         ps2_stubs::setMpegGuestBuffersStream(true);
         ps2_stubs::setVarArgSlotBytes(8u); // (GCC's variadic slots: see applyTransformers)
         // (the SDK library is at the same addresses: the PAL analyzer names _sceSifLoadModuleBuffer here too)
