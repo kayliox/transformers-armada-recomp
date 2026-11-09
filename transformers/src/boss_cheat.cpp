@@ -30,12 +30,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 namespace boss_cheat
 {
     namespace
     {
-        constexpr uint32_t kTakeDamage = 0x003DB740u;      // taActorEvenSimpler::TakeDamage(actor, details)
+        constexpr uint32_t kTakeDamage = TF_GA(0x003DB740u);      // taActorEvenSimpler::TakeDamage(actor, details)
         constexpr uint32_t kCheatManager = 0x006CFDF0u;    // -> the cheat codes (0x54 bytes), entered[] from +0x34
         constexpr uint32_t kOneHitKills = 0x34u + 25u;     // code 25: one-hit kills
         constexpr uint32_t kBossVtables[] = {0x006C05D0u, 0x006C07F0u, 0x006C0A50u, 0x006C80D0u}; // Megatron, Starscream, Cyclonus, Tidal Wave

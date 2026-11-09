@@ -50,6 +50,7 @@
 
 #include "raylib.h"
 #include "runtime/ps2_sony_pad.h"
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 // profiler.cpp (Windows): the window's own clicks and wheel since the last call, and the cursor hidden for a controller
 // (TODO 175).
@@ -106,12 +107,12 @@ namespace menu_mouse
         constexpr uint32_t kBaseUpdate = 0x001A0C20u; // (the ring's own slot 16; the others call it)
         OwnScreen g_own[] = {
             {kBaseUpdate, 0x006BD8F0u, "taScreenPrGRing", Kind::Ring, nullptr},
-            {0x003F6E90u, 0x006BD880u, "taScreenPrGRingCharacterSelect", Kind::Ring, nullptr},
-            {0x004F1720u, 0x006C4410u, "taScreenPrGRingLevelSelect", Kind::Ring, nullptr},
-            {0x004EEA00u, 0x006C4360u, "taScreenPrGWarpGate", Kind::Ring, nullptr},
-            {0x004E3C70u, 0x006C3E40u, "taScreenPrGRingMiniconSelect", Kind::Ring, nullptr},
-            {0x004E5D10u, 0x006C3ED0u, "taScreenPrGRingMiniconButtonSelect", Kind::Grid, nullptr},
-            {0x003F4A50u, 0x006BD810u, "taScreenPrGHQComm", Kind::Confirm, nullptr},
+            {TF_GA(0x003F6E90u), 0x006BD880u, "taScreenPrGRingCharacterSelect", Kind::Ring, nullptr},
+            {TF_GA(0x004F1720u), 0x006C4410u, "taScreenPrGRingLevelSelect", Kind::Ring, nullptr},
+            {TF_GA(0x004EEA00u), 0x006C4360u, "taScreenPrGWarpGate", Kind::Ring, nullptr},
+            {TF_GA(0x004E3C70u), 0x006C3E40u, "taScreenPrGRingMiniconSelect", Kind::Ring, nullptr},
+            {TF_GA(0x004E5D10u), 0x006C3ED0u, "taScreenPrGRingMiniconButtonSelect", Kind::Grid, nullptr},
+            {TF_GA(0x003F4A50u), 0x006BD810u, "taScreenPrGHQComm", Kind::Confirm, nullptr},
             {0x0033B690u, 0x006B77C0u, "taScreenPrGTitle", Kind::Title, nullptr},
         };
         constexpr uint64_t kOwnStale = 6u; // game frames an update may be missed (it can yield inside 0x1A0C20)

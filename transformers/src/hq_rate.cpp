@@ -30,6 +30,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 namespace hq_rate
 {
@@ -262,7 +263,7 @@ namespace hq_rate
         // gave them (kept here; a field that no longer holds what was written was set by the game
         // again), and put back when the call returns - or left until the next call when it stops
         // inside a callee (it goes on later outside this wrapper).
-        constexpr uint32_t kMovingObjectUpdate = 0x004462E0u;
+        constexpr uint32_t kMovingObjectUpdate = TF_GA(0x004462E0u);
         constexpr uint32_t kFieldOffsets[3] = {0xA4u, 0xA8u, 0xACu};
         constexpr uint32_t kSpinning = 0xB9u;
         struct Fields
@@ -326,7 +327,7 @@ namespace hq_rate
         // 1/R s, (1 - speed/(29.97 R/30))^(R/30) - slower, and much slower for a fast camera).
         // The frame's dt is made the one that keeps what 30/R of a console frame keeps: the same
         // ease, the same time, at every rate.
-        constexpr uint32_t kCameraUpdate = 0x00422890u, kCameraSpeed = 0x80u;
+        constexpr uint32_t kCameraUpdate = TF_GA(0x00422890u), kCameraSpeed = 0x80u;
         void cameraUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             static PS2Runtime::RecompiledFunction original = decomp::original(kCameraUpdate);
@@ -352,7 +353,7 @@ namespace hq_rate
         // for frames of 1/R s: once a frame (frame(), below) the scroll is moved back by 4 x (1 - 30/R) when the game
         // moved it since (the update's call often stops inside its callee 0x1A0C20 and goes on outside a wrapper, so
         // the wrapper only notes which object it is); left alone at 0 (the fade-out's end puts it back to 0).
-        constexpr uint32_t kWarpGateUpdate = 0x004EEA00u, kWarpGateScroll = 0x70u;
+        constexpr uint32_t kWarpGateUpdate = TF_GA(0x004EEA00u), kWarpGateScroll = 0x70u;
         uint32_t g_warpGate = 0u;   // (the screen object, noted by the update's wrapper)
         float g_warpScroll = 0.0f;  // (its scroll as this left it last)
         void warpGateUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

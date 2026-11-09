@@ -18,6 +18,7 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 namespace ultrawide
 {
@@ -38,7 +39,7 @@ namespace ultrawide
 
         // The calls (jal / jalr addresses) whose result is widened, and the callers that decide it
         // for the calls made inside the two frustum builders.
-        constexpr uint32_t kFovCalls[] = {0x0020C7E4u, 0x0020B570u, 0x00358F38u, 0x003542C8u, 0x001BFB04u,
+        constexpr uint32_t kFovCalls[] = {0x0020C7E4u, 0x0020B570u, TF_GA(0x00358F38u), TF_GA(0x003542C8u), 0x001BFB04u,
                                           0x002B8B2Cu, 0x002B8E34u, 0x002B8E50u, 0x002B8EA0u};
         // Both frustum builders take their HORIZONTAL half-angle from the field of view and the
         // vertical one from it times the display mode's pixel aspect (vlCameraSpaceFrustum: +8/+C
@@ -52,14 +53,14 @@ namespace ultrawide
         constexpr uint32_t kFovInCameraFrustum = 0x001F4B38u;
         constexpr uint32_t kCameraFrustumForFov[] = {0x002B8A1Cu,  // taRenderingInfo (effects, particles)
                                                      0x002191A4u,  // the scene traversal (culling)
-                                                     0x0042A868u}; // the eco code (culling)
-        constexpr uint32_t kCameraFrustumForCulling[] = {0x002191A4u, 0x0042A868u};
+                                                     TF_GA(0x0042A868u)}; // the eco code (culling)
+        constexpr uint32_t kCameraFrustumForCulling[] = {0x002191A4u, TF_GA(0x0042A868u)};
         constexpr uint32_t kFovInBuildFrustum = 0x0020AC28u;
-        constexpr uint32_t kBuildFrustumForFov[] = {0x00270618u, 0x00273F64u, 0x004368C4u, 0x00564E4Cu, // water, sky, eco globe, rain
-                                                    0x002B3FD0u, 0x002B40B0u, 0x005BAFA8u,              // in-view tests
-                                                    0x004296F4u, 0x0042E42Cu};                          // the eco code (culling)
-        constexpr uint32_t kBuildFrustumForCulling[] = {0x004296F4u, 0x0042E42Cu}; // the eco code's (trees, plants)
-        constexpr uint32_t kTanCall = 0x0042E3BCu;                                  // ecoQuadtree::Render
+        constexpr uint32_t kBuildFrustumForFov[] = {0x00270618u, 0x00273F64u, TF_GA(0x004368C4u), TF_GA(0x00564E4Cu), // water, sky, eco globe, rain
+                                                    0x002B3FD0u, 0x002B40B0u, TF_GA(0x005BAFA8u),              // in-view tests
+                                                    TF_GA(0x004296F4u), TF_GA(0x0042E42Cu)};                          // the eco code (culling)
+        constexpr uint32_t kBuildFrustumForCulling[] = {TF_GA(0x004296F4u), TF_GA(0x0042E42Cu)}; // the eco code's (trees, plants)
+        constexpr uint32_t kTanCall = TF_GA(0x0042E3BCu);                                  // ecoQuadtree::Render
         constexpr uint32_t kAspectInBuildFrustum = 0x0020AC04u;
         constexpr uint32_t kAspectInCameraFrustum = 0x001F4BB0u;
 

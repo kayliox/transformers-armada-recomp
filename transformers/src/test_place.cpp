@@ -20,12 +20,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 namespace test_place
 {
     namespace
     {
-        constexpr uint32_t kDataUpdate = 0x0047D9A0u;
+        constexpr uint32_t kDataUpdate = TF_GA(0x0047D9A0u);
         constexpr uint32_t kSetPositionSlot = 0x80u, kContextHeading = 0x11Cu;
 
         struct Place

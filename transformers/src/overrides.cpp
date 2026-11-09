@@ -75,6 +75,7 @@
 #include <utility>
 #include <tuple>
 #include <vector>
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 // Hooks exported by the runtime (ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp, MPEG.cpp, LibC.cpp).
 namespace ps2_stubs
@@ -450,12 +451,12 @@ namespace
     // meet - lower the more frames a second (under water about 26 at the console's 30, 12.5 at 60, 3 at 240 - stuck at the
     // walk's least speed, never a run). At the level's rate the factor is 0.99^(30/R), as the console's frame would have it.
     // TF_WADE_RATE=0: the game's 0.99 a frame.
-    constexpr uint32_t kSetVelocity = 0x0047C830u, kWadeSlowA = 0x0028D728u, kWadeSlowB = 0x0028DCA8u;
+    constexpr uint32_t kSetVelocity = TF_GA(0x0047C830u), kWadeSlowA = 0x0028D728u, kWadeSlowB = 0x0028DCA8u;
     // (rate sweep, 2026-11-08) taTransformerStateLook (0x474000 -> 0x473D90): while its timer +0x8C runs (counted down in
     // seconds) the controller's velocity times 0.8 (gp-0x75E0) is given to SetVelocity each frame (0x473E30, return
     // 0x473E38): the same per-frame factor - at 240 the move died away in an eighth of the time. 0.8^(30/R) at R.
     // TF_LOOK_RATE=0: the game's 0.8 a frame.
-    constexpr uint32_t kLookSlow = 0x00473E38u;
+    constexpr uint32_t kLookSlow = TF_GA(0x00473E38u);
     PS2Runtime::RecompiledFunction g_setVelocity = nullptr;
     void setVelocityAtRate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -506,7 +507,7 @@ namespace
     // At R the share given is 1 - (1 - t)^(30/R): as far in a 30th of a second as at 30. TF_LERP_RATE=0: as before.
     float shareAtLevelRate(float atThirty); // (below)
     constexpr uint32_t kLerp = 0x001B0440u, kSlerp = 0x001AF4C0u;
-    constexpr uint32_t kLerpAtRate[] = {0x002D1124u, 0x002CE25Cu, 0x00480BC4u};
+    constexpr uint32_t kLerpAtRate[] = {0x002D1124u, 0x002CE25Cu, TF_GA(0x00480BC4u)};
     PS2Runtime::RecompiledFunction g_lerp = nullptr, g_slerp = nullptr;
     void lerpShareAtRate(R5900Context *ctx)
     {
@@ -954,7 +955,7 @@ namespace
     // the player, which keeps its position - x, y, z with z up, about 4 units above its
     // feet - in itself.
     constexpr uint32_t kGetPosition = 0x001AFD40u;
-    constexpr uint32_t kListenerPositionCaller = 0x0042E3F0u; // the return address of that call
+    constexpr uint32_t kListenerPositionCaller = TF_GA(0x0042E3F0u); // the return address of that call
     constexpr uint32_t kCameraTarget = 0x74u;                 // in the camera object
     constexpr uint32_t kPlayerPositionField = 0x620u;         // in the player
     PS2Runtime::RecompiledFunction g_getPosition = nullptr;
@@ -1643,7 +1644,7 @@ namespace
     // as 0x1AD450 keeps it. Mouse up looks up (the pitch goes down), mouse right turns right
     // (the yaw down). Where another camera turns (first person, gliding, ...), the mouse goes
     // through the stick as before (mouseLook below).
-    constexpr uint32_t kCameraTurn = 0x0046D410u;
+    constexpr uint32_t kCameraTurn = TF_GA(0x0046D410u);
     constexpr uint32_t kCameraData = 0x00717430u;      // 0x34F2B0's
     constexpr uint32_t kPitchLimitScale = 0x006CBB4Cu; // gp-0x75A4
     constexpr uint32_t kTurnsPerRadian = 0x006CB144u;  // gp-0x7FAC (0x1AD450)
@@ -2422,7 +2423,7 @@ namespace
     // in the states. At the PC rate the share is made for the frame (shareAtLevelRate) -
     // remembered, so the next frame starts from the state's own value again, unless a state
     // set another.
-    constexpr uint32_t kControllerMove = 0x0047D6C0u;
+    constexpr uint32_t kControllerMove = TF_GA(0x0047D6C0u);
     constexpr uint32_t kControllerTurnShare = 0x1F0u;
     PS2Runtime::RecompiledFunction g_controllerMove = nullptr;
     struct TurnShare
@@ -2715,7 +2716,7 @@ namespace
     // the step is half, and a jump went 4% higher (5.80 instead of 5.60 in place). The first
     // frame in the air at the PC rate the velocity takes another g (1/30 - dt) / 2 = g dt
     // (R/30 - 1) / 2: then every jump and fall follows the arc it has at 30.
-    constexpr uint32_t kAirborneUpdate = 0x00470F70u;
+    constexpr uint32_t kAirborneUpdate = TF_GA(0x00470F70u);
     constexpr uint32_t kGravity = 0x006CF9B4u;
     constexpr uint32_t kControllerVerticalVelocity = 0x28u;
     PS2Runtime::RecompiledFunction g_airborneUpdate = nullptr;
@@ -2766,9 +2767,9 @@ namespace
     // at 30: a contact adds 30/R to a credit, and only one that brings it to 1 cuts the speed
     // (at 60 every other one); the others only turn the frame's movement along the surface,
     // and the next frame starts from the speed before it.
-    constexpr uint32_t kSetWorldVelocity = 0x0047C720u;
+    constexpr uint32_t kSetWorldVelocity = TF_GA(0x0047C720u);
     constexpr uint32_t kContactVelocityReturn = 0x0028C154u;
-    constexpr uint32_t kSpeedFromVelocity = 0x0047C500u;
+    constexpr uint32_t kSpeedFromVelocity = TF_GA(0x0047C500u);
     constexpr uint32_t kControllerVelocity = 0x20u, kControllerSpeed = 0x44u;
     PS2Runtime::RecompiledFunction g_setWorldVelocity = nullptr, g_speedFromVelocity = nullptr;
     struct ContactSpeed
@@ -2806,7 +2807,7 @@ namespace
     // against its size); with the call left out it settled as at 30. At the PC rate the velocity is given as at 30:
     // once every 30th of a second, the mean of the frames' velocities (= the move over that 30th / its time); the
     // frames between keep it. TF_RAGDOLL_RATE=0: as before.
-    constexpr uint32_t kRagdollVelocityReturn = 0x004777D0u;
+    constexpr uint32_t kRagdollVelocityReturn = TF_GA(0x004777D0u);
     struct RagdollVelocity
     {
         uint32_t controller = 0u;
@@ -2930,7 +2931,7 @@ namespace
     // multiple of 30 the part of a frame the last cycle ran over carries over instead of the
     // half, so that on average a cycle lasts as at 30. At 30 the game's own.
     // TF_CONSOLE_COOLDOWNS=0 leaves them to the game; TF_COOLDOWN_LOG=1 logs each one retimed.
-    constexpr uint32_t kAbilityUpdate = 0x003EF1F0u;
+    constexpr uint32_t kAbilityUpdate = TF_GA(0x003EF1F0u);
     constexpr uint32_t kAbilityTimer = 0x44u;
     PS2Runtime::RecompiledFunction g_abilityUpdate = nullptr;
     struct CooldownSeen
@@ -3005,9 +3006,9 @@ namespace
     // rate the angles the update asks for are 30/R of theirs (from its calls only: by the return
     // address), as far a 30th of a second as at 30. TF_CONSOLE_STEERING=0 leaves them.
     constexpr uint32_t kTurnToward = 0x002A46A0u, kAxisAngle = 0x001AF810u;
-    constexpr uint32_t kMissileTurns[] = {0x003D274Cu, 0x003D2D48u, 0x003D341Cu,  // launch, homing, recovering
-                                          0x003D2ADCu, 0x003D2C70u, 0x003D302Cu, 0x003D31B4u}; // (behind a flag nothing sets)
-    constexpr uint32_t kMissileSpins[] = {0x003D2A50u, 0x003D2BE4u, 0x003D2FA0u, 0x003D3128u};
+    constexpr uint32_t kMissileTurns[] = {TF_GA(0x003D274Cu), TF_GA(0x003D2D48u), TF_GA(0x003D341Cu),  // launch, homing, recovering
+                                          TF_GA(0x003D2ADCu), TF_GA(0x003D2C70u), TF_GA(0x003D302Cu), TF_GA(0x003D31B4u)}; // (behind a flag nothing sets)
+    constexpr uint32_t kMissileSpins[] = {TF_GA(0x003D2A50u), TF_GA(0x003D2BE4u), TF_GA(0x003D2FA0u), TF_GA(0x003D3128u)};
     PS2Runtime::RecompiledFunction g_turnToward = nullptr, g_axisAngle = nullptr;
 
     template <size_t N>
@@ -4474,7 +4475,7 @@ namespace
     // scale (+0x3C, set from the detail-level store's camera scale by taDisplayList_StaticScene::Clear, 0x361AC0)
     // times that. TF_TERRAIN_DETAIL=<f>: the scale times f after each Clear (+0x40, the grass cover's eighth root, is
     // made before and stays the game's).
-    constexpr uint32_t kStaticSceneClear = 0x00361AC0u;
+    constexpr uint32_t kStaticSceneClear = TF_GA(0x00361AC0u);
     PS2Runtime::RecompiledFunction g_staticSceneClear = nullptr;
     std::atomic<float> g_terrainDetail{1.0f};
     void staticSceneClear(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -4531,7 +4532,7 @@ namespace
     // back slowly to the setting when there is room. A smaller reach is the game's own way of fewer trees:
     // the farthest go flat (sprite) and fade out first, nothing pops; the nearest are always the 3D ones.
     // TF_FOREST=old: the cap 400 and the reach the setting's, as before.
-    constexpr uint32_t kEcoCreateInstance = 0x004293C0u, kEcoDeleteAll = 0x00429260u;
+    constexpr uint32_t kEcoCreateInstance = TF_GA(0x004293C0u), kEcoDeleteAll = TF_GA(0x00429260u);
     constexpr uint32_t kEcoInstanceCount = 0x00733EE4u; // (the map's size)
     constexpr uint32_t kEcoCapWord = 0x006CD29Cu;       // (the patched compare in CreateInstance reads it)
     constexpr uint32_t kEcoNodePoolCount = 0x00731E64u; // (the node pool's size, 800: 0x695960)
@@ -4650,9 +4651,9 @@ namespace
     void ecoTimed(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const auto start = std::chrono::steady_clock::now();
-        if (Which == 0 && g_forestDiag && ctx->pc == 0x00430190u) // (not a resumed call)
+        if (Which == 0 && g_forestDiag && ctx->pc == TF_GA(0x00430190u)) // (not a resumed call)
             forestDiagLeaf(rdram, ctx);
-        if (Which == 1 && g_forestDiag && ctx->pc == 0x00429510u)
+        if (Which == 1 && g_forestDiag && ctx->pc == TF_GA(0x00429510u))
             g_fdInDraw = true;
         g_forestDepth += Which;
         (Which == 0 ? g_ecoLeafTrees : g_ecoDraw)(rdram, ctx, runtime);
@@ -5055,7 +5056,7 @@ namespace
     // at a1).
     void forestDiagSecondary(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        if (ctx->pc == 0x004332A0u) // (its one caller is the drawing, 0x429510)
+        if (ctx->pc == TF_GA(0x004332A0u)) // (its one caller is the drawing, 0x429510)
         {
             ++g_fdFrame.secCalls;
             g_fdFrame.secDistMax = std::max(g_fdFrame.secDistMax, ecoDistance(rdram, getRegU32(ctx, 5)));
@@ -5476,15 +5477,15 @@ namespace
             runtime.registerFunction(kEcoCreateInstance, ecoCreateInstance);
         if (g_ecoDeleteAll)
             runtime.registerFunction(kEcoDeleteAll, ecoDeleteAll);
-        if ((g_ecoLeafTrees = runtime.lookupFunction(0x00430190u)) != nullptr)
-            runtime.registerFunction(0x00430190u, ecoTimed<0>);
-        if ((g_ecoDraw = runtime.lookupFunction(0x00429510u)) != nullptr)
-            runtime.registerFunction(0x00429510u, ecoTimed<1>);
+        if ((g_ecoLeafTrees = runtime.lookupFunction(TF_GA(0x00430190u))) != nullptr)
+            runtime.registerFunction(TF_GA(0x00430190u), ecoTimed<0>);
+        if ((g_ecoDraw = runtime.lookupFunction(TF_GA(0x00429510u))) != nullptr)
+            runtime.registerFunction(TF_GA(0x00429510u), ecoTimed<1>);
         if (const char *diag = std::getenv("TF_FOREST_DIAG"); diag && *diag == '1')
         {
             g_forestDiag = true;
-            if ((g_fdSecondary = runtime.lookupFunction(0x004332A0u)) != nullptr)
-                runtime.registerFunction(0x004332A0u, forestDiagSecondary);
+            if ((g_fdSecondary = runtime.lookupFunction(TF_GA(0x004332A0u))) != nullptr)
+                runtime.registerFunction(TF_GA(0x004332A0u), forestDiagSecondary);
             if ((g_fdLod = runtime.lookupFunction(0x0026B260u)) != nullptr)
                 runtime.registerFunction(0x0026B260u, forestDiagLod);
             if ((g_fdLevel = runtime.lookupFunction(0x00213B30u)) != nullptr)
@@ -5494,12 +5495,12 @@ namespace
         }
         if (const char *split = std::getenv("TF_FOREST_SPLIT"); split && *split == '1')
         {
-            g_layoutRender = runtime.lookupFunction(0x004332A0u);
-            g_layoutDraw = runtime.lookupFunction(0x00432340u);
+            g_layoutRender = runtime.lookupFunction(TF_GA(0x004332A0u));
+            g_layoutDraw = runtime.lookupFunction(TF_GA(0x00432340u));
             if (g_layoutRender && g_layoutDraw)
             {
-                runtime.registerFunction(0x004332A0u, layoutTimed);
-                runtime.registerFunction(0x00432340u, layoutDrawTimed);
+                runtime.registerFunction(TF_GA(0x004332A0u), layoutTimed);
+                runtime.registerFunction(TF_GA(0x00432340u), layoutDrawTimed);
             }
             if ((g_meshSurfaceRender = runtime.lookupFunction(0x001FFC70u)) != nullptr) // (vlMeshSurface::vfunc_03, the mesh's render)
                 runtime.registerFunction(0x001FFC70u, meshSurfaceTimed);
@@ -5989,7 +5990,7 @@ namespace
         }
         // (the incidental objects' (0x33FEE0) pick: their squared distance from the camera object (*(gp-0x3DC0)) in $f20,
         // the object in $s2, the level kept at +0x168)
-        if (getRegU32(ctx, 31) == 0x0033FFD8u && getRegU32(ctx, 4) == 5u)
+        if (getRegU32(ctx, 31) == TF_GA(0x0033FFD8u) && getRegU32(ctx, 4) == 5u)
         {
             const uint32_t object = getRegU32(ctx, 18);
             const float d2 = ctx->f[20];
@@ -6370,7 +6371,7 @@ namespace
     // calls that node's Cull (vtable +0x10). With Enemy detail Full that Cull runs with the node cull's distance limit
     // and small-on-screen test lifted, as an animation actor's does (openActorCull, the model node's own +0x50) - the
     // model drawn at any distance, not only its glow. TF_LOD_CENSUS=1: each panel's model once - class, level, radius.
-    constexpr uint32_t kPickupPanelDraw = 0x0037C4C0u;
+    constexpr uint32_t kPickupPanelDraw = TF_GA(0x0037C4C0u);
     PS2Runtime::RecompiledFunction g_pickupPanelDraw = nullptr;
     ActorCullOpen openActorCull(uint8_t *rdram, R5900Context *ctx);
     void closeActorCull(uint8_t *rdram, uint32_t gp, const ActorCullOpen &o);
@@ -6413,7 +6414,7 @@ namespace
 
     // (TF_LOD_CENSUS=1) The pickup manager's Cull (0x00378B70: its pickups from +0x140, the next at +8): every 20 s
     // each pickup's class and position - where to put the player for a far look (TF_PLACE).
-    constexpr uint32_t kPickupManagerCull = 0x00378B70u;
+    constexpr uint32_t kPickupManagerCull = TF_GA(0x00378B70u);
     PS2Runtime::RecompiledFunction g_pickupManagerCull = nullptr;
     void pickupManagerCull(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -6688,13 +6689,13 @@ namespace
         bool zeroIsFull; // (false: counted on entry)
     };
     constexpr PoolCensusSite kPoolCensusSites[] = {
-        {0x0036A670u, "particle buffer take", true},   {0x003D4F50u, "projectile reserve", true},
-        {0x0040F610u, "surface impact take", true},    {0x0027B7F0u, "sound emitter take", true},
-        {0x002B4EB0u, "actor pool take", true},        {0x00525EF0u, "actor budget check", true},
+        {TF_GA(0x0036A670u), "particle buffer take", true},   {TF_GA(0x003D4F50u), "projectile reserve", true},
+        {TF_GA(0x0040F610u), "surface impact take", true},    {0x0027B7F0u, "sound emitter take", true},
+        {0x002B4EB0u, "actor pool take", true},        {TF_GA(0x00525EF0u), "actor budget check", true},
         {0x00106270u, "OUT OF MEMORY handler", false}, {0x00106620u, "generic fatal error", false},
         {0x002F90F0u, "tree collision add", false},
-        {0x005CD3D0u, "gib pool take", true},          {0x0035C320u, "decal add", false},
-        {0x002B46C0u, "actor block allocate", false},  {0x005A8170u, "display list clear", false},
+        {TF_GA(0x005CD3D0u), "gib pool take", true},          {TF_GA(0x0035C320u), "decal add", false},
+        {0x002B46C0u, "actor block allocate", false},  {TF_GA(0x005A8170u), "display list clear", false},
     };
     // (N7 step 2) The trees' collision (taEcoCollisionSystem): 0x2F90F0 adds a tree near the player to one array of
     // 150 instances (a0+4: its +0xC the count, +8 the entries) unless the tree stands in a cleared rectangle; at 150
@@ -7005,7 +7006,7 @@ namespace
             if (count >= 150u)
                 ++g_poolCensusEmpty[I];
         }
-        if (kPoolCensusSites[I].address == 0x0035C320u)
+        if (kPoolCensusSites[I].address == TF_GA(0x0035C320u))
         {
             const uint32_t set = getRegU32(ctx, 4), count = censusWord(rdram, set + 0x10u), size = censusWord(rdram, set + 0x24u);
             g_censusDecalSizeMax = std::max(g_censusDecalSizeMax, size);
@@ -7013,7 +7014,7 @@ namespace
             if (count + 1u > size)
                 ++g_censusDecalFull;
         }
-        if (kPoolCensusSites[I].address == 0x005A8170u)
+        if (kPoolCensusSites[I].address == TF_GA(0x005A8170u))
             censusDisplayListFree(rdram);
         g_poolCensusOriginal[I](rdram, ctx, runtime);
         if (kPoolCensusSites[I].address == 0x002B46C0u && ctx->pc == ra)
@@ -7033,10 +7034,10 @@ namespace
         if (kPoolCensusSites[I].zeroIsFull && empty) // (returned, and empty-handed)
         {
             ++g_poolCensusEmpty[I];
-            if (kPoolCensusSites[I].address == 0x00525EF0u)
+            if (kPoolCensusSites[I].address == TF_GA(0x00525EF0u))
                 poolCensusBudgetRefused(rdram, gp, a1);
         }
-        if (kPoolCensusSites[I].address == 0x00525EF0u)
+        if (kPoolCensusSites[I].address == TF_GA(0x00525EF0u))
             poolCensusPerPool(rdram, runtime, a1, !empty);
     }
     template <size_t... I>
@@ -8535,10 +8536,10 @@ namespace
         installDiffHooks(runtime);
         if (std::getenv("TF_STEALTH_LOG"))
         {
-            if ((g_suitCtor = runtime.lookupFunction(0x004E72F0u)) != nullptr)
-                runtime.registerFunction(0x004E72F0u, suitCtor);
-            if ((g_suitSetActive = runtime.lookupFunction(0x004E7290u)) != nullptr)
-                runtime.registerFunction(0x004E7290u, suitSetActive);
+            if ((g_suitCtor = runtime.lookupFunction(TF_GA(0x004E72F0u))) != nullptr)
+                runtime.registerFunction(TF_GA(0x004E72F0u), suitCtor);
+            if ((g_suitSetActive = runtime.lookupFunction(TF_GA(0x004E7290u))) != nullptr)
+                runtime.registerFunction(TF_GA(0x004E7290u), suitSetActive);
             std::fprintf(stderr, "[tf:stealth] hooks: constructor %s, SetActive %s\n", g_suitCtor ? "in" : "MISSING",
                          g_suitSetActive ? "in" : "MISSING");
         }
@@ -9139,87 +9140,8 @@ namespace
         guest_code::writeAll(runtime.memory().getRDRAM());
     }
 
-    // The PAL release (SLES-52388): only what does not depend on the USA executable's addresses,
-    // until each hook's PAL address has been checked (transformers/config/versions/SLES-52388).
+    // The PAL release (SLES-52388): the same hooks, its code addresses given by TF_GA (game_version.h).
     constexpr uint32_t kPalElfCrc32 = 0xA0DBA384u;
-
-    // The generic fatal error (0x106620, the same in both releases): who raised it.
-    constexpr uint32_t kGenericFatal = 0x00106620u;
-    PS2Runtime::RecompiledFunction g_genericFatal = nullptr;
-
-    void genericFatal(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        std::fprintf(stderr, "[tf] generic fatal error raised (vsync %llu, ra=%08x, a0=%08x a1=%08x)\n",
-                     static_cast<unsigned long long>(runtime->eeScheduler().currentVSyncTick()), getRegU32(ctx, 31),
-                     getRegU32(ctx, 4), getRegU32(ctx, 5));
-#if defined(_WIN32)
-        tfLogCallStack("generic fatal");
-#endif
-        g_genericFatal(rdram, ctx, runtime);
-    }
-
-    // The PAL frame hook (the game's frame kick, 0x25D2B0 in both releases): only the scripted test input
-    // (TF_INPUT, TF_QUIT_VSYNC) for now; the USA hook's frame-rate, display and HUD work needs PAL addresses.
-    void frameKickPal(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
-    {
-        const uint64_t tick = runtime->eeScheduler().currentVSyncTick();
-        if (g_quitTick != 0u && tick >= g_quitTick)
-            runtime->requestStop();
-        uint8_t sticks = 0u, stickPercent = 100u;
-        const uint16_t pressed = scriptedButtons(tick, sticks, stickPercent);
-        const bool overriding = pressed != 0u || sticks != 0u;
-        const auto axis = [sticks, stickPercent](unsigned low, unsigned high)
-        {
-            const int reach = 127 * stickPercent / 100;
-            return static_cast<uint8_t>((sticks & (1u << low)) ? 0x80 - reach - (stickPercent == 100u ? 1 : 0)
-                                                               : ((sticks & (1u << high)) ? 0x80 + reach : 0x80));
-        };
-        if (overriding)
-            ps2_stubs::setPadOverrideState(static_cast<uint16_t>(0xFFFFu & ~pressed), axis(3, 1), axis(0, 2), axis(7, 5),
-                                           axis(4, 6));
-        else if (g_padOverridden)
-            ps2_stubs::clearPadOverrideState();
-        g_padOverridden = overriding;
-        if (g_printFps)
-            printFrameRate(runtime); // (TF_FPS=1; the EE's work a frame reads 0 until the VBlank-wait hooks have PAL addresses)
-        g_frameKick(rdram, ctx, runtime);
-    }
-
-    void applyTransformersPal(PS2Runtime &runtime)
-    {
-        parseInputScript(); // (TF_INPUT / TF_QUIT_VSYNC: the presses by VBlank tick)
-        g_printFps = std::getenv("TF_FPS") != nullptr;
-        if ((g_frameKick = runtime.lookupFunction(kFrameKick)) != nullptr)
-            runtime.registerFunction(kFrameKick, frameKickPal);
-        ps2_stubs::setMpegGuestBuffersStream(true);
-        ps2_stubs::setVarArgSlotBytes(8u); // (GCC's variadic slots: see applyTransformers)
-        // (the SDK library is at the same addresses: the PAL analyzer names _sceSifLoadModuleBuffer here too)
-        runtime.registerFunction(kSifLoadModuleBuffer, sifLoadModuleBufferFromIop);
-        // (the fatal error screen starts at the same address in SLES_523.88: its message logged)
-        if ((g_errorScreen = runtime.lookupFunction(kErrorScreen)) != nullptr)
-            runtime.registerFunction(kErrorScreen, errorScreen);
-        file_trace::install(runtime); // TF_FILE_LOG=1 (flFile::Open is at the same address)
-        if ((g_genericFatal = runtime.lookupFunction(kGenericFatal)) != nullptr)
-            runtime.registerFunction(kGenericFatal, genericFatal);
-        // The sound server and TwoFish's disc reads on the host, as in the USA build. Their functions
-        // (0x1F0470, 0x1F0170, 0x1E8B20, 0x192FF0) start at the same addresses in SLES_523.88, and so does
-        // their data: with gp = 0x6D30F0 the PAL code reads the commander at 0x6CE8F4 and the EE clock at
-        // 0x6CE5B0 / 0x6CB1A4. On the emulated server the second movie (PMH_LOGO) got no sound stream and
-        // its player raised the generic fatal error.
-        native_disc::install(runtime);
-        native_sound::install(runtime);
-        native_sound::installState();
-        // The frame-end VU1 counter declared unobserved, as in the USA build (see applyTransformers): the PAL code reads it
-        // at the same place (0x25BF54: lwc1 from 0x1100C0B0, stored to gp-0x4088 = 0x6CF068, cleared).
-        ps2vif1::setUnobservedWord(0x1100C0B0u);
-        // VU1 batches whose routines are known run natively (vu1_native.cpp: by the VU1 program, no EE address - the
-        // microcode is the same in SLES_523.88); the warp tunnel's load screen is drawn natively through it.
-        tf::port::installVu1Native();
-        // The native PC renderer (native_render/), as in the USA build: its 160 guest addresses checked against PAL's
-        // function list - the same but for nine, given by TF_VA (game_version.h).
-        nr::install(runtime);
-        nr::n5::install(runtime);
-    }
 }
 
 namespace tf::port
@@ -9338,4 +9260,4 @@ namespace tf::port
 }
 
 PS2_REGISTER_GAME_OVERRIDE("Transformers (USA)", "SLUS_206.68", kEntry, kElfCrc32, applyTransformers);
-PS2_REGISTER_GAME_OVERRIDE("Transformers (Europe)", "SLES_523.88", kEntry, kPalElfCrc32, applyTransformersPal);
+PS2_REGISTER_GAME_OVERRIDE("Transformers (Europe)", "SLES_523.88", kEntry, kPalElfCrc32, applyTransformers);

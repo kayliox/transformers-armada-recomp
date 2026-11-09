@@ -38,7 +38,28 @@ JR_RA = 0x03E00008
 def load_game_config(version=None):
     cfg = json.loads((config_dir(version) / "game.json").read_text())
     cfg["code_regions"] = [(int(a, 16), int(b, 16)) for a, b in cfg["code_regions"]]
+    cfg["code_shift"] = [(int(a, 16), int(b, 16), d) for a, b, d in cfg.get("code_shift", [])]
     return cfg
+
+
+def release_file(name, version=None):
+    """A release's own config file (config/versions/<serial>/<name>), else the USA release's: another release uses
+    the USA overrides.toml and scratchpad_hot.txt with their code addresses moved by code_address()."""
+    own = config_dir(version) / name
+    return own if own.exists() else config_dir(DEFAULT_VERSION) / name
+
+
+def code_address(usa, cfg):
+    """A code address of the USA release, as the release of cfg has it (game.json "code_shift": [first, last, delta]
+    ranges of the USA main code region; src/game_version.h holds the same steps for the C++). None when it lies
+    between two ranges, where the releases' code differs and the address needs checking by hand."""
+    shifts = cfg.get("code_shift")
+    if not shifts or usa < shifts[0][0] or usa > shifts[-1][1]:
+        return usa
+    for lo, hi, d in shifts:
+        if lo <= usa <= hi:
+            return usa + d
+    return None
 
 
 class Elf:

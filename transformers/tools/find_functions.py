@@ -25,7 +25,7 @@ from collections import Counter
 from pathlib import Path
 
 from ps2elf import (CALL, JALR, JR, JR_RA, JUMP, BRANCH, NORMAL, STOP, UNCOND, Elf,
-                    config_dir, decode_cf, is_valid, load_game_config, sext16)
+                    config_dir, decode_cf, is_valid, load_game_config, release_file, sext16)
 
 
 def gpr_written(w):
@@ -384,7 +384,7 @@ def load_names(path):
     names = {}
     if not path:
         return names, set()
-    overrides = config_dir() / "overrides.toml"
+    overrides = release_file("overrides.toml")  # (a release without its own: the USA list, by name)
     removed = set()
     if overrides.exists():
         removed = set(tomllib.loads(overrides.read_text()).get("general", {}).get("remove_stubs", []))

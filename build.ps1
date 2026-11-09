@@ -69,6 +69,12 @@ if (-not $GameVersion) { $GameVersion = "SLUS-20668" }
 if (-not $Versions.Contains($GameVersion)) { throw "No config for the release $GameVersion (transformers\config\versions\$GameVersion)." }
 $env:TF_GAME_VERSION = $GameVersion
 $ElfName = $Versions[$GameVersion]
+# Another release runs the USA hooks at its own addresses (transformers\src\game_version.h, TF_GA): every code address
+# the C++ uses must be written with TF_GA, or that build would hook the wrong place.
+if ($GameVersion -ne "SLUS-20668") {
+    & python (Join-Path $Tools "check_pal_addresses.py")
+    if ($LASTEXITCODE -ne 0) { throw "Code addresses not translated for $GameVersion (see above)." }
+}
 
 # --- Timing: each step's time, a summary at the end, the record used for the next estimates -------
 $Clock = [Diagnostics.Stopwatch]::StartNew()

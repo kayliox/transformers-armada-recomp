@@ -14,16 +14,17 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 namespace start_screens
 {
     namespace
     {
         // The front end (retail SLUS-20668; the team's decomp names them):
-        constexpr uint32_t kIntroProcessInput = 0x0034D060u; // taItemIntroFMV::ProcessInput(this, krInput, krPlayer)
+        constexpr uint32_t kIntroProcessInput = TF_GA(0x0034D060u); // taItemIntroFMV::ProcessInput(this, krInput, krPlayer)
         // ... reached through its krItem part's thunk (a jump - the function table never sees the call to 0x34D060):
         // this' = a0 - 0x9C + *(a0 + 0x20)
-        constexpr uint32_t kIntroProcessInputThunk = 0x0034E7B0u;
+        constexpr uint32_t kIntroProcessInputThunk = TF_GA(0x0034E7B0u);
         constexpr uint32_t kIntroItemVtable = 0x006B8250u;   // taItemIntroFMV's own vtable, at the item's +4 (not the Extras' movies)
         constexpr uint32_t kIntroState = 0x006CFA6Cu;        // -> taUIIntro (func_004CE7C0): the start movie it plays
         constexpr uint32_t kIntroPath = 0x38u;               // taUIIntro +0x38: the movie's path (std::string)
@@ -31,7 +32,7 @@ namespace start_screens
         constexpr uint32_t kSkipInput = 5u;                  // krInput 5: the screen system's "skip" (the movie's next screen)
         constexpr uint32_t kTitleUpdate = 0x0033B690u;       // taScreenPrGTitle::Update(this, dt) (vtable slot 16)
         constexpr uint32_t kTitleStartSound = 0xC8u;         // its start sound's handle: nonzero = Start was pressed
-        constexpr uint32_t kStartMenuUpdate = 0x00557450u;   // taScreenStartMenu::Update (slot 16): the main menu is up
+        constexpr uint32_t kStartMenuUpdate = TF_GA(0x00557450u);   // taScreenStartMenu::Update (slot 16): the main menu is up
         // (TODO 116) The screens before the movies: the memory card's check, then the copyright screen.
         // taScreenStartInitCardCheck::ProcessInput (slot 18, called every frame): a state machine at +0x848 with a
         // timer at +0x84C (seconds, counted down by its Update while it is above 0), its messages set by 0x552C10:
@@ -39,15 +40,15 @@ namespace start_screens
         //   (3 s, or X), 0xC "This game uses an autosave feature..." (5 s), then 0xA = "%Legal" (the copyright screen);
         //   4/5 a load error or a corrupt save (Retry / Continue without loading), 6 no card (Yes / No), 8 no room
         //   (Yes / No), 0xB autosave disabled (Continue) - choices, never touched.
-        constexpr uint32_t kCardCheckProcessInput = 0x00552370u;
+        constexpr uint32_t kCardCheckProcessInput = TF_GA(0x00552370u);
         constexpr uint32_t kCardCheckState = 0x848u;
         constexpr uint32_t kCardCheckTimer = 0x84Cu;
         // taItemTimeout::ProcessInput(this, krInput) (0x352860; its timer: +0x24 the timeout, +0x28 the part that can
         // not be skipped, +0x2C the time so far, +0x18 the next screen's name) and its krItem part's thunk (a jump:
         // this' = a0 - 0x30 + *(a0 + 0x20)). The copyright screen ("Legal") is such a timer: 8 s, the first 4 not
         // skippable, then "%AtariLogo" (the first movie).
-        constexpr uint32_t kTimeoutProcessInput = 0x00352860u;
-        constexpr uint32_t kTimeoutProcessInputThunk = 0x00352C20u;
+        constexpr uint32_t kTimeoutProcessInput = TF_GA(0x00352860u);
+        constexpr uint32_t kTimeoutProcessInputThunk = TF_GA(0x00352C20u);
 
         enum Mode : int
         {
