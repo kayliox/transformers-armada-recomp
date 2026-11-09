@@ -511,7 +511,16 @@ $linkSeconds = $end - $(if ($lastCompileAt) { $lastCompileAt } else { $buildStar
 # start compiles them, the first one on a PC included.
 $builtExe = Join-Path $Build "transformers\$Config\TransformersRecomp.exe"
 $bakedTable = Join-Path $Build "transformers\baked\nr_shaders_baked.inc"
-if (Test-Path -LiteralPath $builtExe) {
+# (The shaders live in nr_d3d.cpp: when that file is as at the last bake and the table holds shaders, the bake - ~45 s
+# on a small PC - is left out. bake-input.txt records the file's hash.)
+$bakeSource = Join-Path $Root "transformers\native_render\nr_d3d.cpp"
+$bakeRecord = Join-Path $Build "transformers\baked\bake-input.txt"
+$bakeInput = (Get-FileHash -LiteralPath $bakeSource -Algorithm SHA256).Hash
+$bakeDone = (Test-Path -LiteralPath $bakeRecord) -and (Get-Content -LiteralPath $bakeRecord -Raw).Trim() -eq $bakeInput -and
+            (Test-Path -LiteralPath $bakedTable) -and (Select-String -LiteralPath $bakedTable -SimpleMatch "kBaked0[]" -Quiet)
+if ((Test-Path -LiteralPath $builtExe) -and $bakeDone) {
+    Write-Host "  (the renderer's shaders are built in as before)"
+} elseif (Test-Path -LiteralPath $builtExe) {
     Step "Building the renderer's shaders into the game" "shaders"
     $ErrorActionPreference = "Continue"
     & $builtExe --bake-shaders $bakedTable 2>&1 | ForEach-Object { "  $_" }
@@ -519,7 +528,10 @@ if (Test-Path -LiteralPath $builtExe) {
     $ErrorActionPreference = "Stop"
     if ($baked -eq 2) {
         Run cmake @("--build", $Build, "--config", $Config, "--target", "TransformersRecomp", "--", "/m", "/v:m", "/p:UseMultiToolTask=true") | Out-Null
-    } elseif ($baked -ne 0) {
+    }
+    if ($baked -eq 0 -or $baked -eq 2) {
+        Set-Content -LiteralPath $bakeRecord -Value $bakeInput -NoNewline
+    } else {
         Write-Host "  warning: the shaders could not be built in; the game compiles them at its first start instead" -ForegroundColor Yellow
     }
     Close-Stage
