@@ -1,0 +1,33 @@
+Subject: [PATCH] MPEG demux: an audio packet with no callback of its read type and channel goes to an audio callback on the payload's channel (Transformers PAL logo films)
+
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
+index 8a1af3a..cc31156 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
+@@ -1876,7 +1876,25 @@ namespace ps2_stubs
+                 {
+                     known = false;
+                 }
+-                if (!known || !findMpegCallback(mpegAddr, true, type, channel, packet.callback))
++                bool found = known && findMpegCallback(mpegAddr, true, type, channel, packet.callback);
++                // An audio packet no callback takes as read above goes to an audio callback of either type
++                // on the channel of the payload's fourth byte. Transformers' films with an SShd of type 0x10
++                // (FMV/PMH_LOGO.PSS, PINTRO.PSS: FF A1 00 00) play on the console with the game's PCM and
++                // ADPCM callbacks both on channel 0 (its films with 16-bit PCM, SShd type 1, are FF A0 00 00):
++                // read as PCM channel 1 they reached no callback, their sound header never came and the
++                // player raised its fatal error.
++                if (!found && known && streamId == kMpegPrivateStream1)
++                {
++                    const uint32_t altChannel = buffer[pes.payloadOffset + 3u] & 0x0Fu;
++                    for (uint32_t altType : {kMpegLibStrADPCM, kMpegLibStrPCM})
++                        if (!found && findMpegCallback(mpegAddr, true, altType, altChannel, packet.callback))
++                        {
++                            found = true;
++                            type = altType;
++                            channel = altChannel;
++                        }
++                }
++                if (!found)
+                 {
+                     dropDemuxFront(playback, packetEnd);
+                     continue;
