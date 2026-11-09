@@ -73,6 +73,23 @@ namespace mod_menu
 {
     namespace
     {
+        // The controller layout used when settings.ini has none: on a Steam Deck the triggers fire and jump (its
+        // bumpers are hard to reach in a hand-held grip), elsewhere each game button on its own controller button.
+        const char *padDefault()
+        {
+#if defined(__linux__)
+            static const bool deck = []
+            {
+                std::ifstream in("/sys/class/dmi/id/sys_vendor");
+                std::string vendor;
+                return std::getline(in, vendor) && vendor == "Valve";
+            }();
+            if (deck)
+                return "l1=l2;l2=l1;r1=r2;r2=r1"; // (as "Triggers fire")
+#endif
+            return "";
+        }
+
         // ---------------------------------------------------------------------------------
         // The 32 cheat codes (docs/CHEATS.md of github.com/kayliox/transformers-armada-ps2-mods:
         // decoded from the game's own table, the same in the PAL and USA releases).
@@ -1095,7 +1112,7 @@ namespace mod_menu
                 if (list != name)
                     out += (out.empty() ? "" : ";") + std::string(name) + "=" + list;
             }
-            return out;
+            return out.empty() && *padDefault() ? "l1=l1" : out; // (the plain layout kept when the default is another)
         }
 
         void setPadLayout(const std::string &layout)
@@ -1176,7 +1193,7 @@ namespace mod_menu
                 menu_style::setHelp("Fire and jump on the triggers (R2, L2), the Mini-Con abilities on the bumpers (R1, L1).");
             ImGui::SameLine();
             if (menu_style::button("Reset to default"))
-                setPadLayout("");
+                setPadLayout(padDefault());
         }
 
         // ---------------------------------------------------------------------------------
@@ -2501,7 +2518,14 @@ namespace mod_menu
             pad.key = "PS2X_PADMAP";
             pad.section = "Controller";
             pad.label = "Controller buttons";
-            pad.defaultValue = "";
+            pad.defaultValue = padDefault();
+#if defined(__linux__)
+            if (*padDefault() && !std::getenv("PS2X_PADMAP"))
+            {
+                setenv("PS2X_PADMAP", padDefault(), 1); // (no saved layout: the default, as the runtime reads it)
+                ps2_host_input::setPadBindings(padDefault());
+            }
+#endif
             pad.apply = [](const std::string &value)
             {
                 ps2_host_input::setPadBindings(value);
