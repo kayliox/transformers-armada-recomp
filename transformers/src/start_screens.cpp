@@ -357,7 +357,7 @@ namespace start_screens
             g_startMenuInput(rdram, ctx, runtime);
         }
 
-        // The three row-text paths in the list renderer: use the game's translated label without changing its spare string.
+        // The list can still be drawn while its state changes; five rows identifies our extended list.
         void stringFromChars(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t ra = getRegU32(ctx, 31);
@@ -366,7 +366,6 @@ namespace start_screens
             {
                 const uint32_t menu = getRegU32(ctx, 17);
                 if (read32(rdram, menu) == kStartMenuVtable &&
-                    read32(rdram, menu + kMenuState) == kMainList &&
                     read32(rdram, menu + kMenuCount) == kQuitRow + 1u)
                     SET_GPR_U32(ctx, 5, kQuitKey);
             }
