@@ -1510,10 +1510,10 @@ float4 smaaBlendPs(SmaaBlendOut i) : SV_Target
         }
 
         ID3DBlob *compile(const char *entry, const char *target, const char *source = kShader, size_t size = sizeof(kShader) - 1,
-                          const D3D_SHADER_MACRO *defines = nullptr)
+                          const D3D_SHADER_MACRO *defines = nullptr, UINT extraFlags = 0)
         {
-            // (TODO 164 stage 3: from the shader cache when it has this source, entry point, target and defines)
-            const UINT flags = D3DCOMPILE_OPTIMIZATION_LEVEL3;
+            // (TODO 164 stage 3: from the shader cache when it has this source, entry point, target, defines and flags)
+            const UINT flags = D3DCOMPILE_OPTIMIZATION_LEVEL3 | extraFlags;
             uint64_t key = cache::fnv(1469598103934665603ull, "nr shader cache 1", 17);
             const int compiler = D3D_COMPILER_VERSION;
             key = cache::fnv(key, &compiler, sizeof compiler);
@@ -2347,17 +2347,15 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                 const char *entries[3] = {"CsCount", "CsScan", "CsWrite"};
                 for (int k = 0; k < 3; ++k)
                 {
-                    ID3DBlob *code = nullptr, *err = nullptr;
-                    const HRESULT hr = D3DCompile(kCs, sizeof(kCs) - 1, "nr_grass_cs", g_exact ? exact : nullptr, nullptr, entries[k], "cs_5_0",
-                                                  D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_IEEE_STRICTNESS, 0, &code, &err);
-                    if (FAILED(hr))
+                    // (from the shader cache like the others: compiled here at every start they took ~15 s of it on an
+                    // Intel UHD - N100 - with the optimizer at level 3 and IEEE strictness)
+                    ID3DBlob *code = compile(entries[k], "cs_5_0", kCs, sizeof(kCs) - 1, g_exact ? exact : nullptr,
+                                             D3DCOMPILE_IEEE_STRICTNESS);
+                    if (!code)
                     {
-                        std::fprintf(stderr, "[native render] grass on the GPU: shader %s: %s\n", entries[k],
-                                     err ? static_cast<const char *>(err->GetBufferPointer()) : "failed");
-                        release(err);
+                        std::fprintf(stderr, "[native render] grass on the GPU: shader %s failed\n", entries[k]);
                         return false;
                     }
-                    release(err);
                     D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
                     cd.pRootSignature = g_root;
                     cd.CS = {code->GetBufferPointer(), code->GetBufferSize()};
