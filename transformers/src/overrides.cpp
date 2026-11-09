@@ -9138,12 +9138,41 @@ namespace
     // until each hook's PAL address has been checked (transformers/config/versions/SLES-52388).
     constexpr uint32_t kPalElfCrc32 = 0xA0DBA384u;
 
+    // The generic fatal error (0x106620, the same in both releases): who raised it.
+    constexpr uint32_t kGenericFatal = 0x00106620u;
+    PS2Runtime::RecompiledFunction g_genericFatal = nullptr;
+
+    void genericFatal(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        std::fprintf(stderr, "[tf] generic fatal error raised (vsync %llu, ra=%08x, a0=%08x a1=%08x)\n",
+                     static_cast<unsigned long long>(runtime->eeScheduler().currentVSyncTick()), getRegU32(ctx, 31),
+                     getRegU32(ctx, 4), getRegU32(ctx, 5));
+#if defined(_WIN32)
+        tfLogCallStack("generic fatal");
+#endif
+        g_genericFatal(rdram, ctx, runtime);
+    }
+
     void applyTransformersPal(PS2Runtime &runtime)
     {
         ps2_stubs::setMpegGuestBuffersStream(true);
         ps2_stubs::setVarArgSlotBytes(8u); // (GCC's variadic slots: see applyTransformers)
         // (the SDK library is at the same addresses: the PAL analyzer names _sceSifLoadModuleBuffer here too)
         runtime.registerFunction(kSifLoadModuleBuffer, sifLoadModuleBufferFromIop);
+        // (the fatal error screen starts at the same address in SLES_523.88: its message logged)
+        if ((g_errorScreen = runtime.lookupFunction(kErrorScreen)) != nullptr)
+            runtime.registerFunction(kErrorScreen, errorScreen);
+        file_trace::install(runtime); // TF_FILE_LOG=1 (flFile::Open is at the same address)
+        if ((g_genericFatal = runtime.lookupFunction(kGenericFatal)) != nullptr)
+            runtime.registerFunction(kGenericFatal, genericFatal);
+        // The sound server and TwoFish's disc reads on the host, as in the USA build. Their functions
+        // (0x1F0470, 0x1F0170, 0x1E8B20, 0x192FF0) start at the same addresses in SLES_523.88, and so does
+        // their data: with gp = 0x6D30F0 the PAL code reads the commander at 0x6CE8F4 and the EE clock at
+        // 0x6CE5B0 / 0x6CB1A4. On the emulated server the second movie (PMH_LOGO) got no sound stream and
+        // its player raised the generic fatal error.
+        native_disc::install(runtime);
+        native_sound::install(runtime);
+        native_sound::installState();
     }
 }
 
