@@ -33,6 +33,8 @@
   little off centre, as a Steam Deck's can, read as held). Gameplay keeps the stick response.
 - Linux: the robot no longer walks on its own in play with a stick that rests a little off centre (a dead zone of
   12%; F1 > Controller > Stick dead zone changes it).
+- Linux: the frame rate no longer goes past what the screen shows (a Steam Deck's 90 Hz panel ran parts of the game
+  at 175 frames a second, the extra pictures never seen): less CPU, GPU and battery used.
 - The F1 menu no longer shows red stripes and broken text with Zink (Mesa's command reordering is turned off
   for the game; `ZINK_DEBUG` set by you still wins).
 

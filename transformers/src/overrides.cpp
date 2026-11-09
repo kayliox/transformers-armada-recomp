@@ -112,6 +112,9 @@ void tfNoteFrameWork(bool begins, double workMs); // (profiler.cpp: TF_PROFILE_S
 void tfTestWindow(uint64_t vblank); // (profiler.cpp: TF_TEST_WINDOW, the window minimised / shown in tests)
 bool tfWindowAway(); // (profiler.cpp, TODO 117: the player has left the window - minimised, or another one has the focus)
 double tfThreadCpuMs();
+#if defined(__linux__)
+extern std::atomic<int> g_tfMonitorHz; // (main.cpp: the monitor's refresh when the window was made)
+#endif
 
 namespace
 {
@@ -3323,9 +3326,16 @@ namespace
         bool capped = false; // (any rate: its top under the setting's - the refresh's, a variable one's margin)
         std::chrono::steady_clock::time_point screenVBlank{};
         std::chrono::steady_clock::duration screenPeriod{};
-        const double screenHz = ps2_host_display::screenTiming(screenVBlank, screenPeriod) && screenPeriod.count() > 0
-                                    ? 1.0 / std::chrono::duration<double>(screenPeriod).count()
-                                    : 0.0;
+        double screenHz = ps2_host_display::screenTiming(screenVBlank, screenPeriod) && screenPeriod.count() > 0
+                              ? 1.0 / std::chrono::duration<double>(screenPeriod).count()
+                              : 0.0;
+#if defined(__linux__)
+        // (no vertical blank timing on Linux: the monitor's refresh, so the rates stop at what the screen shows - a
+        // Steam Deck's 90 Hz panel ran menus at 175 frames a second.) shortcut: the refresh as the window was made, a
+        // refresh changed later (the Deck's own setting) not followed; upgrade with a Linux vertical blank source.
+        if (screenHz <= 0.0)
+            screenHz = g_tfMonitorHz.load(std::memory_order_relaxed);
+#endif
         // (TODO 161 a: the logic at its fixed rate, one rate - no steps; the renderer leaves out pictures it cannot draw)
         const bool fixed = g_logicRate.load() > 0 && g_fastGameFallback && nativeOnePicture();
         const bool follow = !fixed && followRates() && g_fastGameFallback && nativeOnePicture() && !steps;

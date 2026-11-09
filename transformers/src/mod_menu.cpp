@@ -2524,6 +2524,7 @@ namespace mod_menu
             {
                 setenv("PS2X_PADMAP", padDefault(), 1); // (no saved layout: the default, as the runtime reads it)
                 ps2_host_input::setPadBindings(padDefault());
+                std::fprintf(stderr, "[pad] controller buttons: %s (a Steam Deck's default)\n", ps2_host_input::padBindings().c_str());
             }
 #endif
             pad.apply = [](const std::string &value)

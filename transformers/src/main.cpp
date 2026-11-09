@@ -32,6 +32,7 @@
 
 #include <cstring>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -58,6 +59,9 @@ void tfShowWindowWithoutFocus(void *window, int x, int y); // profiler.cpp
 #endif
 void tfNoteWindow(void *window); // profiler.cpp (TF_TEST_WINDOW)
 void tfKeepFullSpeedInBackground(); // profiler.cpp (TODO 197: no Windows throttling with the window left)
+#if defined(__linux__)
+std::atomic<int> g_tfMonitorHz{0}; // overrides.cpp's frame rate cap (Linux has no vertical blank timing to give it)
+#endif
 
 namespace
 {
@@ -526,6 +530,9 @@ int main(int argc, char *argv[])
         g_tfRuntime = &runtime;
 #endif
         tfNoteWindow(GetWindowHandle()); // (the window's state for TODO 117: tfWindowAway, TF_TEST_WINDOW)
+#if defined(__linux__)
+        g_tfMonitorHz.store(GetMonitorRefreshRate(GetCurrentMonitor())); // (GLFW: on the main thread)
+#endif
         if (!runtime.loadELF(elfPath.string()))
         {
             std::cerr << "Failed to load " << elfPath.string() << std::endl;
