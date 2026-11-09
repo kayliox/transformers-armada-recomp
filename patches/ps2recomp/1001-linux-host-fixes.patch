@@ -908,7 +908,7 @@ index fe1bb57..c58a14b 100644
      {
          std::lock_guard<std::mutex> lock(m_wakeMutex);
 diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
-index 677c486..3118136 100644
+index 6f5320b..fa25431 100644
 --- a/ps2xRuntime/src/lib/ps2_pad.cpp
 +++ b/ps2xRuntime/src/lib/ps2_pad.cpp
 @@ -45,6 +45,9 @@ namespace
@@ -984,7 +984,7 @@ index 677c486..3118136 100644
      }
  
      // The triggers as the pad has them (gamepadTriggers).
-@@ -1088,5 +1121,21 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+@@ -1148,5 +1181,21 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
      data[5] = axisByte(ry);
      data[6] = axisByte(lx);
      data[7] = axisByte(ly);
@@ -1045,10 +1045,10 @@ index a72105b..3323574 100644
  }
  
 diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
-index edd6bee..e1f2ee5 100644
+index 48c12b9..b6e4053 100644
 --- a/ps2xRuntime/src/lib/ps2_runtime.cpp
 +++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
-@@ -3763,6 +3763,9 @@ void PS2Runtime::run()
+@@ -3791,6 +3791,9 @@ void PS2Runtime::run()
          m_debugUiInitialized = false;
      }
      UnloadTexture(frameTex);
@@ -1059,10 +1059,19 @@ index edd6bee..e1f2ee5 100644
  
      RUNTIME_LOG("[run] exiting loop");
 diff --git a/ps2xRuntime/src/lib/ps2_settings.cpp b/ps2xRuntime/src/lib/ps2_settings.cpp
-index 297aeaf..1ca9269 100644
+index 297aeaf..a947fb9 100644
 --- a/ps2xRuntime/src/lib/ps2_settings.cpp
 +++ b/ps2xRuntime/src/lib/ps2_settings.cpp
-@@ -107,7 +107,7 @@ namespace ps2_settings
+@@ -23,6 +23,8 @@
+ #endif
+ #include <windows.h>
+ #else
++#include <iterator>
++#include <spawn.h>
+ extern char **environ;
+ #endif
+ 
+@@ -107,7 +109,7 @@ namespace ps2_settings
              for (char **p = environ; p && *p; ++p)
              {
                  if (const char *equals = std::strchr(*p, '='))
@@ -1071,6 +1080,89 @@ index 297aeaf..1ca9269 100644
              }
  #endif
          }
+@@ -550,9 +552,79 @@ namespace ps2_settings
+             CloseHandle(process.hProcess);
+             return true;
+ #else
+-            (void)state;
+-            error = "not on this system";
+-            return false;
++            // (Linux: the same - this process's environment but for the settings, its command line - started anew; this
++            // one then ends as on Windows. Under Steam the new one stays the game's: Steam waits for all its processes.)
++            std::vector<std::string> variables;
++            for (char **p = environ; *p; ++p)
++                variables.emplace_back(*p);
++            const auto nameOf = [](const std::string &variable) { return variable.substr(0, variable.find('=')); };
++            const auto remove = [&](const std::string &name)
++            {
++                variables.erase(std::remove_if(variables.begin(), variables.end(), [&](const std::string &v)
++                                               { return nameOf(v) == name; }),
++                                variables.end());
++            };
++            const auto set = [&](const std::string &name, const std::string &value)
++            {
++                remove(name);
++                if (!value.empty())
++                    variables.push_back(name + "=" + value);
++            };
++            {
++                std::lock_guard lock(g_mutex);
++                std::set<std::string> listed;
++                for (const Entry &entry : g_entries)
++                {
++                    listed.insert(entry.setting.key);
++                    if (entry.fromEnvironment)
++                        set(entry.setting.key, entry.chosen);
++                    else
++                        remove(entry.setting.key);
++                }
++                for (const std::string &key : g_fromFile)
++                {
++                    if (!listed.count(key))
++                        remove(key);
++                }
++            }
++            remove("PS2X_LOAD_STATE_TICK");
++            remove("PS2X_SETTINGS_RESTART"); // (the testing aid: once)
++            set("PS2X_LOAD_STATE", state.string());
++            set("PS2X_RESTART_STATE", state.string());
++            std::vector<char *> envp;
++            for (std::string &variable : variables)
++                envp.push_back(variable.data());
++            envp.push_back(nullptr);
++
++            std::ifstream in("/proc/self/cmdline", std::ios::binary);
++            std::string line((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
++            std::vector<std::string> args;
++            for (size_t at = 0; at < line.size();)
++            {
++                const size_t end = line.find('\0', at);
++                args.push_back(line.substr(at, end == std::string::npos ? std::string::npos : end - at));
++                at = end == std::string::npos ? line.size() : end + 1;
++            }
++            std::error_code ec;
++            const std::filesystem::path exe = std::filesystem::read_symlink("/proc/self/exe", ec);
++            if (args.empty() || ec)
++            {
++                error = "its command line was not found";
++                return false;
++            }
++            std::vector<char *> argv;
++            for (std::string &arg : args)
++                argv.push_back(arg.data());
++            argv.push_back(nullptr);
++            std::fflush(stdout);
++            std::fflush(stderr);
++            pid_t pid = 0;
++            if (const int failed = posix_spawn(&pid, exe.c_str(), nullptr, nullptr, argv.data(), envp.data()))
++            {
++                error = std::string("Linux did not start it: ") + std::strerror(failed);
++                return false;
++            }
++            return true;
+ #endif
+         }
+     }
 diff --git a/ps2xRuntime/src/lib/ps2_vfs.cpp b/ps2xRuntime/src/lib/ps2_vfs.cpp
 index aff25e6..5cea12f 100644
 --- a/ps2xRuntime/src/lib/ps2_vfs.cpp

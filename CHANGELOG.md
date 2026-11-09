@@ -25,6 +25,7 @@
 - Steam Deck: jump and fire are on the triggers (R2 fires, L2 jumps), the Mini-Con abilities on the bumpers. F1 >
   Controls changes it; "Reset to default" comes back to it.
 - Linux: the Discord status works too (the Discord app's socket, including the Flatpak and Snap versions).
+- Linux: the F1 menu's "Restart now" (for settings that need a restart) works: the game starts again where you were.
 
 **Fixed**
 - The first level (Amazon Basin) no longer stops with "Generic fatal error" on Linux: a C library function the game
