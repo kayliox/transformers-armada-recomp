@@ -12,6 +12,7 @@
 // TF_NATIVE_DUMP=1: each saved frame's draws, as text beside the picture (runs\native_<tick>.txt).
 #include "nr_types.h"
 #include "nr_install.h"
+#include "game_version.h" // (TF_VA: the addresses that differ in the PAL release)
 #include "hd_progress.h"
 #include "nr_frame_texture_policy.h"
 #include "view_turn.h"
@@ -4779,7 +4780,7 @@ namespace nr
         // stretches long after, saw every pass with the last pass's block (its 4 patches drawn 80 times, the others not
         // at all). The block copied while it still stands - before the next allocation, the next flush or the frame's end -
         // into the frame (Frame::rainBlocks), and nr_rain.cpp draws each pass's batches from its copy. TF_NATIVE_RAIN=0: not.
-        constexpr uint32_t kListAlloc = 0x00221CC0u, kListAllocFromRain = 0x005656F4u; // (the call in LoadContext + 8)
+        constexpr uint32_t kListAlloc = 0x00221CC0u, kListAllocFromRain = TF_VA(0x005656F4u, 0x005656D4u); // (the call in LoadContext + 8)
         constexpr uint32_t kListFlush = 0x0023AB70u, kListFlush2 = 0x0023AA90u;
         PS2Runtime::RecompiledFunction g_listAlloc = nullptr, g_listFlush = nullptr, g_listFlush2 = nullptr;
         uint32_t g_rainPending = 0u; // (the block of the pass not yet copied: its data's guest address)
@@ -6633,22 +6634,6 @@ namespace nr
         // pairs of the same frames, the GS's shot and the native one)
         if (std::getenv("TF_NATIVE_LOOSE_COMPARE") && *std::getenv("TF_NATIVE_LOOSE_COMPARE") == '1')
             ps2_host_display::setGifObserverAlways(true);
-        d3d::prepare();
-        startLivePicture();
-    }
-
-    // (PAL, SLES-52388) The native renderer without the game's render calls wrapped - their addresses are the USA
-    // executable's until each is checked: what the game draws outside its frames (menus, text, films: looseGif), the
-    // device and the live picture. TF_NATIVE_RENDER=1 (and TF_NATIVE_LIVE=1 to show it); nothing otherwise.
-    void installDisplayOnly(PS2Runtime &runtime)
-    {
-        const char *env = std::getenv("TF_NATIVE_RENDER");
-        g_enabled = env && *env && *env != '0';
-        if (!g_enabled)
-            return;
-        g_displayRuntime = &runtime;
-        ps2_host_display::setGifObserver(&looseGif);
-        std::fprintf(stderr, "[native render] display only: the game's render calls are not wrapped (PAL)\n");
         d3d::prepare();
         startLivePicture();
     }

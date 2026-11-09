@@ -74,6 +74,9 @@ string(JSON _tf_elf_crc GET "${_tf_game_json}" elf_crc32)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${TF_GAME_JSON}")
 target_compile_definitions(TransformersRecomp PRIVATE TF_ELF_NAME="${TF_ELF_NAME}" TF_ELF_CRC32=0x${_tf_elf_crc}u
                            TF_GAME_SERIAL="${TF_GAME_VERSION}")
+if(TF_GAME_VERSION STREQUAL "SLES-52388")
+    target_compile_definitions(TransformersRecomp PRIVATE TF_GAME_PAL=1) # (game_version.h: TF_VA)
+endif()
 message(STATUS "Transformers: release ${TF_GAME_VERSION} (${TF_ELF_NAME})")
 
 # The grass's VU1 program as straight C++ (vu1_native.cpp includes it): a translation of the game's own microcode,

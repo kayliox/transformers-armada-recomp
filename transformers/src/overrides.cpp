@@ -9201,7 +9201,10 @@ namespace
         native_disc::install(runtime);
         native_sound::install(runtime);
         native_sound::installState();
-        nr::installDisplayOnly(runtime); // (TF_NATIVE_RENDER=1: Direct3D 12 for what needs no game address)
+        // The native PC renderer (native_render/), as in the USA build: its 160 guest addresses checked against PAL's
+        // function list - the same but for nine, given by TF_VA (game_version.h).
+        nr::install(runtime);
+        nr::n5::install(runtime);
     }
 }
 

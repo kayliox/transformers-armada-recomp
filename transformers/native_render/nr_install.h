@@ -9,8 +9,6 @@ class PS2Runtime;
 namespace nr
 {
     void install(PS2Runtime &runtime);
-    // The PAL release: the device, the live picture and what the game draws outside its frames, no render call wrapped.
-    void installDisplayOnly(PS2Runtime &runtime);
     // Registered before capture starts. Sampled on the EE thread for each new
     // frame; queued frames retain their own choice. Null/failed proofs use normal policy.
     void setFrameTexturePolicy(bool (*policy)(const uint8_t *, size_t));

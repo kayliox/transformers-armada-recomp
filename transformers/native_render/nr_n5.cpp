@@ -25,6 +25,7 @@
 // started. =check: VIF1 as before, and beside it the VU1 data memory such transfers would have left (the EE's own
 // writes only): every EE read of VU1 data memory compared with it ("[n5:check]").
 #include "nr_n5.h"
+#include "game_version.h" // (TF_VA: the addresses that differ in the PAL release)
 
 #include "nr_types.h"
 #include "nr_vif.h"
@@ -129,20 +130,20 @@ namespace nr::n5
             {0x0026F790u, "grass grid packet"},
             {0x00253F00u, "vlxParticleManager"},
             {0x0024FC50u, "particle trail emitter"},
-            {0x003711A0u, "taParticleManager"},
-            {0x004B8CC0u, "CreatureEffects RenderNode"},
-            {0x004B97A0u, "CreatureEffects func_004B97A0"},
-            {0x004B7B60u, "CreatureEffects func_004B7B60"},
+            {TF_VA(0x003711A0u, 0x00371190u), "taParticleManager"},
+            {TF_VA(0x004B8CC0u, 0x004B8CA0u), "CreatureEffects RenderNode"},
+            {TF_VA(0x004B97A0u, 0x004B9780u), "CreatureEffects func_004B97A0"},
+            {TF_VA(0x004B7B60u, 0x004B7B40u), "CreatureEffects func_004B7B60"},
             {0x00232E60u, "vlxText2D char"},
             {0x00206A50u, "BlendSurfaceRect"},
             {0x00204530u, "ApplyBlurEffects"},
             {0x002642F0u, "CopyGreenToAlpha"},
-            {0x004E19A0u, "snow func_004E19A0"},
-            {0x004E1B10u, "snow func_004E1B10"},
+            {TF_VA(0x004E19A0u, 0x004E1980u), "snow func_004E19A0"},
+            {TF_VA(0x004E1B10u, 0x004E1AF0u), "snow func_004E1B10"},
             {0x00272010u, "water func_00272010"},
             {0x00272260u, "water func_00272260"},
-            {0x004C59B0u, "RenderShadowTexture"},
-            {0x003536B0u, "AllocateCaster"},
+            {TF_VA(0x004C59B0u, 0x004C5990u), "RenderShadowTexture"},
+            {TF_VA(0x003536B0u, 0x003536A0u), "AllocateCaster"},
             {0x0025FD40u, "func_0025FD40"},
             {0x0025FD60u, "func_0025FD60"},
             {0x002261A0u, "func_002261A0"},
