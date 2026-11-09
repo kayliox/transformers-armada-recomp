@@ -35,4 +35,4 @@ jobs:
             -DPS2X_BUILD_RUNTIME=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_STUDIO=OFF
           cmake --build out/tools --target ps2_recomp ps2_analyzer
           cmake -S . -B out/build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build out/build --target tf_port_objects
+          cmake --build out/build --target tf_port_objects -- -k 0
