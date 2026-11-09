@@ -125,8 +125,16 @@ namespace
                           static_cast<int>(origin.y) + (GetMonitorHeight(monitor) - height) / 2);
     }
 
+    // The release this build is for (transformers/CMakeLists.txt, from its config's game.json).
+#if defined(TF_ELF_NAME)
+    constexpr const char *kElfName = TF_ELF_NAME;
+    constexpr uint32_t kElfCrc32 = TF_ELF_CRC32;
+    constexpr const char *kGameSerial = TF_GAME_SERIAL;
+#else
     constexpr const char *kElfName = "SLUS_206.68";
     constexpr uint32_t kElfCrc32 = 0x74C982C0u;
+    constexpr const char *kGameSerial = "SLUS-20668";
+#endif
 
     uint32_t crc32File(const fs::path &path)
     {
@@ -390,7 +398,7 @@ int main(int argc, char *argv[])
         {
             std::cerr << "Warning: " << elfPath.string() << " has CRC32 " << std::hex << crc
                       << ", expected " << kElfCrc32 << std::dec
-                      << ". This build only supports Transformers (USA, SLUS-20668)." << std::endl;
+                      << ". This build is for Transformers " << kGameSerial << "." << std::endl;
         }
 
         PS2Runtime runtime;

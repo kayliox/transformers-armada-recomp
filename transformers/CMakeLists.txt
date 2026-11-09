@@ -60,14 +60,30 @@ endif()
 
 target_link_libraries(TransformersRecomp PRIVATE ps2_runtime)
 
+# The release this build is for (build.ps1 passes it from the disc): its executable's name and CRC32 from its
+# config (config/game.json for the USA release, config/versions/<serial>/game.json for the others).
+set(TF_GAME_VERSION "SLUS-20668" CACHE STRING "The release built: SLUS-20668 (USA) or a serial under config/versions")
+if(TF_GAME_VERSION STREQUAL "SLUS-20668")
+    set(TF_GAME_JSON "${CMAKE_CURRENT_SOURCE_DIR}/config/game.json")
+else()
+    set(TF_GAME_JSON "${CMAKE_CURRENT_SOURCE_DIR}/config/versions/${TF_GAME_VERSION}/game.json")
+endif()
+file(READ "${TF_GAME_JSON}" _tf_game_json)
+string(JSON TF_ELF_NAME GET "${_tf_game_json}" elf_name)
+string(JSON _tf_elf_crc GET "${_tf_game_json}" elf_crc32)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${TF_GAME_JSON}")
+target_compile_definitions(TransformersRecomp PRIVATE TF_ELF_NAME="${TF_ELF_NAME}" TF_ELF_CRC32=0x${_tf_elf_crc}u
+                           TF_GAME_SERIAL="${TF_GAME_VERSION}")
+message(STATUS "Transformers: release ${TF_GAME_VERSION} (${TF_ELF_NAME})")
+
 # The grass's VU1 program as straight C++ (vu1_native.cpp includes it): a translation of the game's own microcode,
 # so it is made from the game's executable at build time (tools/make_vu1_grass.py), never kept in the repository.
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(TF_VU1_GRASS_INC "${TF_GENERATED_DIR}/vu1_grass47dd.inc")
 add_custom_command(OUTPUT "${TF_VU1_GRASS_INC}"
     COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/make_vu1_grass.py"
-            "${CMAKE_SOURCE_DIR}/game/SLUS_206.68" "${TF_VU1_GRASS_INC}"
-    DEPENDS "${CMAKE_SOURCE_DIR}/game/SLUS_206.68" "${CMAKE_SOURCE_DIR}/tools/make_vu1_grass.py"
+            "${CMAKE_SOURCE_DIR}/game/${TF_ELF_NAME}" "${TF_VU1_GRASS_INC}"
+    DEPENDS "${CMAKE_SOURCE_DIR}/game/${TF_ELF_NAME}" "${CMAKE_SOURCE_DIR}/tools/make_vu1_grass.py"
             "${CMAKE_SOURCE_DIR}/tools/vu1_grass47dd_lags.json" "${CMAKE_SOURCE_DIR}/tools/vu1_recompile.py"
             "${CMAKE_SOURCE_DIR}/tools/vu1_trace.py" "${CMAKE_SOURCE_DIR}/tools/vu1_batch.py"
     COMMENT "The grass's VU1 program, from the game's executable"

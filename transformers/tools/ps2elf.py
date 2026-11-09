@@ -1,18 +1,42 @@
 """Minimal PS2 ELF loader and R5900 control-flow decoder shared by the tools."""
 
 import json
+import os
 import struct
 import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-GAME_JSON = ROOT / "config" / "game.json"
+
+# The release being built (build.ps1 sets TF_GAME_VERSION from the disc): the USA release's
+# settings are in config/, every other release's in config/versions/<serial>/.
+DEFAULT_VERSION = "SLUS-20668"
+
+
+def game_version():
+    return os.environ.get("TF_GAME_VERSION") or DEFAULT_VERSION
+
+
+def config_dir(version=None):
+    v = version or game_version()
+    return ROOT / "config" if v == DEFAULT_VERSION else ROOT / "config" / "versions" / v
+
+
+def known_versions():
+    """Every release with a config: {serial: elf_name}."""
+    found = {DEFAULT_VERSION: json.loads((ROOT / "config" / "game.json").read_text())["elf_name"]}
+    for p in sorted((ROOT / "config" / "versions").glob("*/game.json")):
+        found[p.parent.name] = json.loads(p.read_text())["elf_name"]
+    return found
+
+
+GAME_JSON = config_dir() / "game.json"
 
 JR_RA = 0x03E00008
 
 
-def load_game_config():
-    cfg = json.loads(GAME_JSON.read_text())
+def load_game_config(version=None):
+    cfg = json.loads((config_dir(version) / "game.json").read_text())
     cfg["code_regions"] = [(int(a, 16), int(b, 16)) for a, b in cfg["code_regions"]]
     return cfg
 

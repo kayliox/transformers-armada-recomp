@@ -16,7 +16,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-from ps2elf import load_game_config
+from ps2elf import config_dir, load_game_config
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -36,7 +36,7 @@ def main():
     in_code = lambda a: a is not None and any(lo <= a < hi for lo, hi in regions)
 
     analyzer = tomllib.loads((work / "analyzer.toml").read_text())
-    overrides = tomllib.loads((ROOT / "config" / "overrides.toml").read_text())
+    overrides = tomllib.loads((config_dir() / "overrides.toml").read_text())
     tables = json.loads((work / "jump_tables.json").read_text())
     ag = analyzer["general"]
     og = dict(overrides.get("general", {}))

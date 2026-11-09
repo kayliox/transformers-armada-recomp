@@ -1,0 +1,15 @@
+{
+  "title": "Transformers",
+  "region": "Europe",
+  "serial": "SLES-52388",
+  "elf_name": "SLES_523.88",
+  "elf_crc32": "a0dba384",
+  "elf_size": 6088572,
+  "iso_size": 4546691072,
+  "comment": "The PAL release: the same size and layout as SLUS_206.68 (one 'main' section at 0x00100000, size 0x5CE480). The USA code regions fit it unchanged: each boundary has the same code or data on both sides, and the VU1 microcode between them sits at the same addresses (tools/make_vu1_grass.py's hash matches).",
+  "code_regions": [
+    ["0x00100008", "0x005DCB80"],
+    ["0x006186A4", "0x00619BD0"],
+    ["0x00671980", "0x006ADF20"]
+  ]
+}

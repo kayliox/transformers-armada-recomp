@@ -58,7 +58,8 @@ def transform(name, data):
 
 def scratchpad_hot():
     """The function names of transformers/config/scratchpad_hot.txt (TODO 94)."""
-    path = Path(__file__).resolve().parent.parent / "config" / "scratchpad_hot.txt"
+    from ps2elf import config_dir
+    path = config_dir() / "scratchpad_hot.txt"
     names = set()
     if path.exists():
         for line in path.read_text().splitlines():

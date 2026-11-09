@@ -47,7 +47,28 @@ $Work = Join-Path $Root "work"
 $Build = Join-Path $Root $(if ($Public) { "out\build-public" } else { "out\build" })
 $ToolsBuild = Join-Path $Root "out\tools"
 $Tools = Join-Path $Root "transformers\tools"
-$ElfName = "SLUS_206.68"
+
+# --- The release being built: USA (SLUS-20668, transformers\config\) or another one with its own
+# config (transformers\config\versions\<serial>\). TF_GAME_VERSION when set; else the release whose
+# executable is in game\; else the disc image's (extract_iso.py --detect). The Python tools read
+# TF_GAME_VERSION for the config they use.
+$Versions = [ordered]@{}
+$Versions["SLUS-20668"] = (Get-Content (Join-Path $Root "transformers\config\game.json") -Raw | ConvertFrom-Json).elf_name
+foreach ($f in Get-ChildItem (Join-Path $Root "transformers\config\versions") -Filter game.json -Recurse -ErrorAction SilentlyContinue) {
+    $Versions[$f.Directory.Name] = (Get-Content $f.FullName -Raw | ConvertFrom-Json).elf_name
+}
+$GameVersion = $env:TF_GAME_VERSION
+if (-not $GameVersion) {
+    $GameVersion = @($Versions.Keys | Where-Object { Test-Path (Join-Path $Game $Versions[$_]) }) | Select-Object -First 1
+}
+if (-not $GameVersion) {
+    $disc = if ($Iso) { $Iso } else { (Get-ChildItem $Root -Filter *.iso -File | Select-Object -First 1).FullName }
+    if ($disc) { $GameVersion = (& python (Join-Path $Tools "extract_iso.py") --detect $disc | Out-String).Trim() }
+}
+if (-not $GameVersion) { $GameVersion = "SLUS-20668" }
+if (-not $Versions.Contains($GameVersion)) { throw "No config for the release $GameVersion (transformers\config\versions\$GameVersion)." }
+$env:TF_GAME_VERSION = $GameVersion
+$ElfName = $Versions[$GameVersion]
 
 # --- Timing: each step's time, a summary at the end, the record used for the next estimates -------
 $Clock = [Diagnostics.Stopwatch]::StartNew()
@@ -236,7 +257,7 @@ function Get-GeneratorArgs([string]$Dir) {
     $a + @("-G", $vs[0].Generator, "-DCMAKE_GENERATOR_INSTANCE=$($vs[0].Path)")
 }
 $genArgs = Get-GeneratorArgs $ToolsBuild
-$cmakeArgs = @("-S", $Root, "-B", $Build) + (Get-GeneratorArgs $Build)
+$cmakeArgs = @("-S", $Root, "-B", $Build, "-DTF_GAME_VERSION=$GameVersion") + (Get-GeneratorArgs $Build)
 if ($Public) { $cmakeArgs += "-DTF_OVERLAY_DIR=" } # (the overlay left out: transformers\CMakeLists.txt)
 
 # What the translation (steps 3-4) depends on, one line per input: "<name> <SHA-256>". The
