@@ -35,6 +35,9 @@
 #include "ps2_runtime.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_settings.h"
+#if defined(__linux__)
+#include "runtime/ps2_stick_response.h"
+#endif
 
 #include "port_ext.h"
 #include <algorithm>
@@ -386,6 +389,10 @@ namespace menu_mouse
             word(rdram, g_ownScreen) == g_own[g_ownIndex].vtable)
             own = &g_own[g_ownIndex];
         const bool shown = listShown || own != nullptr;
+#if defined(__linux__)
+        // The movement anti-deadzone would turn a small resting drift into a held menu direction.
+        ps2_stick_response::setMenuShown(shown);
+#endif
         if (static const bool traceList = std::getenv("TF_MENU_TRACE") != nullptr; traceList)
         {
             static uint32_t lastVtable = 1u;

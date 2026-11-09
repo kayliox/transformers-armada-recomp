@@ -16,11 +16,15 @@
   as on Windows.
 - Linux: the game finds its files and memory card saves whatever the case of their names, as on Windows, and the
   text and numbers it formats come out as on Windows.
+- Linux: the main menu has a Quit Game item, as PC games do.
+- Steam Deck: the button prompts show the Deck's A / B / X / Y (the bundle carries the sharp fonts and prompts).
 
 **Fixed**
 - The first level (Amazon Basin) no longer stops with "Generic fatal error" on Linux: a C library function the game
   uses behaved differently there.
 - The game no longer crashes when it closes on Linux with Zink.
+- Linux: a game menu no longer keeps scrolling on its own after the left stick is touched (a stick that rests a
+  little off centre, as a Steam Deck's can, read as held). Gameplay keeps the stick response.
 - The F1 menu no longer shows red stripes and broken text with Zink (Mesa's command reordering is turned off
   for the game; `ZINK_DEBUG` set by you still wins).
 

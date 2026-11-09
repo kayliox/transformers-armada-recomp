@@ -27,6 +27,10 @@ Zink crashed in that teardown (an abort, or a jump into a driver already unloade
 
 ps2_xinput_rumble: on Linux the game's vibration goes to the first gamepad with evdev force feedback (FF_RUMBLE):
 Steam's virtual pad under Steam, else an Xbox pad's own driver. Checked through Steam's virtual pad (SteamOS).
+
+Stick response, Linux: while a game menu is shown (the port says so: setMenuShown) the sticks reach the game as they
+are, without the movement's anti-deadzone, which turned a small resting drift (a Steam Deck stick) into a held
+direction and the menu cycled on its own. Gameplay keeps the response.
 ---
 diff --git a/ps2xIOP/src/emulator/imports/iop_cdvd.cpp b/ps2xIOP/src/emulator/imports/iop_cdvd.cpp
 index 3ac7367..c393f84 100644
@@ -317,6 +321,34 @@ index 22cf985..3d38362 100644
  
      void Initialize(uint8_t *vram, uint32_t vramSize) override;
      void Reset() override;
+diff --git a/ps2xRuntime/include/runtime/ps2_stick_response.h b/ps2xRuntime/include/runtime/ps2_stick_response.h
+index 4236121..709a208 100644
+--- a/ps2xRuntime/include/runtime/ps2_stick_response.h
++++ b/ps2xRuntime/include/runtime/ps2_stick_response.h
+@@ -67,8 +67,15 @@ namespace ps2_stick_response
+         if (mode == 3) return std::max(0.0f, previous - seconds / 0.2f);
+         return 0.0f;
+     }
++#if defined(__linux__)
++    inline void map(float &lx, float &ly, float &rx, float &ry, const Config &c, float weight, float deadzone, bool sony = false, bool inMenu = false)
++#else
+     inline void map(float &lx, float &ly, float &rx, float &ry, const Config &c, float weight, float deadzone, bool sony = false)
++#endif
+     {
++#if defined(__linux__)
++        if (inMenu) return;
++#endif
+         if (!c.enabled) return;
+         // Sony has already been decoded to a clamped axis. Reapply its old drift filter
+         // only at the original-car endpoint; the robot still receives the unfiltered axis.
+@@ -93,4 +100,7 @@ namespace ps2_stick_response
+     // Called only on the EE thread after validating the player's transformer state.
+     // mode: 0 robot/unavailable, 1 car, 2 transforming to car, 3 transforming to robot.
+     void sampleVehicle(int mode, float deadzone);
++#if defined(__linux__)
++    void setMenuShown(bool shown);
++#endif
+ }
 diff --git a/ps2xRuntime/include/runtime/ps2_vfs.h b/ps2xRuntime/include/runtime/ps2_vfs.h
 index ea7f761..4a57c01 100644
 --- a/ps2xRuntime/include/runtime/ps2_vfs.h
@@ -819,6 +851,95 @@ index fe1bb57..c58a14b 100644
  {
      {
          std::lock_guard<std::mutex> lock(m_wakeMutex);
+diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
+index 9a50e70..f632299 100644
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -45,6 +45,9 @@ namespace
+     std::mutex g_stickMutex;
+     float g_vehicleWeight = 0.0f, g_vehicleDeadzone = 0.2f;
+     std::chrono::steady_clock::time_point g_stickSample{};
++#if defined(__linux__)
++    std::atomic<bool> g_stickMenu{false};
++#endif
+     ps2_stick_response::Config stickConfig()
+     {
+         ps2_stick_response::Config c;
+@@ -77,6 +80,12 @@ void ps2_stick_response::sampleVehicle(int mode, float deadzone)
+     g_vehicleDeadzone = std::isfinite(deadzone) ? std::clamp(deadzone, 0.0f, 0.9f) : 0.2f;
+     g_stickSample = now;
+ }
++#if defined(__linux__)
++void ps2_stick_response::setMenuShown(bool shown)
++{
++    g_stickMenu.store(shown, std::memory_order_relaxed);
++}
++#endif
+ 
+ namespace
+ {
+@@ -749,6 +758,20 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+     }
+ 
+     const int gamepad = live && !sonyPad && ps2x::sonypad::glfwGamepadsAllowed() ? firstGamepad() : -1;
++#if defined(__linux__)
++    static int lastPad = -3;
++    const int selectedPad = sonyPad ? -2 : gamepad;
++    if (selectedPad != lastPad)
++    {
++        if (sonyPad)
++            std::fprintf(stderr, "[pad] selected native Sony controller\n");
++        else if (gamepad >= 0)
++            std::fprintf(stderr, "[pad] selected gamepad %d: %s\n", gamepad, GetGamepadName(gamepad));
++        else
++            std::fprintf(stderr, "[pad] no gamepad selected\n");
++        lastPad = selectedPad;
++    }
++#endif
+     // (TODO 200: a GLFW gamepad gets the game's vibration through XInput, ps2_xinput_rumble.h)
+     ps2x::xinput::notePadRead(gamepad >= 0);
+     if (gamepad >= 0)
+@@ -787,11 +810,18 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+     // The stick as the pad gives it: "the gamepad was used" (below) is judged on this, so the response's
+     // lift does not let a resting stick's small drift take the prompts from the keyboard.
+     const float padLx = lx, padLy = ly, padRx = rx, padRy = ry;
++#if defined(__linux__)
++    const bool stickMenu = g_stickMenu.load(std::memory_order_relaxed);
++#endif
+     if (sonyPad || gamepad >= 0)
+     {
+         std::lock_guard<std::mutex> lock(g_stickMutex);
+         const bool fresh = std::chrono::steady_clock::now() - g_stickSample < std::chrono::milliseconds(500);
++#if defined(__linux__)
++        ps2_stick_response::map(lx, ly, rx, ry, response, fresh ? g_vehicleWeight : 0.0f, g_vehicleDeadzone, sonyPad, stickMenu);
++#else
+         ps2_stick_response::map(lx, ly, rx, ry, response, fresh ? g_vehicleWeight : 0.0f, g_vehicleDeadzone, sonyPad);
++#endif
+     }
+ 
+     // The triggers as the pad has them (gamepadTriggers).
+@@ -903,5 +933,21 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+     data[5] = axisByte(ry);
+     data[6] = axisByte(lx);
+     data[7] = axisByte(ly);
++#if defined(__linux__)
++    static const bool tracePad = std::getenv("PS2X_PAD_TRACE") != nullptr;
++    if (tracePad)
++    {
++        static float lastX = 2.0f, lastY = 2.0f;
++        static int lastByteX = -1, lastByteY = -1, lastButtons = -1, lastMenu = -1;
++        if (padLx != lastX || padLy != lastY || data[6] != lastByteX || data[7] != lastByteY ||
++            btns != lastButtons || stickMenu != lastMenu)
++        {
++            std::fprintf(stderr, "[pad] raw %.3f,%.3f guest %u,%u buttons %04x menu %d\n",
++                         padLx, padLy, static_cast<unsigned>(data[6]), static_cast<unsigned>(data[7]),
++                         static_cast<unsigned>(btns), stickMenu);
++            lastX = padLx; lastY = padLy; lastByteX = data[6]; lastByteY = data[7]; lastButtons = btns; lastMenu = stickMenu;
++        }
++    }
++#endif
+     return true;
+ }
 diff --git a/ps2xRuntime/src/lib/ps2_rom_device.cpp b/ps2xRuntime/src/lib/ps2_rom_device.cpp
 index a72105b..3323574 100644
 --- a/ps2xRuntime/src/lib/ps2_rom_device.cpp
