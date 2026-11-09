@@ -4000,7 +4000,7 @@ namespace nr::frame
                             if (sigF)
                                 std::fclose(sigF);
                             sigTick = input.tick;
-                            sigF = std::fopen(("runs\\sig_" + std::to_string(input.tick) + ".txt").c_str(), "w");
+                            sigF = std::fopen(("runs/sig_" + std::to_string(input.tick) + ".txt").c_str(), "w");
                         }
                         if (sigF && draw.mesh)
                         {
