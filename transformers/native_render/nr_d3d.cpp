@@ -2383,8 +2383,16 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                                              D3DCOMPILE_IEEE_STRICTNESS);
                     if (!code)
                     {
-                        std::fprintf(stderr, "[native render] grass on the GPU: shader %s failed\n", entries[k]);
-                        return false;
+                        std::fprintf(stderr, "[native render] grass on the GPU: shader %s%s failed\n", entries[k], g_exact ? " (divisions in double)" : "");
+                        if (!g_exact)
+                            return false;
+                        // (a compiler without doubles - vkd3d's on Linux: the float divisions rather than the CPU's grass)
+                        std::fprintf(stderr, "[native render] grass on the GPU: its divisions in float instead\n");
+                        for (int j = 0; j < k; ++j)
+                            release(g_pso[j]);
+                        g_exact = false;
+                        k = -1;
+                        continue;
                     }
                     D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
                     cd.pRootSignature = g_root;

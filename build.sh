@@ -119,37 +119,11 @@ if [ "$skip_recompile" = 0 ]; then
     fi
 fi
 
-# 5. vkd3d for the native renderer: a pinned release (checked by its SHA-256), static, built once.
-vkd3d_version=2.1 vkd3d_sha=7510146aff2adfb4ae07ab890701a607e5ff7c66e57100cfc9f630ec92eeda6a
-vkd3d=$root/out/vkd3d-$vkd3d_version
+# 5. vkd3d for the native renderer (tools/build_vkd3d.sh: built once; nothing when its tools are missing)
 vkd3d_arg=-DTF_VKD3D_DIR=
 if [ "$no_vkd3d" = 0 ]; then
-    if [ ! -f "$vkd3d/lib/libvkd3d-utils.a" ]; then
-        missing=()
-        for tool in curl bison flex perl; do command -v "$tool" >/dev/null || missing+=("$tool"); done
-        perl -MJSON -e 1 2>/dev/null || missing+=("Perl's JSON module")
-        printf '#include <vulkan/vulkan.h>\n#include <spirv/unified1/spirv.h>\n' | "${CC:-cc}" -E -x c - >/dev/null 2>&1 ||
-            missing+=("the Vulkan and SPIR-V headers")
-        if [ "${#missing[@]}" -gt 0 ]; then
-            list=$(printf '%s, ' "${missing[@]}")
-            step "No native renderer: vkd3d needs ${list%, } (the emulated renderer only; --no-vkd3d: no notice)"
-        else
-            step "Building vkd3d $vkd3d_version (the native renderer's Direct3D 12 on Vulkan)"
-            src=$root/out/vkd3d-src
-            rm -rf "$src" && mkdir -p "$src"
-            if (curl -fsSL "https://dl.winehq.org/vkd3d/source/vkd3d-$vkd3d_version.tar.xz" -o "$src/vkd3d.tar.xz" &&
-                [ "$(sha "$src/vkd3d.tar.xz")" = "$vkd3d_sha" ] && tar -xJf "$src/vkd3d.tar.xz" -C "$src" --strip-components=1 &&
-                cd "$src" && CFLAGS="-O2 -fPIC -fno-lto" SONAME_LIBVULKAN=libvulkan.so.1 ./configure --prefix="$vkd3d" --libdir="$vkd3d/lib" \
-                    --enable-static --disable-shared --disable-tests --disable-demos --disable-doxygen-doc \
-                    --without-opengl --without-xcb --without-ncurses >configure.log 2>&1 &&
-                make -j"$(nproc)" >make.log 2>&1 && make install >>make.log 2>&1); then
-                rm -rf "$src"
-            else
-                step "vkd3d did not build (logs in $src): the emulated renderer only"
-            fi
-        fi
-    fi
-    [ -f "$vkd3d/lib/libvkd3d-utils.a" ] && vkd3d_arg=-DTF_VKD3D_DIR=$vkd3d
+    vkd3d=$("$root/tools/build_vkd3d.sh")
+    [ -n "$vkd3d" ] && vkd3d_arg=-DTF_VKD3D_DIR=$vkd3d
 fi
 
 # 6. The game
