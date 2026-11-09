@@ -381,6 +381,17 @@ namespace
                 tv /= 0.727934f * 1.25f * 0.93f;
             if (tv > 0.25f && tv < 0.875f)
                 aspect = ultrawide::shape();
+            // A shape measured on 3 frames in a row: at a change of screen the game writes the mode's width and its
+            // pixel aspect apart, and a frame read between them took the PAL release's 640x480 width with its
+            // 512x448 aspect for 16:9 - the 4:3 picture flipped to 16:9 and back for a frame, again and again, at the
+            // 50 / 60 Hz menu and its 60 Hz test (seen on the screen, 2026-11-10). (A movie's 4:3 at once, above.)
+            static float measured = 0.0f, settled = 0.0f;
+            static int same = 0;
+            same = aspect == measured ? same + 1 : 1;
+            measured = aspect;
+            if (same >= 3 || settled == 0.0f)
+                settled = aspect;
+            aspect = settled;
         }
         static float shown = 0.0f;
         if (aspect != shown)
