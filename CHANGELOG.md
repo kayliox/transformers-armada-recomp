@@ -22,6 +22,8 @@
   handheld (a Steam Deck) its text is a third larger.
 - Steam Deck (Gaming Mode): the game starts full screen, at the screen's own resolution (Display mode in F1 still
   decides once you change it).
+- Steam Deck: jump and fire are on the triggers (R2 fires, L2 jumps), the Mini-Con abilities on the bumpers. F1 >
+  Controls changes it; "Reset to default" comes back to it.
 
 **Fixed**
 - The first level (Amazon Basin) no longer stops with "Generic fatal error" on Linux: a C library function the game
@@ -29,6 +31,8 @@
 - The game no longer crashes when it closes on Linux with Zink.
 - Linux: a game menu no longer keeps scrolling on its own after the left stick is touched (a stick that rests a
   little off centre, as a Steam Deck's can, read as held). Gameplay keeps the stick response.
+- Linux: the robot no longer walks on its own in play with a stick that rests a little off centre (a dead zone of
+  12%; F1 > Controller > Stick dead zone changes it).
 - The F1 menu no longer shows red stripes and broken text with Zink (Mesa's command reordering is turned off
   for the game; `ZINK_DEBUG` set by you still wins).
 
