@@ -505,6 +505,26 @@ $end = $Clock.Elapsed.TotalSeconds
 $compileSeconds = if ($lastCompileAt) { $lastCompileAt - $buildStart } else { 0 }
 $linkSeconds = $end - $(if ($lastCompileAt) { $lastCompileAt } else { $buildStart })
 
+# 5b. The native renderer's shaders built into the executable (nr_d3d.cpp, cache::loadBaked): the executable just linked
+# compiles them all (--bake-shaders: no window, no device, no game) into the table CMake gave it empty; when that table
+# changed - the first build, or a changed shader - the renderer's file is compiled again and linked (~1 min). So no
+# start compiles them, the first one on a PC included.
+$builtExe = Join-Path $Build "transformers\$Config\TransformersRecomp.exe"
+$bakedTable = Join-Path $Build "transformers\baked\nr_shaders_baked.inc"
+if (Test-Path -LiteralPath $builtExe) {
+    Step "Building the renderer's shaders into the game" "shaders"
+    $ErrorActionPreference = "Continue"
+    & $builtExe --bake-shaders $bakedTable 2>&1 | ForEach-Object { "  $_" }
+    $baked = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    if ($baked -eq 2) {
+        Run cmake @("--build", $Build, "--config", $Config, "--target", "TransformersRecomp", "--", "/m", "/v:m", "/p:UseMultiToolTask=true") | Out-Null
+    } elseif ($baked -ne 0) {
+        Write-Host "  warning: the shaders could not be built in; the game compiles them at its first start instead" -ForegroundColor Yellow
+    }
+    Close-Stage
+}
+
 # --- The record for the next estimates, and the summary ---------------------------------------
 foreach ($k in $Spent.Keys) { if ($k -ne "compile") { $History[$k] = [Math]::Round($Spent[$k], 1) } }
 # (the rates: from a build with enough of one kind, the other kind's share taken at its old rate)
@@ -523,7 +543,7 @@ try {
     [pscustomobject]$History | ConvertTo-Json | Set-Content $TimesFile -Encoding ASCII
 } catch {}
 $names = [ordered]@{ fetch = "PS2Recomp"; patches = "patches"; extract = "the disc"; tools = "recompiler tools"; check = "checks";
-                     scan = "SDK scan"; functions = "functions"; translate = "translation"; sync = "generated files"; configure = "configure" }
+                     scan = "SDK scan"; functions = "functions"; translate = "translation"; sync = "generated files"; configure = "configure"; shaders = "shaders" }
 $parts = @()
 foreach ($k in $Spent.Keys) {
     if ($k -eq "compile" -or $Spent[$k] -lt 1) { continue }

@@ -34,4 +34,7 @@ namespace nr
     // ready the GS draws (the emulated drawing on), and the game's render device runs its own code where the native
     // one stands in later - a play recording's start and its replay wait for it (playrec.cpp).
     bool rendererStarting();
+    // `TransformersRecomp --bake-shaders <file>` (build.ps1, after linking): the renderer's shaders compiled and written
+    // as the table built into the next link (nr_d3d.cpp). 0: unchanged, 2: written anew, 1: failed.
+    int bakeShaders(const char *path);
 }

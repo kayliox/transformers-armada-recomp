@@ -29,6 +29,7 @@
 #include "ps2_debug_panel.h"
 #endif
 
+#include <cstring>
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -215,6 +216,10 @@ namespace
 
 int main(int argc, char *argv[])
 {
+    // build.ps1, after linking: the native renderer's shaders compiled into the table the next link builds in
+    // (nr_install.h). Nothing else runs: no game folder, window or device.
+    if (argc >= 3 && std::strcmp(argv[1], "--bake-shaders") == 0)
+        return nr::bakeShaders(argv[2]);
     // (TODO 186) The game's own log, runs\play_<date>.err / .out, when its output goes nowhere else (an installed
     // copy's Play.bat): first, so that everything below is in it.
     enterGameFolder(); // (first: the log, settings.ini and the game's files are all found from the game folder)
