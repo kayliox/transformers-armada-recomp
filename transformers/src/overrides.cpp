@@ -370,7 +370,14 @@ namespace
             std::memcpy(&width, rdram + kDisplayMode, sizeof(width));
             std::memcpy(&pixelAspect, rdram + kDisplayMode + 0x10u, sizeof(pixelAspect));
             // 1 for a 4:3 TV, 0.75 for a 16:9 one, 0.75 / k at an ultrawide shape (ultrawide.h).
-            const float tv = width != 0u ? pixelAspect * (640.0f / static_cast<float>(width)) * 0.93f : 1.0f;
+            float tv = width != 0u ? pixelAspect * (640.0f / static_cast<float>(width)) * 0.93f : 1.0f;
+            // The PAL release in its 50 Hz mode (tvStandard 1 at 0x6CDD38, pal60 0 at 0x6CF658) draws its taller PAL
+            // pixels: a 4:3 picture's pixel aspect is 0.727934 at width 512, 0.846 by the measure above - under the
+            // 16:9 threshold. Measured against its own 4:3 instead.
+            uint32_t standard = 0u;
+            std::memcpy(&standard, rdram + 0x006CDD38u, sizeof(standard));
+            if (standard == 1u && rdram[0x006CF658u] == 0u)
+                tv /= 0.727934f * 1.25f * 0.93f;
             if (tv > 0.25f && tv < 0.875f)
                 aspect = ultrawide::shape();
         }
