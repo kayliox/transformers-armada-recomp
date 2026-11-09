@@ -5,3 +5,5 @@
 *.jpg binary
 # The git hooks run under sh: LF line endings, whatever core.autocrlf says.
 .githooks/* text eol=lf
+# The Linux scripts (build.sh, setup.sh, update.sh, play.sh) run under bash: LF line endings too.
+*.sh text eol=lf

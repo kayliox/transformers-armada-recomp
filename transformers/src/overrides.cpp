@@ -102,7 +102,6 @@ namespace nr
     }
 }
 
-#if defined(_WIN32)
 // profiler.cpp
 void tfLogCallStack(const char *label);
 void tfGuardGuestWrites(uint32_t address, uint32_t length, uint32_t expected, bool useExpected);
@@ -113,7 +112,6 @@ void tfNoteFrameWork(bool begins, double workMs); // (profiler.cpp: TF_PROFILE_S
 void tfTestWindow(uint64_t vblank); // (profiler.cpp: TF_TEST_WINDOW, the window minimised / shown in tests)
 bool tfWindowAway(); // (profiler.cpp, TODO 117: the player has left the window - minimised, or another one has the focus)
 double tfThreadCpuMs();
-#endif
 
 namespace
 {

@@ -42,6 +42,13 @@
 #include <string>
 #include <thread>
 #include <vector>
+#if defined(__linux__)
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+#include <spawn.h>
+#include <sys/wait.h>
+extern char **environ;
+#endif
 
 namespace fs = std::filesystem;
 
@@ -213,10 +220,64 @@ namespace
                      ready ? "was ready: it draws alone from the first frame" : "had not got ready after 60 s: the GS draws until it is",
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     }
+
+#if defined(__linux__)
+    // The emulated renderer's GPU path needs GL_ARB_fragment_shader_interlock (gs_gpu.cpp); without it the GS draws on
+    // the CPU. Of Mesa's GL drivers only iris and Zink have it (docs/features.txt): AMD's radeonsi (the Steam Deck) and
+    // virgl do not, while Zink over a Vulkan driver with VK_EXT_fragment_shader_interlock (RADV, Venus) does. A hidden
+    // window in a child process asks, before this process makes any GL.
+    int glProbe()
+    {
+        SetTraceLogLevel(LOG_NONE);
+        SetConfigFlags(FLAG_WINDOW_HIDDEN);
+        InitWindow(16, 16, "gl probe");
+        const bool interlock = IsWindowReady() && glfwExtensionSupported("GL_ARB_fragment_shader_interlock");
+        CloseWindow();
+        return interlock ? 0 : 1;
+    }
+
+    bool glHasInterlock()
+    {
+        char self[] = "/proc/self/exe", flag[] = "--gl-probe";
+        char *args[] = {self, flag, nullptr};
+        pid_t pid = 0;
+        int status = 0;
+        return posix_spawn(&pid, self, nullptr, nullptr, args, environ) == 0 && waitpid(pid, &status, 0) == pid &&
+               WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+
+    // Zink when the default driver lacks the interlock and Zink has it. TF_ZINK=0: never, =1: always; a
+    // MESA_LOADER_DRIVER_OVERRIDE already set wins.
+    void chooseGlDriver()
+    {
+        const char *force = std::getenv("TF_ZINK");
+        if (std::getenv("MESA_LOADER_DRIVER_OVERRIDE") || (force && *force == '0'))
+            return;
+        const bool forced = force && *force == '1';
+        if (!forced && glHasInterlock())
+            return;
+        setenv("MESA_LOADER_DRIVER_OVERRIDE", "zink", 1);
+        if (!forced && !glHasInterlock())
+        {
+            unsetenv("MESA_LOADER_DRIVER_OVERRIDE");
+            std::fprintf(stderr, "[gl] no OpenGL driver here has GL_ARB_fragment_shader_interlock: the GS draws on the CPU\n");
+            return;
+        }
+        // Zink's command reordering garbles the F1 menu (ImGui through raylib's batches: stripes, wrong triangles;
+        // seen with Mesa 26.1 on Venus and on lavapipe); a ZINK_DEBUG already set wins.
+        setenv("ZINK_DEBUG", "noreorder", 0);
+        std::fprintf(stderr, "[gl] OpenGL through Zink (%s): the GPU renderer's pixel interlock (TF_ZINK=0: the default driver)\n",
+                     forced ? "TF_ZINK=1" : "the default driver lacks the interlock");
+    }
+#endif
 }
 
 int main(int argc, char *argv[])
 {
+#if defined(__linux__)
+    if (argc > 1 && std::string(argv[1]) == "--gl-probe") // (chooseGlDriver's child)
+        return glProbe();
+#endif
     // build.ps1, after linking: the native renderer's shaders compiled into the table the next link builds in
     // (nr_install.h). Nothing else runs: no game folder, window or device.
     if (argc >= 3 && std::strcmp(argv[1], "--bake-shaders") == 0)
@@ -270,17 +331,24 @@ int main(int argc, char *argv[])
     // (TODO 219) An HD set still being made: the sign that the game runs (the upscale waits), the window that carries on
     // with it when nothing does, and the watcher that tells the renderer and the F1 menu (hd_progress.h).
     hd_progress::start();
+#if defined(__linux__)
+    chooseGlDriver(); // (after settings.ini: TF_ZINK there counts; before any GL)
+#endif
     // (TODO 163) The renderer the settings choose by default: the native one (N1, the port's own - Emulated stays a
     // choice). Set before anything reads TF_RENDERER (the scale below, the native renderer's install, VU1's); a
     // settings.ini line or a variable already set wins.
+#if defined(_WIN32)
     if (!std::getenv("TF_RENDERER"))
     {
-#if defined(_WIN32)
         _putenv_s("TF_RENDERER", "native");
-#else
-        setenv("TF_RENDERER", "native", 1);
-#endif
     }
+#elif defined(TF_NATIVE_RENDERER)
+    if (!std::getenv("TF_RENDERER")) // (Linux with vkd3d: the native renderer as on Windows)
+        setenv("TF_RENDERER", "native", 1);
+#else
+    // Linux has no native renderer in this build (nr_none.cpp): always the emulated one, whatever settings.ini says.
+    setenv("TF_RENDERER", "emulated", 1);
+#endif
     // A scripted test run's start screens said in the environment, so a play recording keeps them (start_screens.h).
     start_screens::noteScriptedRun();
     // Play recording on (TF_PLAY_RECORDING / TF_PLAY_RECORD): VIF1 on the game's thread for the session (playrec.h).

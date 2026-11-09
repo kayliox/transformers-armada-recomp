@@ -16,6 +16,7 @@
 #include "nr_frame.h"
 #include "nr_glshare.h"
 
+#if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -26,6 +27,9 @@
 #include <d3d12.h>
 #include <d3dcompiler.h>
 #include <dxgi1_4.h>
+#else
+#include "nr_vkd3d.h" // (Linux: Direct3D 12 through vkd3d)
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -4225,7 +4229,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                     to = end && *end == '-' ? std::strtoull(end + 1, nullptr, 10) : from;
                     if (const char *k = std::getenv("TF_NATIVE_STREAM_SHRINK"))
                         shrink = static_cast<UINT>(std::max(1, std::atoi(k)));
-                    CreateDirectoryA("runs\\stream", nullptr);
+                    CreateDirectoryA("runs/stream", nullptr);
                     std::fprintf(stderr, "[native render] stream: every frame from tick %llu to %llu saved, shrunk %u times\n",
                                  static_cast<unsigned long long>(from), static_cast<unsigned long long>(to), shrink);
                     return to >= from;
@@ -4278,7 +4282,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                             o[2] = static_cast<uint8_t>(sum[0] / (k * k));
                         }
                     char path[96];
-                    std::snprintf(path, sizeof(path), "runs\\stream\\s_%06llu_%llu.bmp", static_cast<unsigned long long>(j.seq),
+                    std::snprintf(path, sizeof(path), "runs/stream/s_%06llu_%llu.bmp", static_cast<unsigned long long>(j.seq),
                                   static_cast<unsigned long long>(j.tick));
                     if (FILE *f = std::fopen(path, "wb"))
                     {
@@ -4577,6 +4581,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
         // TF_NATIVE_DEBUG=1: the debug layer, its messages on stderr; =2 adds GPU-based validation.
         const char *debug = std::getenv("TF_NATIVE_DEBUG");
         const bool debugging = debug && (*debug == '1' || *debug == '2');
+#if defined(_WIN32) // (vkd3d has neither the debug layer nor DRED)
         if (debugging)
         {
             ID3D12Debug *layer = nullptr;
@@ -4603,6 +4608,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
             }
             release(dred);
         }
+#endif
         if (const HRESULT made = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&g.device)); FAILED(made))
         {
             // (With the debug layer on, a fullscreen window's start makes the device fail with
@@ -4611,6 +4617,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                          debugging ? " - with the debug layer, run windowed (PS2X_FULLSCREEN=0)" : "");
             return false;
         }
+#if defined(_WIN32)
         // (TODO 163, with TF_NATIVE_DRED) A watch on the device every 50 ms: a GPU fault the OpenGL driver ends the process
         // over within seconds (the test PC's NVIDIA driver: nvoglv64 abort()) is told with DRED's last operations and
         // the faulting address before that - the renderer's own check (a frame's end) never came to it.
@@ -4692,6 +4699,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
             else
                 std::fprintf(stderr, "[native render] no debug message queue (the debug layer is not installed?)\n");
         }
+#endif
         D3D12_COMMAND_QUEUE_DESC qd{};
         qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
         if (FAILED(g.device->CreateCommandQueue(&qd, IID_PPV_ARGS(&g.queue))) ||
@@ -6897,6 +6905,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
     // The device's video memory in use (or its budget), from its adapter.
     void preUploadImpl(const std::shared_ptr<const Texture> &texture) { frame::preUpload(texture); }
 
+#if defined(_WIN32)
     uint64_t videoMemory(bool budget)
     {
         static IDXGIAdapter3 *adapter = nullptr;
@@ -6963,6 +6972,43 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
         }();
         return mb;
     }
+#else
+    uint64_t videoMemory(bool) { return 0; } // (no DXGI budget through vkd3d: the profile line shows 0)
+
+    // The graphics card as Vulkan tells it (nr_vkd3d.h), once the device is made (0: not known yet).
+    namespace adapter
+    {
+        std::mutex g_mutex;
+        bool g_known = false;
+        uint32_t g_vendor = 0;
+        uint64_t g_memoryMB = 0;
+        void look()
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            std::string name;
+            if (!g_known && nr::vk::describe(g.device, g_vendor, g_memoryMB, name))
+            {
+                g_known = true;
+                std::fprintf(stderr, "[native render] Vulkan through vkd3d: %s (vendor %04x, %llu MB of video memory)\n", name.c_str(),
+                             static_cast<unsigned>(g_vendor), static_cast<unsigned long long>(g_memoryMB));
+            }
+        }
+    }
+
+    uint32_t adapterVendor()
+    {
+        adapter::look();
+        return adapter::g_vendor;
+    }
+
+    uint64_t adapterMemoryMB()
+    {
+        if (const char *e = std::getenv("TF_NATIVE_VRAM_MB"); e && *e)
+            return std::strtoull(e, nullptr, 10);
+        adapter::look();
+        return adapter::g_memoryMB;
+    }
+#endif
 
     // The large images' policy (TODO 94): on a card of under ~5 GB a large image is used at 2048 at most (the
     // level of its chain of that size: 4096 images a quarter of their memory), under ~3 GB at 1024; above, as
@@ -7010,7 +7056,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
 
     uint64_t largeImageBudget()
     {
-        static const uint64_t budget = [] {
+        static const uint64_t budget = []() -> uint64_t { // (one return type where uint64_t is unsigned long)
             if (const char *e = std::getenv("TF_HIRES_BUDGET_MB"); e && *e)
                 return std::strtoull(e, nullptr, 10) << 20;
             const uint64_t mb = adapterMemoryMB();

@@ -4,6 +4,7 @@
 #include "hd_movies_decoder.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
@@ -15,6 +16,13 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <csignal>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <vector>
+extern char **environ;
 #endif
 
 namespace fs = std::filesystem;
@@ -30,6 +38,35 @@ namespace hd_movies_decoder
             const char *env = std::getenv("TF_FFMPEG");
             return env && *env ? env : "ffmpeg";
         }
+
+#if !defined(_WIN32)
+        // A process with its stdout into a pipe (no shell: the file name needs no quoting); false if it cannot start.
+        bool spawnReading(const std::vector<std::string> &args, pid_t &pid, int &readEnd)
+        {
+            int fds[2];
+            if (pipe(fds) != 0)
+                return false;
+            posix_spawn_file_actions_t actions;
+            posix_spawn_file_actions_init(&actions);
+            posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
+            posix_spawn_file_actions_addclose(&actions, fds[0]);
+            posix_spawn_file_actions_addclose(&actions, fds[1]);
+            std::vector<char *> argv;
+            for (const std::string &a : args)
+                argv.push_back(const_cast<char *>(a.c_str()));
+            argv.push_back(nullptr);
+            const int failed = posix_spawnp(&pid, argv[0], &actions, nullptr, argv.data(), environ);
+            posix_spawn_file_actions_destroy(&actions);
+            close(fds[1]);
+            if (failed)
+            {
+                close(fds[0]);
+                return false;
+            }
+            readEnd = fds[0];
+            return true;
+        }
+#endif
     }
 
     struct Decoder::Impl
@@ -41,11 +78,19 @@ namespace hd_movies_decoder
 #if defined(_WIN32)
         HANDLE process = nullptr;
         HANDLE pipe = nullptr;
+        long readSome(uint8_t *to, size_t bytes)
+        {
+            DWORD n = 0;
+            return ReadFile(pipe, to, static_cast<DWORD>(bytes), &n, nullptr) ? static_cast<long>(n) : -1;
+        }
+#else
+        pid_t process = 0;
+        int pipe = -1;
+        long readSome(uint8_t *to, size_t bytes) { return static_cast<long>(read(pipe, to, bytes)); }
 #endif
 
         void readFrames(int width, int height, double fps)
         {
-#if defined(_WIN32)
             const size_t texels = static_cast<size_t>(width) * static_cast<size_t>(height), size = texels * 4u;
             uint64_t index = 0;
             while (!stop)
@@ -57,7 +102,7 @@ namespace hd_movies_decoder
                 }
                 if (full)
                 {
-                    Sleep(2);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
                     continue;
                 }
                 Frame frame;
@@ -67,10 +112,10 @@ namespace hd_movies_decoder
                 size_t got = 0;
                 while (got < size && !stop)
                 {
-                    DWORD n = 0;
-                    if (!ReadFile(pipe, bytes + got, static_cast<DWORD>(size - got), &n, nullptr) || n == 0)
+                    const long n = readSome(bytes + got, size - got);
+                    if (n <= 0)
                         break; // (the end of the movie, or stopped)
-                    got += n;
+                    got += static_cast<size_t>(n);
                 }
                 if (got < size)
                     break;
@@ -78,11 +123,6 @@ namespace hd_movies_decoder
                 std::lock_guard<std::mutex> lock(mutex);
                 frames.push_back(std::move(frame));
             }
-#else
-            (void)width;
-            (void)height;
-            (void)fps;
-#endif
         }
     };
 
@@ -101,6 +141,32 @@ namespace hd_movies_decoder
             int w = 0, h = 0, num = 0, den = 1;
             const int n = std::fscanf(f, "%d,%d,%d/%d", &w, &h, &num, &den);
             _pclose(f);
+            if (n >= 2 && w > 0 && h > 0)
+            {
+                width = (height * w / h + 1) & ~1;
+                if (n >= 4 && num > 0 && den > 0)
+                    fps = static_cast<double>(num) / den;
+                return true;
+            }
+        }
+#else
+        std::string probe = "ffprobe";
+        if (const char *env = std::getenv("TF_FFMPEG"); env && *env)
+            probe = (fs::path(env).parent_path() / "ffprobe").string();
+        pid_t pid = 0;
+        int out = -1;
+        if (spawnReading({probe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate",
+                          "-of", "csv=p=0", file},
+                         pid, out))
+        {
+            char text[128] = {};
+            size_t got = 0;
+            for (ssize_t n; got + 1 < sizeof(text) && (n = read(out, text + got, sizeof(text) - 1 - got)) > 0;)
+                got += static_cast<size_t>(n);
+            close(out);
+            waitpid(pid, nullptr, 0);
+            int w = 0, h = 0, num = 0, den = 1;
+            const int n = std::sscanf(text, "%d,%d,%d/%d", &w, &h, &num, &den);
             if (n >= 2 && w > 0 && h > 0)
             {
                 width = (height * w / h + 1) & ~1;
@@ -158,11 +224,21 @@ namespace hd_movies_decoder
         });
         return true;
 #else
-        (void)file;
-        (void)width;
-        (void)height;
-        (void)fps;
-        return false;
+        pid_t pid = 0;
+        int out = -1;
+        if (!spawnReading({ffmpegPath(), "-v", "error", "-nostdin", "-i", file, "-an", "-vf",
+                           "scale=" + std::to_string(width) + ":" + std::to_string(height) + ":flags=lanczos", "-f", "rawvideo",
+                           "-pix_fmt", "rgba", "-"},
+                          pid, out))
+        {
+            std::fprintf(stderr, "[hd movies] cannot start %s (set TF_FFMPEG to the ffmpeg program)\n", ffmpegPath().c_str());
+            return false;
+        }
+        impl->process = pid;
+        impl->pipe = out;
+        impl->stop = false;
+        impl->reader = std::thread([this, width, height, fps] { impl->readFrames(width, height, fps); });
+        return true;
 #endif
     }
 
@@ -179,6 +255,17 @@ namespace hd_movies_decoder
         if (impl->process)
             CloseHandle(impl->process);
         impl->pipe = impl->process = nullptr;
+#else
+        if (impl->process > 0)
+            kill(impl->process, SIGTERM);
+        if (impl->reader.joinable())
+            impl->reader.join();
+        if (impl->pipe >= 0)
+            close(impl->pipe);
+        if (impl->process > 0)
+            waitpid(impl->process, nullptr, 0);
+        impl->pipe = -1;
+        impl->process = 0;
 #endif
         std::lock_guard<std::mutex> lock(impl->mutex);
         impl->frames.clear();

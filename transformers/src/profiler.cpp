@@ -1557,17 +1557,234 @@ void tfPostTestKey(int vk, bool down)
 #endif
 
 #if !defined(_WIN32)
-bool tfOverlayInputHook() { return false; }
-void tfOverlayTakeInput(std::vector<uint32_t> &, std::vector<int> &, float &, float &) {}
-int tfWheelScrollLines() { return 3; }
-void tfPostTestKey(int, bool) {}
-void tfTakeMenuMouse(int &left, int &right, float &wheel) { left = right = 0, wheel = 0.0f; }
-void tfHideCursorForPad() {}
-bool tfCursorHiddenForPad() { return false; }
+// Linux: the same input taps as the window procedure above, through GLFW's callbacks (raylib's own are kept: each of
+// these calls the one it replaced first). The windowing parts of the profiler (minidumps, the hang watchdog, the
+// test window) stay Windows' alone.
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+#include <execinfo.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <vector>
+
+namespace
+{
+    std::atomic<GLFWwindow *> g_window{nullptr};
+    std::mutex g_inputMutex;
+    std::vector<uint32_t> g_chars;
+    std::vector<int> g_keys; // (Windows virtual-key codes, as mod_menu.cpp's imguiKeyOf reads them: + down, - up)
+    float g_wheelX = 0.0f, g_wheelY = 0.0f, g_menuWheel = 0.0f;
+    int g_menuLeftClicks = 0, g_menuRightClicks = 0;
+    std::atomic<bool> g_cursorHiddenByPad{false};
+    std::atomic<bool> g_focused{false}, g_hadFocus{false}, g_iconified{false};
+
+    GLFWcharfun g_prevChar = nullptr;
+    GLFWkeyfun g_prevKey = nullptr;
+    GLFWscrollfun g_prevScroll = nullptr;
+    GLFWmousebuttonfun g_prevButton = nullptr;
+    GLFWcursorposfun g_prevCursor = nullptr;
+    GLFWwindowfocusfun g_prevFocus = nullptr;
+    GLFWwindowiconifyfun g_prevIconify = nullptr;
+
+    int virtualKeyOf(int key)
+    {
+        if (key >= GLFW_KEY_A && key <= GLFW_KEY_Z)
+            return key; // ('A'..'Z' in both)
+        switch (key)
+        {
+        case GLFW_KEY_BACKSPACE: return 0x08;
+        case GLFW_KEY_TAB: return 0x09;
+        case GLFW_KEY_ENTER:
+        case GLFW_KEY_KP_ENTER: return 0x0D;
+        case GLFW_KEY_ESCAPE: return 0x1B;
+        case GLFW_KEY_PAGE_UP: return 0x21;
+        case GLFW_KEY_PAGE_DOWN: return 0x22;
+        case GLFW_KEY_END: return 0x23;
+        case GLFW_KEY_HOME: return 0x24;
+        case GLFW_KEY_LEFT: return 0x25;
+        case GLFW_KEY_UP: return 0x26;
+        case GLFW_KEY_RIGHT: return 0x27;
+        case GLFW_KEY_DOWN: return 0x28;
+        case GLFW_KEY_INSERT: return 0x2D;
+        case GLFW_KEY_DELETE: return 0x2E;
+        default: return 0;
+        }
+    }
+
+    // The cursor back once the mouse or keyboard is used (a captured mouse - GLFW_CURSOR_DISABLED - is left alone).
+    void showCursorAgain(GLFWwindow *window)
+    {
+        if (g_cursorHiddenByPad.exchange(false) && glfwGetInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_HIDDEN)
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    }
+
+    void onChar(GLFWwindow *window, unsigned int c)
+    {
+        if (g_prevChar)
+            g_prevChar(window, c);
+        std::lock_guard<std::mutex> lock(g_inputMutex);
+        if (g_chars.size() < 256u)
+            g_chars.push_back(c);
+    }
+    void onKey(GLFWwindow *window, int key, int scancode, int action, int mods)
+    {
+        if (g_prevKey)
+            g_prevKey(window, key, scancode, action, mods);
+        if (action == GLFW_PRESS)
+            showCursorAgain(window);
+        const int vk = virtualKeyOf(key);
+        if (vk == 0 || action == GLFW_REPEAT) // (a held key's repeats left out, as on Windows)
+            return;
+        std::lock_guard<std::mutex> lock(g_inputMutex);
+        if (g_keys.size() < 256u)
+            g_keys.push_back(action == GLFW_PRESS ? vk : -vk);
+    }
+    void onScroll(GLFWwindow *window, double x, double y)
+    {
+        if (g_prevScroll)
+            g_prevScroll(window, x, y);
+        std::lock_guard<std::mutex> lock(g_inputMutex);
+        g_wheelY += static_cast<float>(y);
+        g_wheelX -= static_cast<float>(x);
+        g_menuWheel += static_cast<float>(y);
+    }
+    void onButton(GLFWwindow *window, int button, int action, int mods)
+    {
+        if (g_prevButton)
+            g_prevButton(window, button, action, mods);
+        if (action != GLFW_PRESS)
+            return;
+        showCursorAgain(window);
+        std::lock_guard<std::mutex> lock(g_inputMutex);
+        if (button == GLFW_MOUSE_BUTTON_LEFT)
+            ++g_menuLeftClicks;
+        else if (button == GLFW_MOUSE_BUTTON_RIGHT)
+            ++g_menuRightClicks;
+    }
+    void onCursor(GLFWwindow *window, double x, double y)
+    {
+        if (g_prevCursor)
+            g_prevCursor(window, x, y);
+        static double lastX = -1.0, lastY = -1.0;
+        if (lastX >= 0.0 && (x != lastX || y != lastY))
+            showCursorAgain(window);
+        lastX = x, lastY = y;
+    }
+    void onFocus(GLFWwindow *window, int focused)
+    {
+        if (g_prevFocus)
+            g_prevFocus(window, focused);
+        g_focused.store(focused != 0, std::memory_order_relaxed);
+        if (focused)
+            g_hadFocus.store(true, std::memory_order_relaxed);
+    }
+    void onIconify(GLFWwindow *window, int iconified)
+    {
+        if (g_prevIconify)
+            g_prevIconify(window, iconified);
+        g_iconified.store(iconified != 0, std::memory_order_relaxed);
+    }
+}
+
+void tfNoteWindow(void *window) { g_window.store(static_cast<GLFWwindow *>(window)); }
+
+// Installed once the window exists (the window's thread); false: no window.
+bool tfOverlayInputHook()
+{
+    static bool installed = false;
+    if (installed)
+        return true;
+    GLFWwindow *window = g_window.load();
+    if (!window)
+        return false;
+    g_prevChar = glfwSetCharCallback(window, onChar);
+    g_prevKey = glfwSetKeyCallback(window, onKey);
+    g_prevScroll = glfwSetScrollCallback(window, onScroll);
+    g_prevButton = glfwSetMouseButtonCallback(window, onButton);
+    g_prevCursor = glfwSetCursorPosCallback(window, onCursor);
+    g_prevFocus = glfwSetWindowFocusCallback(window, onFocus);
+    g_prevIconify = glfwSetWindowIconifyCallback(window, onIconify);
+    const bool focused = glfwGetWindowAttrib(window, GLFW_FOCUSED) != 0;
+    g_focused.store(focused);
+    if (focused)
+        g_hadFocus.store(true);
+    installed = true;
+    return true;
+}
+
+void tfOverlayTakeInput(std::vector<uint32_t> &chars, std::vector<int> &keys, float &wheelX, float &wheelY)
+{
+    std::lock_guard<std::mutex> lock(g_inputMutex);
+    chars.insert(chars.end(), g_chars.begin(), g_chars.end());
+    g_chars.clear();
+    keys.insert(keys.end(), g_keys.begin(), g_keys.end());
+    g_keys.clear();
+    wheelX = g_wheelX, wheelY = g_wheelY;
+    g_wheelX = g_wheelY = 0.0f;
+}
+
+void tfTakeMenuMouse(int &left, int &right, float &wheel)
+{
+    std::lock_guard<std::mutex> lock(g_inputMutex);
+    left = g_menuLeftClicks, right = g_menuRightClicks, wheel = g_menuWheel;
+    g_menuLeftClicks = g_menuRightClicks = 0;
+    g_menuWheel = 0.0f;
+}
+
+// (the window's thread) Hidden only over a normal cursor: a mouse the game has captured stays as it is.
+void tfHideCursorForPad()
+{
+    GLFWwindow *window = g_window.load();
+    if (window && !g_cursorHiddenByPad.exchange(true) && glfwGetInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_NORMAL)
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+}
+bool tfCursorHiddenForPad() { return g_cursorHiddenByPad.load(std::memory_order_relaxed); }
+int tfWheelScrollLines() { return 3; } // (no desktop-wide setting to read: Windows' default)
+
+// (Tests: TF_MENU_TYPE_TEST) A key typed as the keyboard would: its down and up, and on the down its character
+// (unshifted, as Windows translates it); -1: the wheel a notch down.
+void tfPostTestKey(int vk, bool down)
+{
+    std::lock_guard<std::mutex> lock(g_inputMutex);
+    if (vk < 0)
+    {
+        if (down)
+            g_wheelY -= 1.0f, g_menuWheel -= 1.0f;
+        return;
+    }
+    g_keys.push_back(down ? vk : -vk);
+    if (down && ((vk >= '0' && vk <= '9') || vk == ' '))
+        g_chars.push_back(static_cast<uint32_t>(vk));
+    else if (down && vk >= 'A' && vk <= 'Z')
+        g_chars.push_back(static_cast<uint32_t>(vk - 'A' + 'a'));
+}
+
+// (TODO 117) Minimised, or another window has the focus after this one had it - from the callbacks above, any thread.
+bool tfWindowAway()
+{
+    if (!g_window.load(std::memory_order_relaxed))
+        return false;
+    return g_iconified.load(std::memory_order_relaxed) ||
+           (!g_focused.load(std::memory_order_relaxed) && g_hadFocus.load(std::memory_order_relaxed));
+}
+
+// The host stack (glibc's backtrace: function names where the executable exports them).
+void tfLogCallStack(const char *label)
+{
+    void *frames[48];
+    const int count = backtrace(frames, 48);
+    std::fprintf(stderr, "[tf] %s: host stack (%d frames)\n", label, count);
+    std::fflush(stderr);
+    backtrace_symbols_fd(frames, count, STDERR_FILENO);
+}
+
 void tfWatchdogFrame() {}
 void tfNoteFrameWork(bool, double) {}
-void tfNoteWindow(void *) {}
 void tfKeepFullSpeedInBackground() {}
 void tfTestWindow(uint64_t) {}
-bool tfWindowAway() { return false; }
 #endif

@@ -1,5 +1,28 @@
 # What's new
 
+## Unreleased
+
+**New**
+- Native Linux and Steam Deck version (no Proton needed). Set up with `./setup.sh --iso <your disc>`, play with
+  `./play.sh`, update with `./update.sh` (or F1 > About > Update now).
+- Linux: the native renderer works, drawn through Vulkan by vkd3d (Wine's Direct3D 12), with the HD textures and
+  sharp fonts (`./tools/make_hd_textures.sh`). The build makes vkd3d itself; without the tools it needs (setup.sh
+  lists them) the game has the emulated renderer only. On graphics drivers with double precision the grass is drawn
+  by the CPU there for now (vkd3d cannot yet compile that version of the grass shader).
+- Linux: OpenGL goes through Mesa's Zink driver when the usual driver lacks a feature the GPU renderer needs (AMD,
+  the Steam Deck). `TF_ZINK=0` turns this off.
+- Linux: the mouse in the menus, the F1 menu's typing and scrolling, Xbox-controller vibration and the HD movies work
+  as on Windows.
+- Linux: the game finds its files and memory card saves whatever the case of their names, as on Windows, and the
+  text and numbers it formats come out as on Windows.
+
+**Fixed**
+- The first level (Amazon Basin) no longer stops with "Generic fatal error" on Linux: a C library function the game
+  uses behaved differently there.
+- The game no longer crashes when it closes on Linux with Zink.
+- The F1 menu no longer shows red stripes and broken text with Zink (Mesa's command reordering is turned off
+  for the game; `ZINK_DEBUG` set by you still wins).
+
 ## 0.4.6
 
 **New**

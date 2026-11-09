@@ -63,7 +63,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SRC = PROJECT_ROOT / "Extracted" / "converted" / "textures"
 DEFAULT_OUT = PROJECT_ROOT / "Extracted" / "upscaled"
 DEFAULT_WORK = PROJECT_ROOT / "Extracted" / "work" / "upscale"
-DEFAULT_EXE = PROJECT_ROOT / "ThirdParty" / "realesrgan" / "realesrgan-ncnn-vulkan.exe"
+DEFAULT_EXE = PROJECT_ROOT / "ThirdParty" / "realesrgan" / ("realesrgan-ncnn-vulkan.exe" if sys.platform == "win32" else "realesrgan-ncnn-vulkan")
 MANIFEST_NAME = "upscale_manifest.jsonl"
 SIZE_BUCKETS = (32, 64, 128, 256, 512, 1024)
 # Reference counts from the 2026-07-02 source scan; drift = warn, not fail.
@@ -373,6 +373,8 @@ def run_binary(exe, in_dir, out_dir, model, tile, gpu, stop=None, gentle=False):
     (returncode, stderr text, stopped)."""
     cmd = [str(exe), "-i", str(in_dir), "-o", str(out_dir),
            "-n", model, "-s", "4", "-f", "png"]
+    if sys.platform != "win32":
+        cmd += ["-m", str(exe.resolve().parent / "models")]
     if tile or gentle:
         cmd += ["-t", str(tile or 128)]
     if gpu is not None:

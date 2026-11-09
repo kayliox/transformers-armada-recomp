@@ -136,6 +136,9 @@ Some bugs are in the original game on the PlayStation 2 too. This version fixes 
 
 The setup installs everything else for you (Git, Python and the Visual Studio C++ build tools).
 
+**On Linux or a Steam Deck** the game can also run natively, without Windows: see
+[Linux and Steam Deck (native)](#linux-and-steam-deck-native) below.
+
 ## Install
 
 1. **Download** `tfa-setup.exe` with the button above.
@@ -194,7 +197,26 @@ Tips for the Deck:
 - The settings menu opens with **F1**, or by holding **View** and **Menu** together on the Deck's controls (the
   Deck's buttons work like an Xbox controller).
 - In **F1 > Graphics**, the **Low** or **Medium** preset suits the Deck best.
-- A native Linux and Steam Deck version is planned; until then the game runs through Proton.
+- You can also run the game natively on the Deck, without Proton: see the next section.
+
+## Linux and Steam Deck (native)
+
+The game also builds as a native Linux program, with both renderers: the native one (as on Windows, drawn through
+Vulkan) and "Emulated (PS2)". HD textures and sharp fonts work too: make them with `./tools/make_hd_textures.sh`.
+
+**On a Linux PC:**
+
+1. Get the code: `git clone --recursive https://github.com/kayliox/transformers-armada-recomp`
+2. In that folder run `./setup.sh --iso "/path/to/Transformers (USA).iso"`. If tools are missing, it lists them with
+   the command that installs them on your distribution; install them and run it again. The first build takes about
+   15 to 25 minutes.
+3. Play with `./play.sh`. Update with `./update.sh`, or in the game with **F1 > About > Update now**.
+
+**On a Steam Deck:** SteamOS cannot install the build tools directly. Either build on a Linux PC and copy the whole
+folder to the Deck, or build on the Deck inside a container (Desktop Mode, Konsole):
+`distrobox create -n tfa-build -i ubuntu:24.04`, then `distrobox enter tfa-build`, install the tools `setup.sh` asks
+for, and run `./setup.sh` there. Then add `play.sh` to Steam as a non-Steam game (**Games > Add a Non-Steam Game to
+My Library > Browse**, file type **All Files**) and start it from Gaming Mode.
 
 ## Controls
 

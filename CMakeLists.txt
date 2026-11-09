@@ -12,6 +12,12 @@ project(TransformersRecomp LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# The runtime's SSE4.1 intrinsics: MSVC takes them without a flag, GCC and Clang need -msse4.1 (PS2Recomp's own CI
+# passes it on the command line).
+if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    add_compile_options(-msse4.1)
+endif()
+
 set(PS2RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/PS2Recomp")
 if(NOT EXISTS "${PS2RECOMP_DIR}/ps2xRuntime/CMakeLists.txt")
     message(FATAL_ERROR "PS2Recomp submodule is missing. Run: git submodule update --init --recursive")
