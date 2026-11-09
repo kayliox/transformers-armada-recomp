@@ -430,6 +430,10 @@ namespace nr
         // Supersampling (TF_NATIVE_SSAA, default off): the 3D drawn at 1.5x the picture pixels each way, averaged
         // down into it. Any thread, takes effect next frame.
         void setSupersampling(bool on);
+        // Render scale (TF_NATIVE_RENDER_SCALE, default 100): the picture drawn with this percentage of the window's
+        // lines and shown enlarged to it - for graphics cards that cannot fill the screen's pixels at the game's rate.
+        // TF_NATIVE_HEIGHT, when set, still fixes the lines. Any thread, takes effect next frame.
+        void setRenderScale(int percent);
 
         // (N9 stage 2) A picture's time on the GPU (ms, smoothed; 0: not measured yet) - the pictures between frames' cap.
         double gpuPictureMs();

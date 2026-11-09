@@ -5867,6 +5867,31 @@ namespace nr
             s.unavailableHelp = "Only for the native renderer (Display: Renderer).";
             ps2_settings::add(s);
         }
+        // Its render scale (TF_NATIVE_RENDER_SCALE, live, 100% by default): fewer lines than the window's, shown enlarged.
+        // On a small integrated GPU (Intel N100 / UHD Graphics) the full-screen passes' pixels are what limits the frame
+        // rate: at 1080p it draws ~13 frames a second, at 50% ~34.
+        {
+            ps2_settings::Setting s;
+            s.key = "TF_NATIVE_RENDER_SCALE";
+            s.section = "Graphics";
+            s.label = "Render scale (native renderer)";
+            s.order = 57;
+            s.help = "Native renderer: the picture drawn with fewer pixels than the window has and enlarged to fill it - "
+                     "softer, but much lighter for the graphics card. For integrated graphics that cannot keep up at the "
+                     "screen's resolution. 100%: the window's own resolution.";
+            s.choices = {{"100", "100%"}, {"85", "85%"}, {"75", "75%"}, {"67", "67%"}, {"50", "50%"}};
+            s.defaultValue = "100";
+            s.apply = [](const std::string &value) {
+                d3d::setRenderScale(std::atoi(value.c_str()));
+                return true;
+            };
+            s.available = []() {
+                const char *on = std::getenv("TF_NATIVE_RENDER");
+                return ps2_settings::choice("TF_RENDERER") == "native" || (on && *on && *on != '0');
+            };
+            s.unavailableHelp = "Only for the native renderer (Display: Renderer).";
+            ps2_settings::add(s);
+        }
         // Its quality preset (TF_NATIVE_QUALITY, a restart; TODO 94): Automatic picks from the graphics card's memory.
         {
             ps2_settings::Setting s;

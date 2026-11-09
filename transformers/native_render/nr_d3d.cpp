@@ -1723,6 +1723,7 @@ float4 smaaBlendPs(SmaaBlendOut i) : SV_Target
         // changes it live). Its cost (TF_NATIVE_PROFILE): the render thread's recording, the GPU's.
         std::atomic<int> g_aa{-1};
         std::atomic<int> g_ssaa{-1}; // (supersampling: -1 not read yet, then 0/1 - setSupersampling)
+        std::atomic<int> g_renderScale{-1}; // (the picture's lines, % of the window's: -1 not read yet - setRenderScale)
         double g_aaCpu = 0.0, g_aaGpu = 0.0;
         double g_frameGpu = 0.0, g_slotWaitMs = 0.0; // (TF_NATIVE_PROFILE: the whole frame on the GPU; the render thread waiting for a frame slot)
         std::atomic<double> g_gpuPictureMs{0.0};      // (N9 stage 2: a picture's time on the GPU, smoothed - the pictures' cap)
@@ -7393,6 +7394,11 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
         g_ssaa.store(on ? 1 : 0, std::memory_order_relaxed);
     }
 
+    void setRenderScale(int percent)
+    {
+        g_renderScale.store(std::clamp(percent, 25, 100), std::memory_order_relaxed);
+    }
+
     void setAntiAliasing(int mode)
     {
         g_aa.store(std::clamp(mode, 0, 2), std::memory_order_relaxed);
@@ -7646,7 +7652,15 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
             const char *v = std::getenv("TF_NATIVE_HEIGHT");
             return v && *v ? std::atoi(v) : 0;
         }();
-        const int window = g_windowLines.load(std::memory_order_relaxed);
+        // (the render scale: that share of the window's lines, the picture shown enlarged - setRenderScale; unset by the
+        // settings, TF_NATIVE_RENDER_SCALE or 100)
+        if (g_renderScale.load(std::memory_order_relaxed) < 0)
+        {
+            const char *e = std::getenv("TF_NATIVE_RENDER_SCALE");
+            int expected = -1;
+            g_renderScale.compare_exchange_strong(expected, e && *e ? std::clamp(std::atoi(e), 25, 100) : 100);
+        }
+        const int window = g_windowLines.load(std::memory_order_relaxed) * g_renderScale.load(std::memory_order_relaxed) / 100;
         // (TODO 255) A movie shown as a band of the picture's rows (ps2_host_display::setPictureBand): the picture as
         // many lines taller as the band is short of it, so the band itself still has the window's lines.
         float bandTop = 0.0f, bandBottom = 1.0f;
