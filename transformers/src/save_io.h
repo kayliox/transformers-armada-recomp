@@ -42,6 +42,15 @@ namespace save_io
     constexpr const char *kNtscDirectory = "BASLUS-20668 TRANSFM";
     constexpr const char *kPalDirectory = "BESLES-52388 TRANSFM";
 
+    // The region of the saves on this port's own memory card: its release's (the game reads only its own).
+#if defined(TF_GAME_PAL)
+    constexpr Region kCardRegion = Region::Pal;
+    constexpr const char *kCardDirectory = kPalDirectory;
+#else
+    constexpr Region kCardRegion = Region::Ntsc;
+    constexpr const char *kCardDirectory = kNtscDirectory;
+#endif
+
     Region regionOf(const std::string &directory);
     const char *regionName(Region region);
 

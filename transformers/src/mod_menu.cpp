@@ -383,12 +383,12 @@ namespace mod_menu
                        "Exports go to Exports\\, and every import first copies the save it replaces to Backups\\.\n";
         }
 
-        // The save on the port's card now (the NTSC one: this game does not read a PAL one there).
+        // The save on the port's card now (its release's: the game does not read the other region's there).
         bool cardSave(save_io::Save &out)
         {
             std::string error;
             std::error_code ec;
-            const fs::path dir = cardFolder() / save_io::kNtscDirectory;
+            const fs::path dir = cardFolder() / save_io::kCardDirectory;
             if (!fs::is_directory(dir, ec))
                 return false;
             auto saves = save_io::load(dir, error);
@@ -413,7 +413,7 @@ namespace mod_menu
                     return;
                 }
             }
-            if (!save_io::writeFolder(save_io::convert(save, save_io::Region::Ntsc), cardFolder(), error))
+            if (!save_io::writeFolder(save_io::convert(save, save_io::kCardRegion), cardFolder(), error))
                 g_saveMessage = "Import failed: " + error;
             else
                 g_saveMessage = std::string("Imported (") + save_io::regionName(save.region) +
