@@ -8030,6 +8030,94 @@ namespace
         pngsBefore = pngs;
     }
 
+    // (TF_FPS=1) Every 2 s of wall time: the game's frames, VBlanks and pictures a second, the EE's work and the host's
+    // idle time a frame. Called once a frame by the frame-kick hooks (the USA one and the PAL one).
+    void printFrameRate(PS2Runtime *runtime)
+    {
+        using clock = std::chrono::steady_clock;
+        static auto windowStart = clock::now();
+        static uint32_t frames = 0;
+        static uint64_t windowTick = 0;
+        static uint64_t windowPictures = 0;
+        static uint64_t windowLeftOut = 0;
+        static auto windowIdle = runtime->eeScheduler().idleHostTime();
+        // The 1% low (issue 12's thread placement bench): the frames of the last 30 s (the state load left out, as
+        // bench.ps1 does), the average of the slowest 1% as a rate. A ring buffer, so a long session costs no more
+        // than a short one and the report does not hitch the frames it measures.
+        struct FrameTime
+        {
+            clock::time_point at;
+            float ms;
+        };
+        constexpr size_t kRingFrames = 16384u; // (30 s at up to ~540 frames a second; faster, the window is shorter)
+        constexpr auto kLowWindow = std::chrono::seconds(30);
+        static std::vector<FrameTime> ring(kRingFrames);
+        static std::vector<float> slowest = []
+        {
+            std::vector<float> v;
+            v.reserve(kRingFrames);
+            return v;
+        }();
+        static size_t ringNext = 0;
+        static size_t ringCount = 0;
+        static clock::time_point lastFrame{};
+        static bool reportedOnce = false;
+        const auto frameNow = clock::now();
+        if (reportedOnce && lastFrame != clock::time_point{})
+        {
+            ring[ringNext] = FrameTime{frameNow, std::chrono::duration<float, std::milli>(frameNow - lastFrame).count()};
+            ringNext = (ringNext + 1u) % kRingFrames;
+            ringCount = std::min(ringCount + 1u, kRingFrames);
+        }
+        lastFrame = frameNow;
+        ++frames;
+        const double elapsed = std::chrono::duration<double>(frameNow - windowStart).count();
+        if (elapsed >= 2.0)
+        {
+            const uint64_t tick = runtime->eeScheduler().currentVSyncTick();
+            ps2_host_display::Clock::time_point lastPicture{};
+            const uint64_t pictures = ps2_host_display::pictureCount(lastPicture);
+            std::cerr << "[tf] fps " << frames / elapsed << " vblank/s " << (tick - windowTick) / elapsed
+                      << " pictures/s " << (pictures - windowPictures) / elapsed
+                      << " EE work ms a frame "
+                      << (g_workFrames ? static_cast<double>(g_workCycleSum) / g_workFrames / kEeCyclesPerMs : 0.0)
+                      << " (at most " << g_workCycleMax / kEeCyclesPerMs << ")"
+                      << " host idle ms a frame "
+                      << std::chrono::duration<double, std::milli>(runtime->eeScheduler().idleHostTime() - windowIdle).count() /
+                             std::max(frames, 1u)
+                      << " in-between left out " << ps2_host_display::secondFieldsLeftOut() - windowLeftOut;
+            // (newest first, up to the first frame older than the window)
+            slowest.clear();
+            for (size_t i = 0; i < ringCount; ++i)
+            {
+                const FrameTime &f = ring[(ringNext + kRingFrames - 1u - i) % kRingFrames];
+                if (frameNow - f.at > kLowWindow)
+                    break;
+                slowest.push_back(f.ms);
+            }
+            if (slowest.size() >= 100u)
+            {
+                const size_t count = slowest.size() / 100u;
+                std::nth_element(slowest.begin(), slowest.begin() + static_cast<std::ptrdiff_t>(count - 1u), slowest.end(), std::greater<float>());
+                double sum = 0.0;
+                for (size_t i = 0; i < count; ++i)
+                    sum += slowest[i];
+                std::cerr << " 1% low " << (sum > 0.0 ? 1000.0 * static_cast<double>(count) / sum : 0.0);
+            }
+            std::cerr << std::endl;
+            reportedOnce = true;
+            frames = 0;
+            windowTick = tick;
+            windowPictures = pictures;
+            windowLeftOut = ps2_host_display::secondFieldsLeftOut();
+            windowIdle = runtime->eeScheduler().idleHostTime();
+            windowStart = clock::now();
+            g_workCycleSum = 0u;
+            g_workCycleMax = 0u;
+            g_workFrames = 0u;
+        }
+    }
+
     void frameKick(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         testStall(runtime);
@@ -8046,90 +8134,7 @@ namespace
         if (g_censusAddress != 0u)
             reportCensus();
         if (g_printFps)
-        {
-            using clock = std::chrono::steady_clock;
-            static auto windowStart = clock::now();
-            static uint32_t frames = 0;
-            static uint64_t windowTick = 0;
-            static uint64_t windowPictures = 0;
-            static uint64_t windowLeftOut = 0;
-            static auto windowIdle = runtime->eeScheduler().idleHostTime();
-            // The 1% low (issue 12's thread placement bench): the frames of the last 30 s (the state load left out, as
-            // bench.ps1 does), the average of the slowest 1% as a rate. A ring buffer, so a long session costs no more
-            // than a short one and the report does not hitch the frames it measures.
-            struct FrameTime
-            {
-                clock::time_point at;
-                float ms;
-            };
-            constexpr size_t kRingFrames = 16384u; // (30 s at up to ~540 frames a second; faster, the window is shorter)
-            constexpr auto kLowWindow = std::chrono::seconds(30);
-            static std::vector<FrameTime> ring(kRingFrames);
-            static std::vector<float> slowest = []
-            {
-                std::vector<float> v;
-                v.reserve(kRingFrames);
-                return v;
-            }();
-            static size_t ringNext = 0;
-            static size_t ringCount = 0;
-            static clock::time_point lastFrame{};
-            static bool reportedOnce = false;
-            const auto frameNow = clock::now();
-            if (reportedOnce && lastFrame != clock::time_point{})
-            {
-                ring[ringNext] = FrameTime{frameNow, std::chrono::duration<float, std::milli>(frameNow - lastFrame).count()};
-                ringNext = (ringNext + 1u) % kRingFrames;
-                ringCount = std::min(ringCount + 1u, kRingFrames);
-            }
-            lastFrame = frameNow;
-            ++frames;
-            const double elapsed = std::chrono::duration<double>(frameNow - windowStart).count();
-            if (elapsed >= 2.0)
-            {
-                const uint64_t tick = runtime->eeScheduler().currentVSyncTick();
-                ps2_host_display::Clock::time_point lastPicture{};
-                const uint64_t pictures = ps2_host_display::pictureCount(lastPicture);
-                std::cerr << "[tf] fps " << frames / elapsed << " vblank/s " << (tick - windowTick) / elapsed
-                          << " pictures/s " << (pictures - windowPictures) / elapsed
-                          << " EE work ms a frame "
-                          << (g_workFrames ? static_cast<double>(g_workCycleSum) / g_workFrames / kEeCyclesPerMs : 0.0)
-                          << " (at most " << g_workCycleMax / kEeCyclesPerMs << ")"
-                          << " host idle ms a frame "
-                          << std::chrono::duration<double, std::milli>(runtime->eeScheduler().idleHostTime() - windowIdle).count() /
-                                 std::max(frames, 1u)
-                          << " in-between left out " << ps2_host_display::secondFieldsLeftOut() - windowLeftOut;
-                // (newest first, up to the first frame older than the window)
-                slowest.clear();
-                for (size_t i = 0; i < ringCount; ++i)
-                {
-                    const FrameTime &f = ring[(ringNext + kRingFrames - 1u - i) % kRingFrames];
-                    if (frameNow - f.at > kLowWindow)
-                        break;
-                    slowest.push_back(f.ms);
-                }
-                if (slowest.size() >= 100u)
-                {
-                    const size_t count = slowest.size() / 100u;
-                    std::nth_element(slowest.begin(), slowest.begin() + static_cast<std::ptrdiff_t>(count - 1u), slowest.end(), std::greater<float>());
-                    double sum = 0.0;
-                    for (size_t i = 0; i < count; ++i)
-                        sum += slowest[i];
-                    std::cerr << " 1% low " << (sum > 0.0 ? 1000.0 * static_cast<double>(count) / sum : 0.0);
-                }
-                std::cerr << std::endl;
-                reportedOnce = true;
-                frames = 0;
-                windowTick = tick;
-                windowPictures = pictures;
-                windowLeftOut = ps2_host_display::secondFieldsLeftOut();
-                windowIdle = runtime->eeScheduler().idleHostTime();
-                windowStart = clock::now();
-                g_workCycleSum = 0u;
-                g_workCycleMax = 0u;
-                g_workFrames = 0u;
-            }
-        }
+            printFrameRate(runtime);
         if (playrec::armed())
         {
             // (N12 b: the frame's check for a play recording or its replay - playrec.h)
@@ -9175,12 +9180,15 @@ namespace
         else if (g_padOverridden)
             ps2_stubs::clearPadOverrideState();
         g_padOverridden = overriding;
+        if (g_printFps)
+            printFrameRate(runtime); // (TF_FPS=1; the EE's work a frame reads 0 until the VBlank-wait hooks have PAL addresses)
         g_frameKick(rdram, ctx, runtime);
     }
 
     void applyTransformersPal(PS2Runtime &runtime)
     {
         parseInputScript(); // (TF_INPUT / TF_QUIT_VSYNC: the presses by VBlank tick)
+        g_printFps = std::getenv("TF_FPS") != nullptr;
         if ((g_frameKick = runtime.lookupFunction(kFrameKick)) != nullptr)
             runtime.registerFunction(kFrameKick, frameKickPal);
         ps2_stubs::setMpegGuestBuffersStream(true);
