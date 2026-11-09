@@ -30,7 +30,8 @@ Steam's virtual pad under Steam, else an Xbox pad's own driver. Checked through 
 
 Stick response, Linux: while a game menu is shown (the port says so: setMenuShown) the sticks reach the game as they
 are, without the movement's anti-deadzone, which turned a small resting drift (a Steam Deck stick) into a held
-direction and the menu cycled on its own. Gameplay keeps the response.
+direction and the menu cycled on its own. In play the inner dead zone is 12% (PS2X_STICK_DEADZONE; Windows keeps 5%):
+the anti-deadzone made a stick resting just past 5% walk the robot and turn the camera. Gameplay keeps the response.
 ---
 diff --git a/ps2xIOP/src/emulator/imports/iop_cdvd.cpp b/ps2xIOP/src/emulator/imports/iop_cdvd.cpp
 index 3ac7367..c393f84 100644
@@ -322,10 +323,54 @@ index 22cf985..3d38362 100644
      void Initialize(uint8_t *vram, uint32_t vramSize) override;
      void Reset() override;
 diff --git a/ps2xRuntime/include/runtime/ps2_stick_response.h b/ps2xRuntime/include/runtime/ps2_stick_response.h
-index 4236121..709a208 100644
+index 4236121..27f5829 100644
 --- a/ps2xRuntime/include/runtime/ps2_stick_response.h
 +++ b/ps2xRuntime/include/runtime/ps2_stick_response.h
-@@ -67,8 +67,15 @@ namespace ps2_stick_response
+@@ -12,6 +12,12 @@ namespace ps2_stick_response
+         bool vehicleOriginal = true;
+         float leftLift = 0.625f, rightLift = 0.20f, sensitivity = 1.33f;
+         float vehicleLift = -1.0f, vehicleResponse = 1.15f; // -1: first accepted guest byte
++#if defined(__linux__)
++        // (a Steam Deck's sticks can rest past 5% after a push: the lift made that a walk - PS2X_STICK_DEADZONE)
++        float inner = 0.12f;
++#else
++        float inner = 0.05f;
++#endif
+     };
+     inline uint8_t axisByte(float value)
+     {
+@@ -25,15 +31,15 @@ namespace ps2_stick_response
+         const float v = (static_cast<float>(value) - 128.0f) / 127.0f;
+         return !enabled && std::fabs(v) < 0.08f ? 0.0f : std::clamp(v, -1.0f, 1.0f);
+     }
+-    inline void radial(float &x, float &y, float lift, float gain, float response = 1.0f)
++    inline void radial(float &x, float &y, float lift, float gain, float response = 1.0f, float inner = 0.05f)
+     {
+         const float radius = std::hypot(x, y);
+-        if (!std::isfinite(radius) || radius <= 0.05f)
++        if (!std::isfinite(radius) || radius <= inner)
+         {
+             x = y = 0.0f;
+             return;
+         }
+-        const float travel = std::pow(std::min(1.0f, (radius - 0.05f) / 0.90f), response);
++        const float travel = std::pow(std::min(1.0f, (radius - inner) / (0.95f - inner)), response);
+         const float scale = (lift + (1.0f - lift) * travel) * gain / radius;
+         x = std::clamp(x * scale, -1.0f, 1.0f);
+         y = std::clamp(y * scale, -1.0f, 1.0f);
+@@ -46,9 +52,9 @@ namespace ps2_stick_response
+     inline float vehicleAxis(float value, const Config &c, float deadzone)
+     {
+         const float a = std::fabs(value);
+-        if (!std::isfinite(a) || a <= 0.05f)
++        if (!std::isfinite(a) || a <= c.inner)
+             return 0.0f;
+-        const float travel = std::pow(std::min(1.0f, (a - 0.05f) / 0.90f), c.vehicleResponse);
++        const float travel = std::pow(std::min(1.0f, (a - c.inner) / (0.95f - c.inner)), c.vehicleResponse);
+         const float anti = c.vehicleLift < 0.0f ? deadzone : c.vehicleLift;
+         float result = anti + (1.0f - anti) * travel;
+         if (c.vehicleLift < 0.0f)
+@@ -67,8 +73,15 @@ namespace ps2_stick_response
          if (mode == 3) return std::max(0.0f, previous - seconds / 0.2f);
          return 0.0f;
      }
@@ -341,7 +386,18 @@ index 4236121..709a208 100644
          if (!c.enabled) return;
          // Sony has already been decoded to a clamped axis. Reapply its old drift filter
          // only at the original-car endpoint; the robot still receives the unfiltered axis.
-@@ -93,4 +100,7 @@ namespace ps2_stick_response
+@@ -77,8 +90,8 @@ namespace ps2_stick_response
+         const float vy = c.vehicleOriginal ? original(ly) : vehicleAxis(ly, c, deadzone);
+         const float vrx = original(rx), vry = original(ry);
+         // The port keeps its 0.85 run threshold. Ease travel to retain the reference walking band.
+-        radial(lx, ly, c.leftLift, c.sensitivity, 1.3f);
+-        radial(rx, ry, c.rightLift, 1.0f);
++        radial(lx, ly, c.leftLift, c.sensitivity, 1.3f, c.inner);
++        radial(rx, ry, c.rightLift, 1.0f, 1.0f, c.inner);
+         if (weight >= 1.0f)
+         {
+             lx = vx; ly = vy;
+@@ -93,4 +106,7 @@ namespace ps2_stick_response
      // Called only on the EE thread after validating the player's transformer state.
      // mode: 0 robot/unavailable, 1 car, 2 transforming to car, 3 transforming to robot.
      void sampleVehicle(int mode, float deadzone);
@@ -852,7 +908,7 @@ index fe1bb57..c58a14b 100644
      {
          std::lock_guard<std::mutex> lock(m_wakeMutex);
 diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
-index 9a50e70..f632299 100644
+index 9a50e70..b2f14e4 100644
 --- a/ps2xRuntime/src/lib/ps2_pad.cpp
 +++ b/ps2xRuntime/src/lib/ps2_pad.cpp
 @@ -45,6 +45,9 @@ namespace
@@ -865,7 +921,17 @@ index 9a50e70..f632299 100644
      ps2_stick_response::Config stickConfig()
      {
          ps2_stick_response::Config c;
-@@ -77,6 +80,12 @@ void ps2_stick_response::sampleVehicle(int mode, float deadzone)
+@@ -63,6 +66,9 @@ namespace
+         const auto lift = ps2_settings::value("PS2X_STICK_VEHICLE_LIFT");
+         c.vehicleLift = lift == "off" ? 0.0f : number("PS2X_STICK_VEHICLE_LIFT", -1.0f, 0.0f, 0.9f);
+         c.vehicleResponse = number("PS2X_STICK_VEHICLE_RESPONSE", c.vehicleResponse, 0.25f, 4.0f);
++#if defined(__linux__)
++        c.inner = number("PS2X_STICK_DEADZONE", c.inner, 0.0f, 0.5f);
++#endif
+         return c;
+     }
+ }
+@@ -77,6 +83,12 @@ void ps2_stick_response::sampleVehicle(int mode, float deadzone)
      g_vehicleDeadzone = std::isfinite(deadzone) ? std::clamp(deadzone, 0.0f, 0.9f) : 0.2f;
      g_stickSample = now;
  }
@@ -878,7 +944,7 @@ index 9a50e70..f632299 100644
  
  namespace
  {
-@@ -749,6 +758,20 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+@@ -749,6 +761,20 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
      }
  
      const int gamepad = live && !sonyPad && ps2x::sonypad::glfwGamepadsAllowed() ? firstGamepad() : -1;
@@ -899,7 +965,7 @@ index 9a50e70..f632299 100644
      // (TODO 200: a GLFW gamepad gets the game's vibration through XInput, ps2_xinput_rumble.h)
      ps2x::xinput::notePadRead(gamepad >= 0);
      if (gamepad >= 0)
-@@ -787,11 +810,18 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+@@ -787,11 +813,18 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
      // The stick as the pad gives it: "the gamepad was used" (below) is judged on this, so the response's
      // lift does not let a resting stick's small drift take the prompts from the keyboard.
      const float padLx = lx, padLy = ly, padRx = rx, padRy = ry;
@@ -918,7 +984,7 @@ index 9a50e70..f632299 100644
      }
  
      // The triggers as the pad has them (gamepadTriggers).
-@@ -903,5 +933,21 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+@@ -903,5 +936,21 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
      data[5] = axisByte(ry);
      data[6] = axisByte(lx);
      data[7] = axisByte(ly);
