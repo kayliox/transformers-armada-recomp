@@ -31,11 +31,16 @@
 #include "game_version.h" // (TF_VA: the code addresses that differ in the PAL release)
 #include "guest_code.h"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -142,10 +147,141 @@ namespace language
         uint32_t g_afterLoader = 0u; // the added function the loader returns to
         uint32_t g_textTried = 0u;   // the strings file asked for last (once per change)
 
+        // ---- The button bar's words on screens made before the change ----------------------------------------------
+        // The bar at the bottom of a screen ("} Select  | Back") is the strings table's KEY_HELPTEXT_* entry, COPIED
+        // into the screen when it is made - and the front end's screens are made once, at start-up: after a change they
+        // kept the old language's words (the user's report, 2026-11-10: Spanish menus, "Retour" in the bar). The game
+        // never changes its language while it runs (it has no such menu), so nothing updates them. Here, after the new
+        // table is loaded, each bar entry's old text is paired with its new one (the same key in the table before and
+        // the one after - a std::map, its nodes: +0x0C the key, +0x18 the text, CodeWarrior std::strings: word 0 =
+        // capacity << 1 | 1, +4 the size, +8 the characters), and every std::string that holds exactly an old bar text
+        // gets the new one in its own memory, where it fits (as key_text.cpp does for the keyboard's words); where it
+        // does not, with its runs of spaces made one, else it is left (logged). Only whole bar texts are matched: their
+        // control glyphs and " | " make them no other string's text.
+        struct BarEntry
+        {
+            uint32_t node = 0u;
+            std::string key, text;
+        };
+        std::vector<BarEntry> g_barBefore;
+
+        bool stringAt(const uint8_t *rdram, uint32_t object, uint32_t maxSize, uint32_t &chars, uint32_t &size, uint32_t &capacity)
+        {
+            if (object < 0x00100000u || object + 12u > PS2_RAM_SIZE)
+                return false;
+            uint32_t flags, n, p;
+            std::memcpy(&flags, rdram + object, 4);
+            std::memcpy(&n, rdram + object + 4u, 4);
+            std::memcpy(&p, rdram + object + 8u, 4);
+            if (!(flags & 1u) || n == 0u || n > maxSize || (flags >> 1) < n || p < 0x00100000u ||
+                uint64_t{p} + n + 1u > PS2_RAM_SIZE || rdram[p + n] != 0u) // (64-bit: a word near 4 GB plus a size wraps)
+                return false;
+            chars = p, size = n, capacity = flags >> 1;
+            return true;
+        }
+
+        std::vector<BarEntry> barEntries(const uint8_t *rdram)
+        {
+            static const char kKey[] = "KEY_HELPTEXT";
+            std::vector<BarEntry> out;
+            uint32_t chars, size, capacity;
+            for (uint32_t node = 0x00100000u; node + 0x24u <= PS2_RAM_SIZE; node += 4u)
+            {
+                if (!(rdram[node + 0x0Cu] & 1u) || !stringAt(rdram, node + 0x0Cu, 64u, chars, size, capacity) || size < 12u ||
+                    std::memcmp(rdram + chars, kKey, 12u) != 0)
+                    continue;
+                BarEntry e;
+                e.node = node;
+                e.key.assign(reinterpret_cast<const char *>(rdram + chars), size);
+                if (!stringAt(rdram, node + 0x18u, 256u, chars, size, capacity))
+                    continue;
+                e.text.assign(reinterpret_cast<const char *>(rdram + chars), size);
+                // (Not a table's: the code's own list of the main menu's bar keys - 0x64DDB4, key and key side by side
+                // like a node - gave pairs of a KEY name and a text: the names, which the game looks entries up by, must
+                // never be written. The tables' nodes are in the heap, past the executable, and hold texts.)
+                if (node < 0x006CE480u || e.text.rfind("KEY_", 0) == 0) // (the PAL executable's end: 0x6CE480)
+                    continue;
+                out.push_back(std::move(e));
+            }
+            return out;
+        }
+
+        std::string squeezed(const std::string &s)
+        {
+            std::string o;
+            for (char c : s)
+                if (!(c == ' ' && !o.empty() && o.back() == ' '))
+                    o += c;
+            return o;
+        }
+
+        void renewBar(uint8_t *rdram)
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            const std::vector<BarEntry> after = barEntries(rdram);
+            std::unordered_set<uint32_t> before, values;
+            for (const BarEntry &e : g_barBefore)
+                before.insert(e.node), values.insert(e.node + 0x18u);
+            std::unordered_map<std::string, std::string> newByKey, oldToNew;
+            for (const BarEntry &e : after)
+            {
+                values.insert(e.node + 0x18u);
+                if (!before.count(e.node))
+                    newByKey[e.key] = e.text;
+            }
+            for (const BarEntry &e : g_barBefore)
+                if (auto it = newByKey.find(e.key); it != newByKey.end() && it->second != e.text)
+                {
+                    oldToNew.emplace(e.text, it->second);
+                    oldToNew.emplace(squeezed(e.text), it->second); // (a copy given a squeezed text at a change before)
+                }
+            int changed = 0, tight = 0, left = 0;
+            if (!oldToNew.empty())
+            {
+                size_t longest = 0u;
+                for (const auto &[from, to] : oldToNew)
+                    longest = std::max(longest, from.size());
+                uint32_t chars, size, capacity;
+                for (uint32_t object = 0x00100000u; object + 12u <= PS2_RAM_SIZE; object += 4u)
+                {
+                    if (!(rdram[object] & 1u) || values.count(object) ||
+                        !stringAt(rdram, object, static_cast<uint32_t>(longest), chars, size, capacity))
+                        continue;
+                    const auto it = oldToNew.find(std::string(reinterpret_cast<const char *>(rdram + chars), size));
+                    if (it == oldToNew.end())
+                        continue;
+                    std::string text = it->second;
+                    if (text.size() >= capacity)
+                    {
+                        text = squeezed(text);
+                        ++tight;
+                    }
+                    if (text.size() >= capacity)
+                    {
+                        if (left++ < 8)
+                            std::fprintf(stderr, "[tf] language: a bar's \"%s\" left (room for %u, \"%s\" needs %zu)\n",
+                                         it->first.c_str(), capacity - 1u, it->second.c_str(), it->second.size());
+                        continue;
+                    }
+                    std::memset(rdram + chars, 0, size + 1u);
+                    std::memcpy(rdram + chars, text.data(), text.size());
+                    const uint32_t n = static_cast<uint32_t>(text.size());
+                    std::memcpy(rdram + object + 4u, &n, 4);
+                    ++changed;
+                }
+            }
+            std::fprintf(stderr, "[tf] language: the button bars of screens made before: %d texts in the new language (%d with "
+                                 "spaces squeezed), %d left; %zu bar entries paired (%.0f ms)\n",
+                         changed, tight, left, oldToNew.size() / 2u,
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+            g_barBefore.clear();
+        }
+
         void afterLoader(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
         {
             const uint32_t strings = word(rdram, kStringsObject);
             std::fprintf(stderr, "[tf] language: the text loaded again (strings file %u)\n", inRam(strings) ? word(rdram, strings + 4u) : 0u);
+            renewBar(rdram);
             std::memcpy(ctx->r, g_kept.r, sizeof(g_kept.r));
             ctx->hi = g_kept.hi;
             ctx->lo = g_kept.lo;
@@ -219,6 +355,7 @@ namespace language
         if (loaded < 2u || loaded > 7u || loaded == kStrings[l] || g_textTried == kStrings[l])
             return false;
         g_textTried = kStrings[l];
+        g_barBefore = barEntries(rdram); // (the bar's texts in the table before: renewBar, once the new one is loaded)
         std::memcpy(g_kept.r, ctx->r, sizeof(g_kept.r));
         g_kept.hi = ctx->hi;
         g_kept.lo = ctx->lo;
