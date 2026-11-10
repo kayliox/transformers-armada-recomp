@@ -1,5 +1,73 @@
 # What's new
 
+## Unreleased
+
+**New**
+- Native Linux and Steam Deck version (no Proton needed). Set up with `./setup.sh --iso <your disc>`, play with
+  `./play.sh`, update with `./update.sh` (or F1 > About > Update now).
+- Linux: the native renderer works, drawn through Vulkan by vkd3d (Wine's Direct3D 12), with the HD textures and
+  sharp fonts (`./tools/make_hd_textures.sh`). The build makes vkd3d itself; without the tools it needs (setup.sh
+  lists them) the game has the emulated renderer only. vkd3d cannot yet compile the grass shader's double-precision
+  version, so the grass uses its single-precision version there (checked on a Steam Deck: the same picture, 0.1% of
+  pixels apart at blade edges).
+- Linux: OpenGL goes through Mesa's Zink driver when the usual driver lacks a feature the GPU renderer needs (AMD,
+  the Steam Deck). `TF_ZINK=0` turns this off.
+- Linux: the mouse in the menus, the F1 menu's typing and scrolling, Xbox-controller vibration and the HD movies work
+  as on Windows.
+- Linux: the game finds its files and memory card saves whatever the case of their names, as on Windows, and the
+  text and numbers it formats come out as on Windows.
+- Linux: the main menu has a Quit Game item, as PC games do.
+- Steam Deck: the button prompts show the Deck's A / B / X / Y (the bundle carries the sharp fonts and prompts).
+- Linux: the F1 menu uses the system's own font (Noto Sans or DejaVu Sans) instead of a blocky pixel font, and on a
+  handheld (a Steam Deck) its text is a third larger.
+- Steam Deck (Gaming Mode): the game starts full screen, at the screen's own resolution (Display mode in F1 still
+  decides once you change it).
+- Steam Deck: jump and fire are on the triggers (R2 fires, L2 jumps), the Mini-Con abilities on the bumpers. F1 >
+  Controls changes it; "Reset to default" comes back to it.
+- Linux: the Discord status works too (the Discord app's socket, including the Flatpak and Snap versions).
+- Linux: the F1 menu's "Restart now" (for settings that need a restart) works: the game starts again where you were.
+- Linux: the VSync setting (F1 > Graphics) works there too (Off: the pictures go to the screen at once).
+
+**Fixed**
+- The first level (Amazon Basin) no longer stops with "Generic fatal error" on Linux: a C library function the game
+  uses behaved differently there.
+- The game no longer crashes when it closes on Linux with Zink.
+- Linux: a game menu no longer keeps scrolling on its own after the left stick is touched (a stick that rests a
+  little off centre, as a Steam Deck's can, read as held). Gameplay keeps the stick response.
+- Linux: the robot no longer walks on its own in play with a stick that rests a little off centre (a dead zone of
+  12%; F1 > Controller > Stick dead zone changes it).
+- Linux: the frame rate no longer goes past what the screen shows (a Steam Deck's 90 Hz panel ran parts of the game
+  at 175 frames a second, the extra pictures never seen): less CPU, GPU and battery used.
+- The F1 menu no longer shows red stripes and broken text with Zink (Mesa's command reordering is turned off
+  for the game; `ZINK_DEBUG` set by you still wins).
+- The native renderer no longer draws a larger picture than the screen shows on narrower screens. On a Steam Deck's
+  16:10 screen, the 16:9 picture was drawn at 1424x801 and shrunk to 1280x720; it is now drawn at 1280x720.
+  Less work for the graphics card, the same picture on screen.
+- The game window no longer uploads an unused placeholder picture on every frame while the native renderer is on.
+  On Linux and Steam Deck it did this 60–90 times a second, so this saves a little CPU work.
+- Linux and Steam Deck: the native renderer uses less CPU and battery. Its Direct3D 12 layer (vkd3d) no longer wakes
+  a helper thread at every draw (on a Steam Deck at 60 frames a second: 12% less CPU, about 1.2 W less), and the
+  finished picture is copied to the window in one piece instead of row by row (half the time).
+- Linux and Steam Deck: "Finishing HD textures" no longer stays on screen after the HD set is finished, including
+  sets made before this fix.
+
+## 0.4.6
+
+**New**
+- While the HD textures are being made, a small line in the bottom-right corner shows how far along they are. When
+  they are done it tells you to restart, and F1 has a button for it that brings you back where you were.
+- F1 > Graphics can stop making the HD textures for this session, and carry on again.
+
+**Changed**
+- The HD textures are now made only while the game is open. They stop when you close it and carry on from where
+  they left off the next time you start it.
+
+**Fixed**
+- HD textures that came out with the wrong colours (green and purple floors in Antarctica on some graphics cards)
+  are no longer used: the game draws its own texture there instead, and the next HD check makes them again.
+- With a DualSense, the HQ's first-time messages (the warp gate, the first Data-Con and the like) now come from the
+  controller's speaker, like the other radio calls.
+
 ## 0.4.5
 
 **Fixed**

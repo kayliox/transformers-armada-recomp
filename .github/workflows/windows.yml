@@ -1,0 +1,26 @@
+# The Windows build without a disc (MSVC, as build.ps1 configures it): the PS2Recomp patch series, the runtime and
+# the port's own code (tf_port_objects: transformers/CMakeLists.txt compiles it when there is no generated game code).
+# A check that changes made on other platforms still compile on Windows. No game data is involved.
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0 # (version.cmake reads the commit's history)
+      - name: Apply the PS2Recomp patch series
+        shell: bash
+        run: ./build.sh --patches-only
+      - name: Build the runtime and the port's code
+        run: |
+          cmake -S . -B out/build -A x64
+          cmake --build out/build --config RelWithDebInfo --target ps2_runtime tf_port_objects -- /m /v:m

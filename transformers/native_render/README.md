@@ -411,8 +411,8 @@ and interfaces (their names and addresses are the game's).
    emulated picture came back, as built for it; the watchdog's dump hang_1_20261026_234013 there) -
    not seen again in two repeats there, nor with the debug layer on the test PC or GPU-based
    validation on this PC: like TODO 47's, not reproduced.
-4. The native picture shown live in the window. **Done** (`TF_NATIVE_LIVE=1`): rendered at
-   `TF_NATIVE_HEIGHT` lines (1080) in the display's shape, the GS buffers' targets scaled to it,
+4. The native picture shown live in the window. **Done** (`TF_NATIVE_LIVE=1`): rendered in the display's shape to fit
+   the window's width and height (`TF_NATIVE_HEIGHT` fixes the lines instead), the GS buffers' targets scaled to it,
    handed to the window through the runtime's picture provider (patch 0036), the overlays on
    top; the GS's picture when the native renderer has none (movies). Two frames in flight; the
    frame's CPU work on a render thread (`nr_thread.cpp`): the display list is read there from

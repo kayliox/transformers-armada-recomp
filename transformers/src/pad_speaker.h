@@ -40,6 +40,7 @@ namespace pad_speaker
     bool alertTone(const std::string &tone);
     // The HQ call's voice messages: the dialogue streams ("audiocue") opened from the call's answer on - the message,
     // the question after it and the Autobot's reply - until 4 s after the last of them ended (real time).
+    // (TODO 268) And the HQ's radio lines the scripts play with no call before them (first-time intros): always.
     void noteToneKeyed(const std::string &tone);
     bool alertStream(const std::string &file);
     void noteAlertStreamEnded();

@@ -48,6 +48,18 @@ namespace start_screens
         // skippable, then "%AtariLogo" (the first movie).
         constexpr uint32_t kTimeoutProcessInput = 0x00352860u;
         constexpr uint32_t kTimeoutProcessInputThunk = 0x00352C20u;
+#if !defined(_WIN32)
+        constexpr uint32_t kStartMenuInput = 0x00557540u;
+        constexpr uint32_t kStringFromChars = 0x00102AC0u;
+        constexpr uint32_t kStartMenuVtable = 0x006C7640u;
+        constexpr uint32_t kQuitKey = 0x0063BA68u; // the game's "KEY_QUITGAME"
+        constexpr uint32_t kMenuCount = 0x7B0u, kMenuSelected = 0x814u, kMenuState = 0x848u;
+        constexpr uint32_t kQuitRow = 4u, kMainList = 9u;
+        PS2Runtime::RecompiledFunction g_startMenuInput = nullptr;
+        PS2Runtime::RecompiledFunction g_stringFromChars = nullptr;
+        bool g_quitInstalled = false;
+#endif
+
 
         enum Mode : int
         {
@@ -328,9 +340,64 @@ namespace start_screens
             timeoutInput(rdram, runtime, part - 0x30u + read32(rdram, part + 0x20u));
             g_timeoutProcessInputThunk(rdram, ctx, runtime);
         }
+#if !defined(_WIN32)
+        void startMenuInput(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t menu = getRegU32(ctx, 4);
+            if (read32(rdram, menu + kMenuState) == kMainList &&
+                read32(rdram, menu + kMenuCount) == kQuitRow + 1u &&
+                read32(rdram, menu + kMenuSelected) == kQuitRow && getRegU32(ctx, 5) == 5u)
+            {
+                std::fprintf(stderr, "[tf] quit game selected from the main menu\n");
+                runtime->requestStop();
+                setReturnS32(ctx, 0);
+                ctx->pc = getRegU32(ctx, 31);
+                return;
+            }
+            g_startMenuInput(rdram, ctx, runtime);
+        }
+
+        // The list can still be drawn while its state changes; five rows identifies our extended list.
+        void stringFromChars(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t ra = getRegU32(ctx, 31);
+            if ((ra == 0x00313B9Cu || ra == 0x00313C84u || ra == 0x00313D5Cu) &&
+                getRegU32(ctx, 16) == kQuitRow)
+            {
+                const uint32_t menu = getRegU32(ctx, 17);
+                if (read32(rdram, menu) == kStartMenuVtable &&
+                    read32(rdram, menu + kMenuCount) == kQuitRow + 1u)
+                    SET_GPR_U32(ctx, 5, kQuitKey);
+            }
+            g_stringFromChars(rdram, ctx, runtime);
+        }
+#endif
+
 
         void startMenuUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
+#if !defined(_WIN32)
+            // The front end's shared list already has room for seven rows; its fifth is unused here. State 0 too: the
+            // main list starts in it (its first ~16 frames) and returns to it briefly - the row came late without it.
+            const uint32_t menu = getRegU32(ctx, 4);
+            const auto addQuitRow = [&]
+            {
+                const uint32_t state = read32(rdram, menu + kMenuState), count = read32(rdram, menu + kMenuCount);
+                if (!g_quitInstalled || (state != kMainList && state != 0u) || (count != kQuitRow && count != kQuitRow + 1u))
+                    return;
+                if (uint8_t *at = getMemPtr(rdram, menu + kMenuCount))
+                {
+                    const uint32_t five = kQuitRow + 1u;
+                    std::memcpy(at, &five, sizeof(five));
+                }
+                if (uint8_t *skip = getMemPtr(rdram, menu + 0x828u + kQuitRow))
+                    *skip = 0u;
+                if (uint8_t *slider = getMemPtr(rdram, menu + 0x584u + kQuitRow))
+                    *slider = 0u;
+            };
+            addQuitRow();
+#endif
+
             if (!g_menuReached)
             {
                 g_menuReached = true;
@@ -397,6 +464,15 @@ namespace start_screens
             runtime.registerFunction(kTitleUpdate, titleUpdate);
         if ((g_startMenuUpdate = runtime.lookupFunction(kStartMenuUpdate)) != nullptr)
             runtime.registerFunction(kStartMenuUpdate, startMenuUpdate);
+#if !defined(_WIN32)
+        g_startMenuInput = runtime.lookupFunction(kStartMenuInput);
+        g_stringFromChars = runtime.lookupFunction(kStringFromChars);
+        if ((g_quitInstalled = g_startMenuUpdate && g_startMenuInput && g_stringFromChars))
+        {
+            runtime.registerFunction(kStartMenuInput, startMenuInput);
+            runtime.registerFunction(kStringFromChars, stringFromChars);
+        }
+#endif
         if ((g_cardCheckProcessInput = runtime.lookupFunction(kCardCheckProcessInput)) != nullptr)
             runtime.registerFunction(kCardCheckProcessInput, cardCheckProcessInput);
         if ((g_timeoutProcessInput = runtime.lookupFunction(kTimeoutProcessInput)) != nullptr)

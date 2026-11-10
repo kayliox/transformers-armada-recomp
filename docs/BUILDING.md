@@ -36,6 +36,39 @@ The first build compiles about 22,000 generated functions and takes 15 to 25 min
 After that, `.\build.ps1` rebuilds only what changed. `.\build.ps1 -SkipRecompile` skips the translation step,
 for changes to the runtime or the port's code only (under a minute).
 
+## Linux (and Steam Deck)
+
+The game also builds as a native Linux program, with both renderers. The native renderer's Direct3D 12 runs through
+vkd3d (Wine's Direct3D 12 on Vulkan): `build.sh` downloads vkd3d 2.1 once, checks it, and builds it statically into
+`out/vkd3d-2.1`; without vkd3d's tools (or with `--no-vkd3d`) the game has the emulated renderer only.
+`./setup.sh` sets up a player's copy (prerequisite checks, then this build), `./update.sh` updates it (also F1 >
+About > Update now), `./play.sh` starts it.
+
+You need CMake 3.21 or newer, Ninja, a C++ compiler (GCC or Clang), Python 3, Git, pkg-config, and the development
+packages for X11, OpenGL and FFmpeg; for the native renderer also curl, bison, flex, Perl's JSON module and the
+Vulkan and SPIR-V headers. On Ubuntu or Debian:
+
+```sh
+sudo apt install cmake ninja-build g++ python3 git pkg-config libgl-dev libx11-dev libxrandr-dev libxinerama-dev \
+  libxcursor-dev libxi-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev \
+  curl bison flex libjson-perl libvulkan-dev spirv-headers
+```
+
+Then:
+
+```sh
+git clone --recursive https://github.com/kayliox/transformers-armada-recomp
+cd transformers-armada-recomp
+./build.sh --iso "/path/to/Transformers (USA).iso"
+```
+
+`./build.sh --skip-recompile` rebuilds only the executable. Start the game with
+`out/build/transformers/TransformersRecomp`.
+
+The emulated renderer's GPU path needs an OpenGL feature (`GL_ARB_fragment_shader_interlock`) that some drivers lack,
+AMD's among them (the Steam Deck too). The game then runs OpenGL through Mesa's Zink driver on Vulkan, which has it.
+`TF_ZINK=0` keeps the usual driver (the GS then draws on the CPU, slower); `TF_ZINK=1` always uses Zink.
+
 ## HD textures and sharp fonts
 
 ```powershell
@@ -52,6 +85,10 @@ first, and the game uses each one as soon as it is ready. While the game runs th
 graphics card) and carries on when you close it; `"while_playing": true` in `hd_textures\hd_options.json` keeps it
 going. If you close the window before it is done, the game carries on with it the next time it starts, in a small
 window of its own (F1 shows how far it is).
+
+On Linux, run `./tools/make_hd_textures.sh` instead (or add `--fonts-only` for fonts and prompts
+alone). It needs Python 3 with Pillow and numpy, plus curl, unzip and a Vulkan driver for upscaling.
+The native renderer loads them (the emulated one does not, as on Windows).
 
 ## Play
 

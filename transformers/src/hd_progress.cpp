@@ -37,7 +37,32 @@ namespace hd_progress
         std::atomic<uint64_t> g_generation{0};
         std::mutex g_mutex;
         std::string g_line;
+        std::string g_corner; // (TODO 267: cornerLine's, while the set is being made)
         fs::path g_dir;
+        // (TODO 267) A set seen unfinished this run that is done now (its time), or sharp text made meanwhile; and a
+        // maker at work now (the watcher's, every 5 s).
+        std::atomic<bool> g_ready{false};
+        std::atomic<bool> g_fontsReady{false};
+        std::atomic<bool> g_makerAlive{false};
+        std::atomic<int64_t> g_readyAtMs{0};
+
+        int64_t nowMs()
+        {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        }
+
+        // 1793 -> "1,793"
+        std::string grouped(long long n)
+        {
+            std::string digits = std::to_string(n < 0 ? 0 : n), out;
+            for (size_t i = 0; i < digits.size(); ++i)
+            {
+                if (i > 0 && (digits.size() - i) % 3 == 0)
+                    out.push_back(',');
+                out.push_back(digits[i]);
+            }
+            return out;
+        }
 
         struct Status
         {
@@ -70,6 +95,48 @@ namespace hd_progress
             return text.substr(at, end - at);
         }
 
+#if defined(__linux__)
+        // Older Linux makers finished the colours and fonts but left the status at "upscaled".
+        void finishLegacySet(const fs::path &file, Status &s, std::string &text)
+        {
+            if (s.state != "upscaled" || s.total <= 0 || s.done != s.total)
+                return;
+            const fs::path dir = file.parent_path();
+            std::error_code ec;
+            const auto upscaledAt = fs::last_write_time(file, ec);
+            if (ec)
+                return;
+            if (fs::file_size(dir / "upscaled_precolour" / "colour_gains.json", ec) == 0 || ec)
+                return;
+            const auto coloursAt = fs::last_write_time(dir / "upscaled_precolour" / "colour_gains.json", ec);
+            if (ec || coloursAt < upscaledAt)
+                return;
+            // Sharp fonts may already have been installed before the upscale.
+            if (fs::file_size(dir / "crisp_fonts" / "manifest.json", ec) == 0 || ec)
+                return;
+            // The colour ledger ends the offline match; the renderer's BC7 cache is not a finishing step.
+            const size_t at = text.find("\"upscaled\"", text.find("\"state\""));
+            if (at == std::string::npos)
+                return;
+            text.replace(at, sizeof("\"upscaled\"") - 1, "\"done\"");
+            fs::path tmp = file;
+            tmp += ".finished.tmp";
+            std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+            out << text;
+            out.close();
+            if (out)
+                fs::rename(tmp, file, ec);
+            if (!out || ec)
+            {
+                fs::remove(tmp, ec);
+                std::fprintf(stderr, "[hd textures] could not mark the finished Linux set done\n");
+                return;
+            }
+            s.state = "done";
+            std::fprintf(stderr, "[hd textures] the older Linux set's colours and fonts were already finished: marked done\n");
+        }
+#endif
+
         Status readStatus(const fs::path &file)
         {
             Status s;
@@ -78,11 +145,15 @@ namespace hd_progress
                 return s;
             std::stringstream ss;
             ss << in.rdbuf();
-            const std::string text = ss.str();
+            std::string text = ss.str();
             s.state = field(text, "state");
             s.done = std::atoll(field(text, "done").c_str());
             s.total = std::atoll(field(text, "total").c_str());
             s.ok = !s.state.empty();
+#if defined(__linux__)
+            in.close();
+            finishLegacySet(file, s, text);
+#endif
             return s;
         }
 
@@ -111,13 +182,41 @@ namespace hd_progress
                               s.state == "paused" ? " (PAUSED WHILE YOU PLAY)" : "");
                 line = text;
             }
+            // (TODO 267) The corner's, in plain words; the counts as the status file has them.
+            std::string corner;
+            if (s.ok && s.total > 0 && s.state != "done" && s.state != "card_broken")
+                corner = s.state != "checking" && s.done >= s.total
+                             ? std::string("Finishing HD textures") // (all made: their colours matched, the sharp text again)
+                             : std::string(s.state == "checking" ? "Checking HD textures " : "HD textures ") + grouped(s.done) + " / " +
+                                   grouped(s.total) + (s.state == "paused" ? ": paused while you play (carries on when you close the game)" : "");
             std::lock_guard<std::mutex> lock(g_mutex);
             g_line = std::move(line);
+            g_corner = std::move(corner);
         }
 
 #if defined(_WIN32)
         HANDLE g_running = INVALID_HANDLE_VALUE;
         DWORD g_ourMaker = 0; // (the window this game started: closed by the player, it is not started again)
+        // (TODO 267, the user's choice: the HD textures are made only while the game is open) The game's maker window,
+        // and everything it starts (Python, the upscaler), in a job of the game's that kills them when it closes - the
+        // game's end too, a crash included. Images are written whole (a file beside, then swapped in) and the lock goes
+        // with its process, so a stop leaves no half-made image and no stale lock; the next start carries on.
+        HANDLE g_makerJob = nullptr;
+        std::atomic<bool> g_stopped{false}; // (F1 > Stop: none made for the rest of this session)
+
+        HANDLE makerJob()
+        {
+            if (g_makerJob)
+                return g_makerJob;
+            g_makerJob = CreateJobObjectW(nullptr, nullptr);
+            if (g_makerJob)
+            {
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(g_makerJob, JobObjectExtendedLimitInformation, &info, sizeof info);
+            }
+            return g_makerJob;
+        }
 
         bool pidAlive(DWORD pid)
         {
@@ -160,24 +259,30 @@ namespace hd_progress
             std::error_code ec;
             if (!fs::exists(script, ec))
                 return;
-            std::wstring cmd = L"powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File \"" + script.wstring() + L"\" -Resume";
+            std::wstring cmd = L"powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File \"" + script.wstring() + L"\" -Resume -GamePid " +
+                               std::to_wstring(GetCurrentProcessId());
             STARTUPINFOW si{};
             si.cb = sizeof si;
             si.dwFlags = STARTF_USESHOWWINDOW;
             si.wShowWindow = SW_SHOWMINNOACTIVE;
             PROCESS_INFORMATION pi{};
             const std::wstring dir = game.wstring();
-            // (out of the game's job, where it has one - a launcher's - so that it carries on after the game closes)
+            // (TODO 267: in the game's own maker job - started suspended, put in the job, then let go - so that it ends
+            // with the game; out of a launcher's job where it can, which nests on older Windows only with breakaway)
             for (const DWORD extra : {static_cast<DWORD>(CREATE_BREAKAWAY_FROM_JOB), static_cast<DWORD>(0)})
             {
                 std::wstring line = cmd;
-                if (CreateProcessW(nullptr, line.data(), nullptr, nullptr, FALSE, CREATE_NEW_CONSOLE | BELOW_NORMAL_PRIORITY_CLASS | extra,
-                                   nullptr, dir.c_str(), &si, &pi))
+                if (CreateProcessW(nullptr, line.data(), nullptr, nullptr, FALSE,
+                                   CREATE_NEW_CONSOLE | BELOW_NORMAL_PRIORITY_CLASS | CREATE_SUSPENDED | extra, nullptr, dir.c_str(), &si, &pi))
                 {
+                    const HANDLE job = makerJob();
+                    const bool held = job && AssignProcessToJobObject(job, pi.hProcess);
+                    ResumeThread(pi.hThread);
                     g_ourMaker = pi.dwProcessId;
                     CloseHandle(pi.hThread);
                     CloseHandle(pi.hProcess);
-                    std::fprintf(stderr, "[hd textures] the set is not finished: a window carries on with it (it waits while the game runs)\n");
+                    std::fprintf(stderr, "[hd textures] the set is not finished: a window makes the rest while the game is open%s\n",
+                                 held ? "" : " (not held by the game: it stops on its own when the game closes)");
                     return;
                 }
             }
@@ -208,16 +313,29 @@ namespace hd_progress
             // the game's own window carries on, at most three times a run.)
             bool seenMaker = false;
             int relaunched = 0;
+            // (TODO 267: whether this run saw the set unfinished - then its "done" is news: restart to use it - and the
+            // sharp text as it was when the watch began)
+            bool sawUnfinished = !fromNow;
+            const bool fontsBefore = nr::crispFontsFound();
             for (unsigned n = 1;; ++n)
             {
                 std::this_thread::sleep_for(std::chrono::seconds(5));
+#if defined(_WIN32)
+                g_makerAlive = makerRunning(g_dir);
+#endif
+                if (!fontsBefore && !g_fontsReady && nr::crispFontsFound())
+                {
+                    g_fontsReady = true;
+                    g_readyAtMs = nowMs();
+                    std::fprintf(stderr, "[hd textures] the sharp text is made: a restart uses it\n");
+                }
 #if defined(_WIN32)
                 if (helper && n % 6u == 0u)
                 {
                     DWORD pid = 0;
                     if (makerRunning(g_dir, &pid))
                         seenMaker = pid != g_ourMaker; // (a window of our own closed: the player's choice)
-                    else if (seenMaker && relaunched < 3)
+                    else if (seenMaker && relaunched < 3 && !g_stopped)
                     {
                         seenMaker = false;
                         ++relaunched;
@@ -233,12 +351,20 @@ namespace hd_progress
                 const Status s = readStatus(status);
                 setLine(s);
                 g_generation.fetch_add(1, std::memory_order_relaxed);
+                if (!finished(s))
+                    sawUnfinished = true;
+                if (finished(s) && s.state == "done" && sawUnfinished)
+                {
+                    g_ready = true;
+                    g_readyAtMs = nowMs();
+                }
                 if (finished(s))
                 {
                     std::fprintf(stderr, s.state == "done" ? "[hd textures] the set is done (%lld images)\n"
                                                            : "[hd textures] none made: this graphics card's come out broken (%lld images)\n",
                                  s.total);
                     g_watching = false;
+                    g_makerAlive = false;
                     return;
                 }
             }
@@ -284,13 +410,24 @@ namespace hd_progress
         const fs::path status = g_dir / "upscale_status.json";
         const Status s = readStatus(status);
         if (!s.ok)
-            return; // (one made before the status file: nothing to do)
+        {
+#if defined(_WIN32)
+            // (TODO 267) No status yet but a maker at work - the setup's "Play now" in its first steps (the disc's
+            // archives, the conversion, the sharp text): followed, so that the corner shows it and its counts.
+            if (makerRunning(g_dir))
+            {
+                std::fprintf(stderr, "[hd textures] being made (its first steps)\n");
+                startWatch(false, false);
+            }
+#endif
+            return; // (else one made before the status file: nothing to do)
+        }
         setLine(s);
         // (TODO 242) A finished set made before the maker checked its images (black ones from a GTX 16-series card):
-        // checked once, in the window that carries on - the maker's own .images_checked_1 says it was.
+        // checked once, in the window that carries on - the maker's own .images_checked_2 says it was.
         std::error_code ec;
         const bool unchecked = s.state == "done" && fs::exists(g_dir / "upscaled" / "upscale_manifest.jsonl", ec) &&
-                               !fs::exists(g_dir / ".images_checked_1", ec);
+                               !fs::exists(g_dir / ".images_checked_2", ec);
         if (finished(s) && !unchecked)
             return; // (a finished set: nothing to do)
         std::fprintf(stderr, unchecked ? "[hd textures] checking the set's images once (%lld of %lld, %s)\n"
@@ -307,6 +444,13 @@ namespace hd_progress
 
     std::string makeLabel()
     {
+#if defined(_WIN32)
+        // (TODO 267: the game's own window at work - Stop; stopped this session - Resume)
+        if (!g_stopped && g_ourMaker && pidAlive(g_ourMaker))
+            return "Stop making HD textures";
+        if (g_stopped)
+            return "Resume making HD textures";
+#endif
         std::error_code ec;
         const fs::path dir = g_dir.empty() ? fs::absolute(fs::path("hd_textures"), ec) : g_dir;
         const Status s = readStatus(dir / "upscale_status.json");
@@ -317,6 +461,19 @@ namespace hd_progress
     std::string makeHdTextures()
     {
 #if defined(_WIN32)
+        // (TODO 267) The button's Stop: the game's maker window and what it started end now (the job's), for this session.
+        if (!g_stopped && g_ourMaker && pidAlive(g_ourMaker) && g_makerJob)
+        {
+            g_stopped = true;
+            TerminateJobObject(g_makerJob, 0);
+            CloseHandle(g_makerJob);
+            g_makerJob = nullptr;
+            g_ourMaker = 0;
+            g_makerAlive = false;
+            std::fprintf(stderr, "[hd textures] stopped for this session (F1); the next start carries on\n");
+            return "Stopped. What is made is kept; Resume (or the next start) carries on.";
+        }
+        g_stopped = false;
         std::error_code ec;
         if (g_dir.empty())
         {
@@ -341,10 +498,10 @@ namespace hd_progress
         std::string t = ss.str();
         t.erase(std::remove_if(t.begin(), t.end(), [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }), t.end());
         const bool whilePlaying = t.find("\"while_playing\":true") != std::string::npos;
-        return std::string("Started in a small window.") + (whilePlaying ? "" : " It waits while the game runs.") +
-               " The new ones show from the next start.";
+        (void)whilePlaying; // (TODO 267: the game's own window never waits for the game - it is made while the game is open)
+        return "Making them in a small window while the game is open. Closing the game stops it; the next start carries on.";
 #else
-        return "Run tools/make_hd_textures.ps1";
+        return "Run tools/make_hd_textures.sh";
 #endif
     }
 
@@ -352,8 +509,46 @@ namespace hd_progress
 
     std::string line()
     {
+        if (g_ready)
+            return "HD TEXTURES READY: RESTART TO USE THEM";
         std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_line.empty() && g_fontsReady)
+            return "SHARP TEXT READY: RESTART TO USE IT";
         return g_line;
+    }
+
+    std::string cornerLine()
+    {
+        // (TF_HD_CORNER_TEST=<text> (tests): that text, to see the corner without a set being made)
+        static const char *test = std::getenv("TF_HD_CORNER_TEST");
+        if (test && *test)
+            return test;
+        // (the counts first; a finished set's note, or the sharp text's, for a minute; nothing while stopped from F1)
+#if defined(_WIN32)
+        if (g_stopped)
+            return {};
+#endif
+        const bool recent = nowMs() - g_readyAtMs.load() < 60000;
+        if (g_ready)
+            return recent ? "HD textures ready. Restart to use them (F1)" : std::string();
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            if (!g_corner.empty())
+                return g_corner;
+        }
+        if (g_fontsReady)
+            return recent ? "Sharp text ready. Restart to use it (F1)" : std::string();
+        // (the maker's first minute: the sharp text, before any count)
+        if (g_makerAlive && !crispFontsFound())
+            return "Making sharp text";
+        if (g_makerAlive && g_watching)
+            return "Making HD textures";
+        return {};
+    }
+
+    bool readyToRestart()
+    {
+        return g_ready || g_fontsReady;
     }
 
     bool crispFontsFound()

@@ -63,7 +63,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SRC = PROJECT_ROOT / "Extracted" / "converted" / "textures"
 DEFAULT_OUT = PROJECT_ROOT / "Extracted" / "upscaled"
 DEFAULT_WORK = PROJECT_ROOT / "Extracted" / "work" / "upscale"
-DEFAULT_EXE = PROJECT_ROOT / "ThirdParty" / "realesrgan" / "realesrgan-ncnn-vulkan.exe"
+DEFAULT_EXE = PROJECT_ROOT / "ThirdParty" / "realesrgan" / ("realesrgan-ncnn-vulkan.exe" if sys.platform == "win32" else "realesrgan-ncnn-vulkan")
 MANIFEST_NAME = "upscale_manifest.jsonl"
 SIZE_BUCKETS = (32, 64, 128, 256, 512, 1024)
 # Reference counts from the 2026-07-02 source scan; drift = warn, not fail.
@@ -373,6 +373,8 @@ def run_binary(exe, in_dir, out_dir, model, tile, gpu, stop=None, gentle=False):
     (returncode, stderr text, stopped)."""
     cmd = [str(exe), "-i", str(in_dir), "-o", str(out_dir),
            "-n", model, "-s", "4", "-f", "png"]
+    if sys.platform != "win32":
+        cmd += ["-m", str(exe.resolve().parent / "models")]
     if tile or gentle:
         cmd += ["-t", str(tile or 128)]
     if gpu is not None:
@@ -711,7 +713,36 @@ def judge_output(out_rgba, src_path):
         why = f"dark ({o_luma:.0f} against the game's {s_luma:.0f})"
     elif s_std >= 10.0 and o_std < 0.1 * s_std:
         why = f"flat (variation {o_std:.1f} against {s_std:.1f})"
+    else:
+        # (TODO 259) Its colours shifted: a GTX 1660 SUPER's set had Antarctica's floor plates in pale green and purple
+        # bands - the same picture and brightness, but red and blue against green moved. Box-averaged down, a right
+        # upscale keeps the source's chroma (red - green, blue - green per texel): over a whole good set off by 5.6 on
+        # average (median); more than 20 + a quarter of the source's own colourfulness only for three very colourful
+        # effect textures (each off by over 20 overall too). The same rule as the renderer's (nr_hires.cpp looksLikeGame).
+        chroma_off, chroma_allowed = _chroma_off(small, src, mask)
+        if chroma_off > chroma_allowed:
+            why = f"colours shifted (red and blue against green off by {chroma_off:.1f}, at most {chroma_allowed:.1f})"
     return d, d_swapped, why
+
+
+def _chroma_off(small, src, mask):
+    """(how far the image's chroma - red and blue against green - is from the source's per texel on average, the most
+    allowed: 20 + a quarter of the source's own) over the texels the game draws."""
+    a = small.convert("RGB").getdata()
+    b = src.convert("RGB").getdata()
+    m = mask.getdata() if mask is not None else None
+    off = own = 0.0
+    n = 0
+    for i, (lc, gc) in enumerate(zip(a, b)):
+        if m is not None and m[i] == 0:
+            continue
+        gr, gb = gc[0] - gc[1], gc[2] - gc[1]
+        off += abs((lc[0] - lc[1]) - gr) + abs((lc[2] - lc[1]) - gb)
+        own += abs(gr) + abs(gb)
+        n += 1
+    if n < 16:
+        return 0.0, 1e9
+    return off / n, 20.0 + 0.25 * own / n
 
 
 def check_colours(out, src_path):
@@ -1022,6 +1053,9 @@ def main():
                          "upscale_status.json")
     ap.add_argument("--no-wait-for-game", action="store_true",
                     help="never wait while the game runs")
+    ap.add_argument("--game-pid", type=int, default=0,
+                    help="(TODO 267) made only while this game process runs: gently beside it, never waiting for it; "
+                         "when it ends the upscale stops (exit 4) and the next start carries on")
     ap.add_argument("--check-colours", action="store_true",
                     help="check an existing set's colours against the sources (red and blue exchanged back, far-off "
                          "images removed to be made again), then exit")
@@ -1192,8 +1226,21 @@ def main():
                 left = f", about {max(1, round(el / done * (len(todo) - done) / 60))} min left"
             print(f"HD textures: {made} of {total} made{left}", flush=True)
 
+        def game_gone():
+            return bool(args.game_pid) and not pid_alive(args.game_pid)
+
         def wait_turn():
             """While the game runs (and the options do not say to go on): wait. True: go on gently."""
+            if args.game_pid:
+                # (TODO 267, the user's choice: made only while the game is open - beside it, gently; the game closed,
+                # this stops: what is made is kept, the next start carries on)
+                if game_gone():
+                    if pending:
+                        pending.result()
+                    status("working", done_before + done)
+                    print(f"the game closed: stopped at {done_before + done} of {total}; the next start carries on", flush=True)
+                    sys.exit(4)
+                return True
             told = False
             t_wait = time.time()
             while True:
@@ -1277,7 +1324,8 @@ def main():
                 if backend == "ncnn":
                     tile, gpu = (setup[0]["tile"], setup[0]["gpu"]) if setup[0] else (args.tile, args.gpu)
                     rc, err, stopped = run_binary(args.exe, cur, nxt, model, tile, gpu,
-                                                  stop=None if gentle else should_stop, gentle=gentle)
+                                                  stop=game_gone if args.game_pid else (None if gentle else should_stop),
+                                                  gentle=gentle)
                     if not gpu_name[0]:
                         gpus = parse_gpus(err)
                         if gpus:

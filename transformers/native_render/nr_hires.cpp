@@ -24,6 +24,7 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -300,6 +301,7 @@ namespace nr
             double diff = 0.0, alphaDiff = 0.0, swappedDiff = 0.0;
             double gameSum[3] = {}, largeSum[3] = {}; // (each channel's sum over the texels compared)
             double light = 0.0, kept = 0.0; // (the game's light, and how much of it the large image has there)
+            double chromaOff = 0.0, gameChroma = 0.0; // (TODO 259: red and blue against green - the large image's off the game's)
             size_t counted = 0;
             for (size_t i = 0; i < avg.size() && i < texture.pixels.size(); ++i)
             {
@@ -317,6 +319,12 @@ namespace nr
                     kept += std::min(gc, lc);
                     gameSum[k] += gc;
                     largeSum[k] += lc;
+                }
+                {
+                    const auto ch = [](uint32_t c, int k) { return static_cast<int>((c >> (8 * k)) & 0xFFu); };
+                    const int gr = ch(g0, 0) - ch(g0, 1), gb = ch(g0, 2) - ch(g0, 1), lr = ch(a, 0) - ch(a, 1), lb = ch(a, 2) - ch(a, 1);
+                    chromaOff += std::abs(lr - gr) + std::abs(lb - gb);
+                    gameChroma += std::abs(gr) + std::abs(gb);
                 }
                 ++counted;
             }
@@ -348,6 +356,21 @@ namespace nr
                 std::fprintf(stderr, "[native render] upscale %s: black, or a colour missing (RGB %.0f %.0f %.0f where the game's has %.0f %.0f %.0f) - not used\n",
                              name.c_str(), largeSum[0] / counted, largeSum[1] / counted, largeSum[2] / counted, gameSum[0] / counted, gameSum[1] / counted,
                              gameSum[2] / counted);
+            // (TODO 259) Its colours shifted: a GTX 1660 SUPER's set drew the floor plates of Antarctica in pale green and
+            // purple bands - the right picture, the same brightness (off the game's by under 20: it passed the test below),
+            // but red and blue against green moved. Box-averaged down, a right upscale keeps the game's chroma (red - green,
+            // blue - green per texel): over the whole remaster set off by 5.6 on average (median), and only where the game's
+            // texture is very colourful itself (flames, rainbows, stars) more than 20 + a quarter of that colourfulness - the
+            // three images that do are off by over 20 anyway, not used below. Bands of green and purple of +-20 are caught 98
+            // times in 100, of +-10 70 (measured with such bands put on every image of the set). Not used then.
+            // TF_HIRES_CHROMACHECK=0: not checked.
+            static const bool chromaCheck = !(std::getenv("TF_HIRES_CHROMACHECK") && *std::getenv("TF_HIRES_CHROMACHECK") == '0');
+            const double chromaMean = counted ? chromaOff / static_cast<double>(counted) : 0.0;
+            const double chromaAllowed = 20.0 + 0.25 * (counted ? gameChroma / static_cast<double>(counted) : 0.0);
+            const bool shifted = chromaCheck && counted >= 16u && chromaMean > chromaAllowed;
+            if (shifted)
+                std::fprintf(stderr, "[native render] upscale %s: its colours are shifted off the game's (red and blue against green off by %.1f, "
+                                     "at most %.1f) - not used\n", name.c_str(), chromaMean, chromaAllowed);
             // (And its alpha: a translucent layer whose large image has other alpha than the game's -
             // colour under once-transparent texels let through - draws that colour (Alaska's snow
             // overlay showed purple blotches). Off by more than 24 of 255 on average: not used.
@@ -370,7 +393,7 @@ namespace nr
             if (log)
                 std::fprintf(stderr, "[native render] upscale %s: the large image differs from the game's by %.2f, alpha %.2f%s\n", name.c_str(),
                              mean, meanAlpha, mean > 20.0 ? " - redrawn art, not used" : alphaOff ? " - its alpha is not the game's, not used" : "");
-            return !(mean > 20.0 || alphaOff || swapped || lost);
+            return !(mean > 20.0 || alphaOff || swapped || lost || shifted);
         }
 
         // (TODO 44) The large image's colour matched to the game's: per channel, the large image scaled so that,

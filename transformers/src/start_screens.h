@@ -1,7 +1,7 @@
 #pragma once
 // The start-up screens (TODO 110): what the game shows from boot to its main menu, a setting of the
 // F1 overlay's Gameplay page (`TF_START_SCREENS` in settings.ini):
-//   menu  - straight to the main menu (New Game / Continue / Options), the default: the memory card's
+//   menu  - straight to the main menu (New Game / Continue / Options / Extras), the default: the memory card's
 //           notices ("Load Successful", "No save data present", the autosave notice - TODO 116), the
 //           copyright screen, the Atari and Melbourne House logos, the attract film the first start
 //           plays before the title, the title ("press Start") and the story intro after New Game are
@@ -27,6 +27,7 @@
 // If any of it does not happen (an address not found, a screen never reached) the game simply shows
 // that screen as usual - the setting can never stop the game from starting. TF_START_TRACE=1 logs the
 // front end's movies and screens as they come.
+// Linux adds Quit Game to that menu; it takes the same shutdown path as closing the window.
 
 #include <cstdint>
 

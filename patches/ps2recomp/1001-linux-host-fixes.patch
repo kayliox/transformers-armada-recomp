@@ -1,0 +1,1447 @@
+Subject: [PATCH] Linux hosts: the C library and paths behave as on Windows; GS thread ended before the window; rumble
+
+The runtime's C library stubs called host functions whose results differ between MSVC and glibc:
+- strcpy, strncpy, strcat: the game shifts strings in place (strcpy(buf, buf + n), its file system's directory
+  tree at 0x18DAD0 / 0x18DD90). Overlapping copies are undefined for the host functions: glibc's strcpy garbled
+  the paths, so files in TFA.ZIP were not found and the first level stopped with "Generic fatal error"
+  (geometry.graph). They copy with memmove now.
+- strcmp, strncmp: the sign only (-1/0/1, as MSVC's); glibc returns the byte difference.
+- rand, srand: MSVC's generator on every host, per thread as there (glibc's is another one).
+- fseek / ftell: the offset is the guest's 32-bit long, sign-extended (an LP64 long kept -4 as 4294967292); ftell
+  past 2 GB fails as UCRT's does.
+- printf family: %p as UCRT prints it (uppercase, pointer-sized), NaN spelt as UCRT spells it (nan(ind), nan(snan)),
+  %a with UCRT's default precision, long double as a double (MSVC's long double is 64-bit).
+- the IOP's strtol / strtoul: 32-bit long results, overflow and the bare "0x" as UCRT handles them.
+- localtime / gmtime: refused outside UCRT's range (1970 to 3001).
+- case folding (tolower, toupper, isalpha in paths, device names, ROM names): ASCII only. GLFW sets LC_CTYPE from
+  the environment on X11; in some locales (Turkish I) the host functions folded otherwise.
+- ps2_settings.cpp: the non-Windows branch built a std::string from (char *, const char *): it did not compile.
+
+Paths: Windows finds a file whatever its case; Linux now does too for the game's files, the memory card and the host
+device (the exact name first, a case-blind match in each folder only when it is missing; two names differing only by
+case are refused rather than one picked).
+
+At exit the GS thread is ended before CloseWindow, and gives up its GPU context first: the context (a hidden
+window sharing the main one's GL) was still current on the GS thread while glfwTerminate destroyed it, and Mesa's
+Zink crashed in that teardown (an abort, or a jump into a driver already unloaded).
+
+ps2_xinput_rumble: on Linux the game's vibration goes to the first gamepad with evdev force feedback (FF_RUMBLE):
+Steam's virtual pad under Steam, else an Xbox pad's own driver. Checked through Steam's virtual pad (SteamOS).
+
+Stick response, Linux: while a game menu is shown (the port says so: setMenuShown) the sticks reach the game as they
+are, without the movement's anti-deadzone, which turned a small resting drift (a Steam Deck stick) into a held
+direction and the menu cycled on its own. In play the inner dead zone is 12% (PS2X_STICK_DEADZONE; Windows keeps 5%):
+the anti-deadzone made a stick resting just past 5% walk the robot and turn the camera. Gameplay keeps the response.
+---
+diff --git a/ps2xIOP/src/emulator/imports/iop_cdvd.cpp b/ps2xIOP/src/emulator/imports/iop_cdvd.cpp
+index 3ac7367..c393f84 100644
+--- a/ps2xIOP/src/emulator/imports/iop_cdvd.cpp
++++ b/ps2xIOP/src/emulator/imports/iop_cdvd.cpp
+@@ -40,6 +40,24 @@ namespace ps2x::iop::detail
+         constexpr uint32_t kCdvdSyncTimeout = 15000u;
+         constexpr uint32_t kCdvdmanVersion = 0x0226u;
+ 
++        int upperGuestByte(unsigned char c)
++        {
++#if !defined(_WIN32)
++            return c >= 'a' && c <= 'z' ? c - ('a' - 'A') : c;
++#else
++            return std::toupper(c);
++#endif
++        }
++
++        int lowerGuestByte(unsigned char c)
++        {
++#if !defined(_WIN32)
++            return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c;
++#else
++            return std::tolower(c);
++#endif
++        }
++
+         uint32_t alignSectors(uint64_t bytes)
+         {
+             return static_cast<uint32_t>((bytes + kSectorSize - 1u) / kSectorSize);
+@@ -87,7 +105,7 @@ namespace ps2x::iop::detail
+             for (char &character : name)
+             {
+                 const unsigned char byte = static_cast<unsigned char>(character);
+-                character = byte < 0x80u ? static_cast<char>(std::toupper(byte)) : '_';
++                character = byte < 0x80u ? static_cast<char>(upperGuestByte(byte)) : '_';
+             }
+             if (name.size() > 200u)
+                 name.resize(200u);
+@@ -129,7 +147,7 @@ namespace ps2x::iop::detail
+             }
+             std::transform(result.begin(), result.end(), result.begin(),
+                            [](unsigned char ch)
+-                           { return static_cast<char>(std::toupper(ch)); });
++                           { return static_cast<char>(upperGuestByte(ch)); });
+             return result;
+         }
+ 
+@@ -430,7 +448,7 @@ namespace ps2x::iop::detail
+             {
+                 std::string leaf = path.filename().string();
+                 std::transform(leaf.begin(), leaf.end(), leaf.begin(),
+-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
++                               [](unsigned char c) { return static_cast<char>(lowerGuestByte(c)); });
+                 if (leaf == "mc0" || leaf == "mc1")
+                     return true;
+             }
+diff --git a/ps2xIOP/src/emulator/imports/iop_imports.cpp b/ps2xIOP/src/emulator/imports/iop_imports.cpp
+index 5ebcfdc..ac108ee 100644
+--- a/ps2xIOP/src/emulator/imports/iop_imports.cpp
++++ b/ps2xIOP/src/emulator/imports/iop_imports.cpp
+@@ -17,10 +17,16 @@ namespace ps2x::iop::detail
+         {
+             if (lhs.size() != rhs.size())
+                 return false;
++            const auto lower = [](unsigned char c) {
++#if !defined(_WIN32)
++                return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c;
++#else
++                return std::tolower(c);
++#endif
++            };
+             for (size_t i = 0; i < lhs.size(); ++i)
+             {
+-                if (std::tolower(static_cast<unsigned char>(lhs[i])) !=
+-                    std::tolower(static_cast<unsigned char>(rhs[i])))
++                if (lower(static_cast<unsigned char>(lhs[i])) != lower(static_cast<unsigned char>(rhs[i])))
+                     return false;
+             }
+             return true;
+diff --git a/ps2xIOP/src/emulator/imports/iop_sysclib.cpp b/ps2xIOP/src/emulator/imports/iop_sysclib.cpp
+index 717e628..7cedb03 100644
+--- a/ps2xIOP/src/emulator/imports/iop_sysclib.cpp
++++ b/ps2xIOP/src/emulator/imports/iop_sysclib.cpp
+@@ -4,8 +4,10 @@
+ #include "../core/iop_memory.h"
+ #include "iop_printf.h"
+ 
++#include <cerrno>
+ #include <cctype>
+ #include <cstdlib>
++#include <limits>
+ #include <optional>
+ #include <string>
+ #include <vector>
+@@ -69,10 +71,18 @@ namespace ps2x::iop::detail
+             setV0(a1 == 0u ? 1u : a1);
+             return true;
+         case 6:
++#if !defined(_WIN32)
++            setV0((a0 & 0xFFu) >= 'a' && (a0 & 0xFFu) <= 'z' ? (a0 & 0xFFu) - ('a' - 'A') : (a0 & 0xFFu));
++#else
+             setV0(static_cast<uint32_t>(std::toupper(static_cast<unsigned char>(a0))));
++#endif
+             return true;
+         case 7:
++#if !defined(_WIN32)
++            setV0((a0 & 0xFFu) >= 'A' && (a0 & 0xFFu) <= 'Z' ? (a0 & 0xFFu) + ('a' - 'A') : (a0 & 0xFFu));
++#else
+             setV0(static_cast<uint32_t>(std::tolower(static_cast<unsigned char>(a0))));
++#endif
+             return true;
+         case 8: // look_ctype_table: the flags the sysclib is* macros test
+         {
+@@ -363,9 +373,61 @@ namespace ps2x::iop::detail
+             const std::string value = m_memory.readString(a0, 4096u);
+             char *end = nullptr;
+             const int base = static_cast<int>(a2);
++#if !defined(_WIN32)
++            uint32_t parsed = 0u;
++            if (base != 0 && (base < 2 || base > 36))
++            {
++                errno = EINVAL;
++                end = const_cast<char *>(value.c_str());
++            }
++            else
++            {
++                const int savedErrno = errno;
++                errno = 0;
++                const char *sign = value.c_str();
++                while (std::isspace(static_cast<unsigned char>(*sign)))
++                    ++sign;
++                if (ordinal == 36)
++                {
++                    const long number = std::strtol(value.c_str(), &end, base);
++                    if (number > std::numeric_limits<int32_t>::max())
++                    {
++                        parsed = static_cast<uint32_t>(std::numeric_limits<int32_t>::max());
++                        errno = ERANGE;
++                    }
++                    else if (number < std::numeric_limits<int32_t>::min())
++                    {
++                        parsed = static_cast<uint32_t>(std::numeric_limits<int32_t>::min());
++                        errno = ERANGE;
++                    }
++                    else
++                        parsed = static_cast<uint32_t>(number);
++                }
++                else
++                {
++                    const unsigned long number = std::strtoul(value.c_str(), &end, base);
++                    const unsigned long magnitude = *sign == '-' ? 0ul - number : number;
++                    if (errno == ERANGE || magnitude > std::numeric_limits<uint32_t>::max())
++                    {
++                        parsed = std::numeric_limits<uint32_t>::max();
++                        errno = ERANGE;
++                    }
++                    else
++                        parsed = static_cast<uint32_t>(number);
++                }
++                // UCRT treats a bare 0x prefix as no conversion, unlike glibc.
++                const char *digits = sign + (*sign == '-' || *sign == '+');
++                if ((base == 0 || base == 16) && digits[0] == '0' &&
++                    (digits[1] == 'x' || digits[1] == 'X') && end == digits + 1)
++                    end = const_cast<char *>(value.c_str());
++                if (errno == 0)
++                    errno = savedErrno;
++            }
++#else
+             const unsigned long parsed = ordinal == 36
+                                              ? static_cast<unsigned long>(std::strtol(value.c_str(), &end, base))
+                                              : std::strtoul(value.c_str(), &end, base);
++#endif
+             if (a1 != 0u)
+             {
+                 m_memory.write32(a1, a0 + static_cast<uint32_t>(end - value.c_str()));
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index 9616ef2..4fb287a 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -164,10 +164,16 @@ namespace ps2x::iop::detail
+         {
+             if (lhs.size() != rhs.size())
+                 return false;
++            const auto lower = [](unsigned char c) {
++#if !defined(_WIN32)
++                return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c;
++#else
++                return std::tolower(c);
++#endif
++            };
+             for (size_t i = 0; i < lhs.size(); ++i)
+             {
+-                if (std::tolower(static_cast<unsigned char>(lhs[i])) !=
+-                    std::tolower(static_cast<unsigned char>(rhs[i])))
++                if (lower(static_cast<unsigned char>(lhs[i])) != lower(static_cast<unsigned char>(rhs[i])))
+                     return false;
+             }
+             return true;
+diff --git a/ps2xIOP/src/ps2_path.cpp b/ps2xIOP/src/ps2_path.cpp
+index 420f053..7067d7f 100644
+--- a/ps2xIOP/src/ps2_path.cpp
++++ b/ps2xIOP/src/ps2_path.cpp
+@@ -11,10 +11,25 @@ namespace ps2x::iop
+         {
+             std::string result(value);
+             std::transform(result.begin(), result.end(), result.begin(), [](unsigned char ch)
+-                           { return static_cast<char>(std::tolower(ch)); });
++                           {
++#if !defined(_WIN32)
++                               return static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch + ('a' - 'A') : ch);
++#else
++                               return static_cast<char>(std::tolower(ch));
++#endif
++                           });
+             return result;
+         }
+ 
++        bool isDriveLetter(unsigned char ch)
++        {
++#if !defined(_WIN32)
++            return (ch | 0x20u) >= 'a' && (ch | 0x20u) <= 'z';
++#else
++            return std::isalpha(ch) != 0;
++#endif
++        }
++
+         void normalizeSuffix(std::string &suffix)
+         {
+             std::replace(suffix.begin(), suffix.end(), '\\', '/');
+@@ -78,7 +93,7 @@ namespace ps2x::iop
+             result.deviceName = "rom0";
+             prefixLength = 5u;
+         }
+-        else if (value.size() > 2u && std::isalpha(static_cast<unsigned char>(value[0])) &&
++        else if (value.size() > 2u && isDriveLetter(static_cast<unsigned char>(value[0])) &&
+                  value[1] == ':' && (value[2] == '/' || value[2] == '\\'))
+         {
+             result.device = Ps2PathDevice::NativeHost;
+diff --git a/ps2xRuntime/include/runtime/gs/gs_backend.h b/ps2xRuntime/include/runtime/gs/gs_backend.h
+index 95c007f..c61a8a6 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_backend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_backend.h
+@@ -32,6 +32,8 @@ public:
+     virtual void BeginTransfer(const GSTransferCommand &command) = 0;
+     virtual void UploadImage(const uint8_t *data, uint32_t sizeBytes) = 0;
+ 
++    // Ends any thread of the backend's own (the runtime's exit, before the window and its GL go).
++    virtual void Shutdown() {}
+     virtual void Flush() = 0;
+     virtual void TextureFlush() = 0;
+     virtual void Sync(GSSyncReason reason) = 0;
+diff --git a/ps2xRuntime/include/runtime/gs/gs_frontend.h b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+index ee31953..c629543 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_frontend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+@@ -105,6 +105,8 @@ public:
+     void init(uint8_t *vram, uint32_t vramSize, struct GSRegisters *privRegs = nullptr);
+     void reset();
+     void setRasterBackend(std::unique_ptr<GSRasterBackend> backend);
++    // The backend's own threads ended (the runtime's exit, before CloseWindow).
++    void shutdownBackend();
+ 
+     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+     bool processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+diff --git a/ps2xRuntime/include/runtime/gs/gs_gpu.h b/ps2xRuntime/include/runtime/gs/gs_gpu.h
+index 9d6c4cb..d6a0cc3 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_gpu.h
++++ b/ps2xRuntime/include/runtime/gs/gs_gpu.h
+@@ -66,6 +66,8 @@ class GSGpuRenderer
+ public:
+     GSGpuRenderer();
+     ~GSGpuRenderer();
++    // On the GS thread as it ends: its context no longer current there, so the window's teardown can destroy it.
++    void releaseContext();
+ 
+     // All on the GS thread, in the order of the command stream.
+     bool ready(); // it draws (started on first use: false before the window exists, or when it cannot)
+diff --git a/ps2xRuntime/include/runtime/gs/gs_threaded_backend.h b/ps2xRuntime/include/runtime/gs/gs_threaded_backend.h
+index 22cf985..3d38362 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_threaded_backend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_threaded_backend.h
+@@ -50,6 +50,7 @@ class GSThreadedBackend final : public GSRasterBackend
+ public:
+     explicit GSThreadedBackend(std::unique_ptr<GSRasterBackend> inner);
+     ~GSThreadedBackend() override;
++    void Shutdown() override;
+ 
+     void Initialize(uint8_t *vram, uint32_t vramSize) override;
+     void Reset() override;
+diff --git a/ps2xRuntime/include/runtime/ps2_stick_response.h b/ps2xRuntime/include/runtime/ps2_stick_response.h
+index 4236121..27f5829 100644
+--- a/ps2xRuntime/include/runtime/ps2_stick_response.h
++++ b/ps2xRuntime/include/runtime/ps2_stick_response.h
+@@ -12,6 +12,12 @@ namespace ps2_stick_response
+         bool vehicleOriginal = true;
+         float leftLift = 0.625f, rightLift = 0.20f, sensitivity = 1.33f;
+         float vehicleLift = -1.0f, vehicleResponse = 1.15f; // -1: first accepted guest byte
++#if defined(__linux__)
++        // (a Steam Deck's sticks can rest past 5% after a push: the lift made that a walk - PS2X_STICK_DEADZONE)
++        float inner = 0.12f;
++#else
++        float inner = 0.05f;
++#endif
+     };
+     inline uint8_t axisByte(float value)
+     {
+@@ -25,15 +31,15 @@ namespace ps2_stick_response
+         const float v = (static_cast<float>(value) - 128.0f) / 127.0f;
+         return !enabled && std::fabs(v) < 0.08f ? 0.0f : std::clamp(v, -1.0f, 1.0f);
+     }
+-    inline void radial(float &x, float &y, float lift, float gain, float response = 1.0f)
++    inline void radial(float &x, float &y, float lift, float gain, float response = 1.0f, float inner = 0.05f)
+     {
+         const float radius = std::hypot(x, y);
+-        if (!std::isfinite(radius) || radius <= 0.05f)
++        if (!std::isfinite(radius) || radius <= inner)
+         {
+             x = y = 0.0f;
+             return;
+         }
+-        const float travel = std::pow(std::min(1.0f, (radius - 0.05f) / 0.90f), response);
++        const float travel = std::pow(std::min(1.0f, (radius - inner) / (0.95f - inner)), response);
+         const float scale = (lift + (1.0f - lift) * travel) * gain / radius;
+         x = std::clamp(x * scale, -1.0f, 1.0f);
+         y = std::clamp(y * scale, -1.0f, 1.0f);
+@@ -46,9 +52,9 @@ namespace ps2_stick_response
+     inline float vehicleAxis(float value, const Config &c, float deadzone)
+     {
+         const float a = std::fabs(value);
+-        if (!std::isfinite(a) || a <= 0.05f)
++        if (!std::isfinite(a) || a <= c.inner)
+             return 0.0f;
+-        const float travel = std::pow(std::min(1.0f, (a - 0.05f) / 0.90f), c.vehicleResponse);
++        const float travel = std::pow(std::min(1.0f, (a - c.inner) / (0.95f - c.inner)), c.vehicleResponse);
+         const float anti = c.vehicleLift < 0.0f ? deadzone : c.vehicleLift;
+         float result = anti + (1.0f - anti) * travel;
+         if (c.vehicleLift < 0.0f)
+@@ -67,8 +73,15 @@ namespace ps2_stick_response
+         if (mode == 3) return std::max(0.0f, previous - seconds / 0.2f);
+         return 0.0f;
+     }
++#if defined(__linux__)
++    inline void map(float &lx, float &ly, float &rx, float &ry, const Config &c, float weight, float deadzone, bool sony = false, bool inMenu = false)
++#else
+     inline void map(float &lx, float &ly, float &rx, float &ry, const Config &c, float weight, float deadzone, bool sony = false)
++#endif
+     {
++#if defined(__linux__)
++        if (inMenu) return;
++#endif
+         if (!c.enabled) return;
+         // Sony has already been decoded to a clamped axis. Reapply its old drift filter
+         // only at the original-car endpoint; the robot still receives the unfiltered axis.
+@@ -77,8 +90,8 @@ namespace ps2_stick_response
+         const float vy = c.vehicleOriginal ? original(ly) : vehicleAxis(ly, c, deadzone);
+         const float vrx = original(rx), vry = original(ry);
+         // The port keeps its 0.85 run threshold. Ease travel to retain the reference walking band.
+-        radial(lx, ly, c.leftLift, c.sensitivity, 1.3f);
+-        radial(rx, ry, c.rightLift, 1.0f);
++        radial(lx, ly, c.leftLift, c.sensitivity, 1.3f, c.inner);
++        radial(rx, ry, c.rightLift, 1.0f, 1.0f, c.inner);
+         if (weight >= 1.0f)
+         {
+             lx = vx; ly = vy;
+@@ -93,4 +106,7 @@ namespace ps2_stick_response
+     // Called only on the EE thread after validating the player's transformer state.
+     // mode: 0 robot/unavailable, 1 car, 2 transforming to car, 3 transforming to robot.
+     void sampleVehicle(int mode, float deadzone);
++#if defined(__linux__)
++    void setMenuShown(bool shown);
++#endif
+ }
+diff --git a/ps2xRuntime/include/runtime/ps2_vfs.h b/ps2xRuntime/include/runtime/ps2_vfs.h
+index ea7f761..4a57c01 100644
+--- a/ps2xRuntime/include/runtime/ps2_vfs.h
++++ b/ps2xRuntime/include/runtime/ps2_vfs.h
+@@ -66,6 +66,10 @@ public:
+ 
+     [[nodiscard]] bool stat(std::string_view path, const PS2VfsMounts &mounts, const PS2RomDevice &rom, PS2VfsStat &result) const;
+     [[nodiscard]] bool resolveHostPath(std::string_view path, const PS2VfsMounts &mounts, std::filesystem::path &result) const;
++#if !defined(_WIN32)
++    [[nodiscard]] static bool resolveHostCase(const std::filesystem::path &base, const std::filesystem::path &relative,
++                                              std::filesystem::path &result);
++#endif
+     [[nodiscard]] std::vector<PS2VfsDescriptorInfo> descriptors() const;
+ 
+ private:
+diff --git a/ps2xRuntime/include/runtime/ps2_xinput_rumble.h b/ps2xRuntime/include/runtime/ps2_xinput_rumble.h
+index b216dd5..b04d9fb 100644
+--- a/ps2xRuntime/include/runtime/ps2_xinput_rumble.h
++++ b/ps2xRuntime/include/runtime/ps2_xinput_rumble.h
+@@ -12,6 +12,8 @@
+ // motors are cleared), the gamepad no longer the GLFW one, and at exit (stop). XInput1_4.dll is loaded when first
+ // needed, else XInput9_1_0.dll: no new link dependency, and nothing happens on a machine without either.
+ // A hidden window (PS2X_WINDOW_HIDDEN, an unattended run) never takes the controller.
++// On Linux the motors go through the kernel's force feedback instead (evdev FF_RUMBLE on the first gamepad that has
++// it: Steam's virtual pad under Steam, else the pad's own driver), with the same rules ("[rumble] ..." in the log).
+ // PS2X_XINPUT_TRACE=1 logs each motor change ("[xinput] ..."); =2 also makes the calls in a hidden or unfocused
+ // window and without a GLFW gamepad (to user 0 when none is connected: the call then answers "not connected"), so a
+ // test machine can show that the game's vibration reaches XInput.
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+index d581d6d..d177434 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/Helpers/Support.h
+@@ -1,6 +1,7 @@
+ #include "runtime/ps2_host_display.h"
+ #include <algorithm>
+ #include <cctype>
++#include <cerrno>
+ 
+ namespace ps2_stubs
+ {
+@@ -34,12 +35,21 @@ namespace
+     uint32_t g_cdStreamingLbn = 0;
+     uint32_t g_cdStreamingEndLbn = 0xFFFFFFFFu;
+     bool g_cdInitialized = false;
++    int guestToLower(unsigned char c)
++    {
++#if !defined(_WIN32)
++        // GLFW changes LC_CTYPE on X11; the Windows guest stubs use the C locale.
++        return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c;
++#else
++        return std::tolower(c);
++#endif
++    }
+ 
+     std::string toLowerAscii(std::string value)
+     {
+         std::transform(value.begin(), value.end(), value.begin(),
+                        [](unsigned char c)
+-                       { return static_cast<char>(std::tolower(c)); });
++                       { return static_cast<char>(guestToLower(c)); });
+         return value;
+     }
+ 
+@@ -571,6 +581,19 @@ namespace
+         } while (handle == 0 || g_file_map.count(handle));
+         return handle;
+     }
++    long windowsCompatibleFtell(FILE *file)
++    {
++        const long position = std::ftell(file);
++#if !defined(_WIN32)
++        if (position > std::numeric_limits<int32_t>::max())
++        {
++            errno = EINVAL;
++            return -1L;
++        }
++#endif
++        return position;
++    }
++
+ 
+     FILE *get_file_ptr(uint32_t handle)
+     {
+@@ -1181,7 +1204,15 @@ namespace
+             case 'p':
+             {
+                 const uint32_t ptrValue = nextU32();
++#if !defined(_WIN32)
++                // UCRT formats a pointer as uppercase hexadecimal with pointer-sized precision.
++                precisionSpecified = true;
++                parsedFlags.erase(std::remove(parsedFlags.begin(), parsedFlags.end(), '#'), parsedFlags.end());
++                parsedPrecision = static_cast<int>(sizeof(void *) * 2u);
++                if (!appendFormatted(buildHostSpec('X', "ll"), static_cast<unsigned long long>(ptrValue)))
++#else
+                 if (!appendFormatted(buildHostSpec(spec), reinterpret_cast<void *>(static_cast<uintptr_t>(ptrValue))))
++#endif
+                 {
+                     std::ostringstream ss;
+                     ss << "0x" << std::hex << ptrValue;
+@@ -1201,6 +1232,42 @@ namespace
+                 const uint64_t bits = nextU64();
+                 double value = 0.0;
+                 std::memcpy(&value, &bits, sizeof(value));
++#if !defined(_WIN32)
++                // UCRT spells signaling and indeterminate NaNs separately from quiet NaNs.
++                const uint64_t mantissa = bits & 0x000FFFFFFFFFFFFFull;
++                if ((bits & 0x7FF0000000000000ull) == 0x7FF0000000000000ull && mantissa != 0u)
++                {
++                    const bool upper = spec == 'A' || spec == 'E' || spec == 'F' || spec == 'G';
++                    const char *text = mantissa == 0x0008000000000000ull && (bits >> 63)
++                                           ? (upper ? "NAN(IND)" : "nan(ind)")
++                                           : (mantissa & 0x0008000000000000ull) == 0u
++                                                 ? (upper ? "NAN(SNAN)" : "nan(snan)")
++                                                 : (upper ? "NAN" : "nan");
++                    std::string signedText;
++                    if (bits >> 63)
++                        signedText.push_back('-');
++                    else if (parsedFlags.find('+') != std::string::npos)
++                        signedText.push_back('+');
++                    else if (parsedFlags.find(' ') != std::string::npos)
++                        signedText.push_back(' ');
++                    signedText += text;
++                    parsedFlags = parsedFlags.find('-') != std::string::npos ? "-" : "";
++                    precisionSpecified = false;
++                    if (!appendFormatted(buildHostSpec('s'), signedText.c_str()))
++                        out.append(signedText);
++                    break;
++                }
++                if ((spec == 'a' || spec == 'A') && !precisionSpecified)
++                {
++                    precisionSpecified = true;
++                    parsedPrecision = 13;
++                }
++                // MSVC long double is binary64, unlike glibc's extended precision.
++                if (!appendFormatted(buildHostSpec(spec), value))
++                {
++                    out.append(std::to_string(value));
++                }
++#else
+                 if (length == LengthMod::BigL)
+                 {
+                     if (!appendFormatted(buildHostSpec(spec, "L"), static_cast<long double>(value)))
+@@ -1212,6 +1279,7 @@ namespace
+                 {
+                     out.append(std::to_string(value));
+                 }
++#endif
+                 break;
+             }
+             case 'n':
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/LibC.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/LibC.cpp
+index 503f4ea..07446fb 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/LibC.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/LibC.cpp
+@@ -285,8 +285,11 @@ namespace ps2_stubs
+ 
+         if (hostDest && hostSrc)
+         {
+-            ::strcpy(hostDest, hostSrc);
+-            ps2TraceGuestRangeWrite(rdram, destAddr, static_cast<uint32_t>(::strlen(hostSrc) + 1u), "strcpy", ctx);
++            // The game shifts strings left in place (strcpy(buf, buf + n)): overlapping, undefined for the host's
++            // strcpy (glibc's garbled the paths); memmove makes the shift the game expects.
++            const size_t bytes = ::strlen(hostSrc) + 1u;
++            std::memmove(hostDest, hostSrc, bytes);
++            ps2TraceGuestRangeWrite(rdram, destAddr, static_cast<uint32_t>(bytes), "strcpy", ctx);
+         }
+         else
+         {
+@@ -311,7 +314,10 @@ namespace ps2_stubs
+ 
+         if (hostDest && hostSrc)
+         {
+-            ::strncpy(hostDest, hostSrc, size);
++            // (overlap-safe, as strcpy: the host's strncpy is undefined there)
++            const size_t n = ::strnlen(hostSrc, size);
++            std::memmove(hostDest, hostSrc, n);
++            std::memset(hostDest + n, 0, size - n);
+             ps2TraceGuestRangeWrite(rdram, destAddr, size, "strncpy", ctx);
+         }
+         else
+@@ -353,7 +359,9 @@ namespace ps2_stubs
+ 
+         if (hostStr1 && hostStr2)
+         {
++            // Just the sign, on every host: MSVC's -1/0/1 (the Windows build's); glibc returns the byte difference.
+             result = ::strcmp(hostStr1, hostStr2);
++            result = (result > 0) - (result < 0);
+         }
+         else
+         {
+@@ -382,6 +390,7 @@ namespace ps2_stubs
+         if (hostStr1 && hostStr2)
+         {
+             result = ::strncmp(hostStr1, hostStr2, size);
++            result = (result > 0) - (result < 0); // (the sign only, as strcmp)
+         }
+         else
+         {
+@@ -406,7 +415,9 @@ namespace ps2_stubs
+ 
+         if (hostDest && hostSrc)
+         {
+-            ::strcat(hostDest, hostSrc);
++            // (overlap-safe, as strcpy: the host's strcat is undefined there)
++            const size_t at = ::strlen(hostDest);
++            std::memmove(hostDest + at, hostSrc, ::strlen(hostSrc) + 1u);
+         }
+         else
+         {
+@@ -842,7 +853,7 @@ namespace ps2_stubs
+     void fseek(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+         uint32_t file_handle = getRegU32(ctx, 4); // $a0
+-        long offset = (long)getRegU32(ctx, 5);    // $a1 (Note: might need 64-bit for large files?)
++        const long offset = static_cast<int32_t>(getRegU32(ctx, 5)); // $a1, the guest's 32-bit long: -4 stays -4 on LP64
+         int whence = (int)getRegU32(ctx, 6);      // $a2 (SEEK_SET, SEEK_CUR, SEEK_END)
+         int ret = -1;                             // Default error
+ 
+@@ -878,7 +889,7 @@ namespace ps2_stubs
+ 
+         if (fp)
+         {
+-            ret = ::ftell(fp);
++            ret = windowsCompatibleFtell(fp);
+         }
+         else
+         {
+@@ -1086,14 +1097,19 @@ namespace ps2_stubs
+         setReturnU32(ctx, 0u);
+     }
+ 
++    // MSVC's generator (UCRT rand.cpp), per thread as there, on every host: the Windows build's sequence. glibc's
++    // rand() is another generator, so Linux got other numbers from the same seed.
++    thread_local uint32_t g_randState = 1u;
++
+     void rand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+-        setReturnS32(ctx, std::rand() & 0x7FFF);
++        g_randState = g_randState * 214013u + 2531011u;
++        setReturnS32(ctx, static_cast<int32_t>((g_randState >> 16) & 0x7FFFu));
+     }
+ 
+     void srand(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+     {
+-        std::srand(getRegU32(ctx, 4));
++        g_randState = getRegU32(ctx, 4);
+         setReturnS32(ctx, 0);
+     }
+ 
+@@ -1107,8 +1123,8 @@ namespace ps2_stubs
+         const size_t n = std::min(lhs.size(), rhs.size());
+         for (size_t i = 0; i < n; ++i)
+         {
+-            const int a = std::tolower(static_cast<unsigned char>(lhs[i]));
+-            const int b = std::tolower(static_cast<unsigned char>(rhs[i]));
++            const int a = guestToLower(static_cast<unsigned char>(lhs[i]));
++            const int b = guestToLower(static_cast<unsigned char>(rhs[i]));
+             if (a != b)
+             {
+                 setReturnS32(ctx, a - b);
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/MemoryCard.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/MemoryCard.cpp
+index cf893e5..31af23b 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/MemoryCard.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/MemoryCard.cpp
+@@ -246,11 +246,18 @@ namespace ps2_stubs
+         std::filesystem::path guestMcPathToHostPath(int32_t port, const std::string &guestPath)
+         {
+             std::filesystem::path resolved = getMcRootPath(port);
++#if !defined(_WIN32)
++            const std::filesystem::path relative = guestPath.size() > 1u ? guestPath.substr(1) : "";
++            if (!PS2Vfs::resolveHostCase(getMcRootPath(port), relative, resolved))
++                return {};
++            return resolved;
++#else
+             if (guestPath.size() > 1u)
+             {
+                 resolved /= std::filesystem::path(guestPath.substr(1));
+             }
+             return resolved.lexically_normal();
++#endif
+         }
+ 
+         bool localtimeSafeMc(const std::time_t *value, std::tm *out)
+@@ -258,7 +265,8 @@ namespace ps2_stubs
+ #ifdef _WIN32
+             return localtime_s(out, value) == 0;
+ #else
+-            return localtime_r(value, out) != nullptr;
++            // UCRT rejects timestamps outside 1970 through 3001-01-18 UTC.
++            return *value >= 0 && *value <= 0x793582affLL && localtime_r(value, out) != nullptr;
+ #endif
+         }
+ 
+@@ -754,12 +762,16 @@ namespace ps2_stubs
+                         pattern = "*";
+                     }
+ 
++#if !defined(_WIN32)
++                    const std::filesystem::path hostDir = guestMcPathToHostPath(port, "/" + parentRel.generic_string());
++#else
+                     std::filesystem::path hostDir = getMcRootPath(port);
+                     if (!parentRel.empty())
+                     {
+                         hostDir /= parentRel;
+                     }
+                     hostDir = hostDir.lexically_normal();
++#endif
+ 
+                     std::error_code ec;
+                     if (std::filesystem::exists(hostDir, ec) && !ec &&
+@@ -1144,7 +1156,7 @@ namespace ps2_stubs
+ 
+                 if (std::fseek(it->second.file, offset, whence) == 0)
+                 {
+-                    const long position = std::ftell(it->second.file);
++                    const long position = windowsCompatibleFtell(it->second.file);
+                     result = (position >= 0) ? static_cast<int32_t>(position) : kMcResultDeniedPermit;
+                 }
+                 else
+@@ -1569,7 +1581,7 @@ namespace ps2_stubs
+             out.i32(fd);
+             out.i32(file.port);
+             out.string(error ? file.hostPath.generic_string() : relative.generic_string());
+-            out.i64(static_cast<int64_t>(std::ftell(file.file)));
++            out.i64(static_cast<int64_t>(windowsCompatibleFtell(file.file)));
+         }
+     }
+ 
+@@ -1605,7 +1617,14 @@ namespace ps2_stubs
+             const int64_t position = in.i64();
+             if (!in.ok())
+                 break;
++#if !defined(_WIN32)
++            if (stored.is_absolute())
++                file.hostPath = stored.lexically_normal();
++            else if (!PS2Vfs::resolveHostCase(getMcRootPath(file.port), stored, file.hostPath))
++                continue;
++#else
+             file.hostPath = stored.is_absolute() ? stored : (getMcRootPath(file.port) / stored).lexically_normal();
++#endif
+             file.file = std::fopen(file.hostPath.string().c_str(), "r+b");
+             if (!file.file)
+                 file.file = std::fopen(file.hostPath.string().c_str(), "rb");
+@@ -1614,7 +1633,11 @@ namespace ps2_stubs
+                 std::cerr << "[state] memory card file is gone: " << file.hostPath.string() << std::endl;
+                 continue;
+             }
++#if !defined(_WIN32)
++            std::fseek(file.file, static_cast<int32_t>(position), SEEK_SET);
++#else
+             std::fseek(file.file, static_cast<long>(position), SEEK_SET);
++#endif
+             g_mcFiles.emplace(fd, std::move(file));
+         }
+     }
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/Path.h b/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/Path.h
+index 712fe7c..cb078a2 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/Path.h
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/Path.h
+@@ -6,7 +6,13 @@ namespace
+     {
+         std::transform(value.begin(), value.end(), value.begin(),
+                        [](unsigned char c)
+-                       { return static_cast<char>(std::tolower(c)); });
++                       {
++#if !defined(_WIN32)
++                           return static_cast<char>(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
++#else
++                           return static_cast<char>(std::tolower(c));
++#endif
++                       });
+         return value;
+     }
+ 
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/Runtime.h b/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/Runtime.h
+index 6162fa0..37bedf2 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/Runtime.h
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/Runtime.h
+@@ -121,12 +121,17 @@ inline std::string translatePs2Path(const char *ps2Path)
+     auto resolveWithBase = [&](const std::filesystem::path &base, const std::string &suffix) -> std::string
+     {
+         const std::string normalizedSuffix = normalizePs2PathSuffix(suffix);
++#if !defined(_WIN32)
++        std::filesystem::path resolved;
++        return PS2Vfs::resolveHostCase(base, normalizedSuffix, resolved) ? resolved.string() : std::string{};
++#else
+         std::filesystem::path resolved = base;
+         if (!normalizedSuffix.empty())
+         {
+             resolved /= std::filesystem::path(normalizedSuffix);
+         }
+         return resolved.lexically_normal().string();
++#endif
+     };
+ 
+     switch (parsed.device)
+@@ -149,7 +154,8 @@ static bool localtimeSafe(const std::time_t *t, std::tm *out)
+ #ifdef _WIN32
+     return localtime_s(out, t) == 0;
+ #else
+-    return localtime_r(t, out) != nullptr;
++    // UCRT rejects timestamps outside 1970 through 3001-01-18 UTC.
++    return *t >= 0 && *t <= 0x793582affLL && localtime_r(t, out) != nullptr;
+ #endif
+ }
+ 
+@@ -185,7 +191,7 @@ static bool gmtimeSafe(const std::time_t *t, std::tm *out)
+ #ifdef _WIN32
+     return gmtime_s(out, t) == 0;
+ #else
+-    return gmtime_r(t, out) != nullptr;
++    return *t >= 0 && *t <= 0x793582affLL && gmtime_r(t, out) != nullptr;
+ #endif
+ }
+ 
+diff --git a/ps2xRuntime/src/lib/game_overrides.cpp b/ps2xRuntime/src/lib/game_overrides.cpp
+index 1e38bd4..c48693d 100644
+--- a/ps2xRuntime/src/lib/game_overrides.cpp
++++ b/ps2xRuntime/src/lib/game_overrides.cpp
+@@ -33,11 +33,18 @@ namespace
+             return false;
+         }
+ 
++        const auto lower = [](unsigned char c) {
++#if !defined(_WIN32)
++            return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c;
++#else
++            return std::tolower(c);
++#endif
++        };
+         for (size_t i = 0; i < lhs.size(); ++i)
+         {
+             const auto l = static_cast<unsigned char>(lhs[i]);
+             const auto r = static_cast<unsigned char>(rhs[i]);
+-            if (std::tolower(l) != std::tolower(r))
++            if (lower(l) != lower(r))
+             {
+                 return false;
+             }
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 8b2451b..ef0a569 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -2608,6 +2608,13 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
+     m_drawStateSent = false;
+ }
+ 
++void GS::shutdownBackend()
++{
++    std::lock_guard<std::mutex> backendLock(m_backendLifetimeMutex);
++    if (m_backend)
++        m_backend->Shutdown();
++}
++
+ uint32_t GS::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
+ {
+     ps2vif1::sync("GS memory read");
+diff --git a/ps2xRuntime/src/lib/gs/gs_gpu.cpp b/ps2xRuntime/src/lib/gs/gs_gpu.cpp
+index e1661f6..c6cf13c 100644
+--- a/ps2xRuntime/src/lib/gs/gs_gpu.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_gpu.cpp
+@@ -1792,6 +1792,12 @@ GSGpuRenderer::GSGpuRenderer() : m(std::make_unique<Impl>())
+ 
+ GSGpuRenderer::~GSGpuRenderer() = default;
+ 
++void GSGpuRenderer::releaseContext()
++{
++    if (g_context && glfwGetCurrentContext() == g_context)
++        glfwMakeContextCurrent(nullptr);
++}
++
+ void GSGpuRenderer::setSyncHook(std::function<void()> hook)
+ {
+     m->syncCpu = std::move(hook);
+diff --git a/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp b/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+index fe1bb57..c58a14b 100644
+--- a/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_threaded_backend.cpp
+@@ -304,12 +304,22 @@ GSThreadedBackend::GSThreadedBackend(std::unique_ptr<GSRasterBackend> inner)
+         m_gpuOnly = !ps2_gpu::mirrored();
+     }
+     m_thread = std::thread([this]()
+-                           { ThreadNaming::SetCurrentThreadName("GsBackend"); run(); });
++                           {
++                               ThreadNaming::SetCurrentThreadName("GsBackend");
++                               run();
++                               if (m_gpu)
++                                   m_gpu->releaseContext();
++                           });
+     g_backend = this;
+ }
+ 
+ 
+ GSThreadedBackend::~GSThreadedBackend()
++{
++    Shutdown();
++}
++
++void GSThreadedBackend::Shutdown()
+ {
+     {
+         std::lock_guard<std::mutex> lock(m_wakeMutex);
+diff --git a/ps2xRuntime/src/lib/ps2_host_present.cpp b/ps2xRuntime/src/lib/ps2_host_present.cpp
+index ca95f67..1e866ac 100644
+--- a/ps2xRuntime/src/lib/ps2_host_present.cpp
++++ b/ps2xRuntime/src/lib/ps2_host_present.cpp
+@@ -110,6 +110,20 @@ namespace ps2_host_present
+     {
+         if (!g_active)
+         {
++#if !defined(_WIN32)
++            // (Linux: GL's swap is the present - the VSync setting as its swap interval: Off 0, else 1. raylib's window
++            // flag sets it, on this, the window's thread.)
++            static int applied = -1;
++            const int wanted = sync() == 0 ? 0 : 1;
++            if (wanted != applied)
++            {
++                applied = wanted;
++                if (wanted)
++                    SetWindowState(FLAG_VSYNC_HINT);
++                else
++                    ClearWindowState(FLAG_VSYNC_HINT);
++            }
++#endif
+             EndDrawing();
+             return;
+         }
+diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
+index 6f5320b..fa25431 100644
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -45,6 +45,9 @@ namespace
+     std::mutex g_stickMutex;
+     float g_vehicleWeight = 0.0f, g_vehicleDeadzone = 0.2f;
+     std::chrono::steady_clock::time_point g_stickSample{};
++#if defined(__linux__)
++    std::atomic<bool> g_stickMenu{false};
++#endif
+     ps2_stick_response::Config stickConfig()
+     {
+         ps2_stick_response::Config c;
+@@ -63,6 +66,9 @@ namespace
+         const auto lift = ps2_settings::value("PS2X_STICK_VEHICLE_LIFT");
+         c.vehicleLift = lift == "off" ? 0.0f : number("PS2X_STICK_VEHICLE_LIFT", -1.0f, 0.0f, 0.9f);
+         c.vehicleResponse = number("PS2X_STICK_VEHICLE_RESPONSE", c.vehicleResponse, 0.25f, 4.0f);
++#if defined(__linux__)
++        c.inner = number("PS2X_STICK_DEADZONE", c.inner, 0.0f, 0.5f);
++#endif
+         return c;
+     }
+ }
+@@ -77,6 +83,12 @@ void ps2_stick_response::sampleVehicle(int mode, float deadzone)
+     g_vehicleDeadzone = std::isfinite(deadzone) ? std::clamp(deadzone, 0.0f, 0.9f) : 0.2f;
+     g_stickSample = now;
+ }
++#if defined(__linux__)
++void ps2_stick_response::setMenuShown(bool shown)
++{
++    g_stickMenu.store(shown, std::memory_order_relaxed);
++}
++#endif
+ 
+ namespace
+ {
+@@ -930,6 +942,20 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+     }
+ 
+     const int gamepad = live && !sonyPad && ps2x::sonypad::glfwGamepadsAllowed() ? firstGamepad() : -1;
++#if defined(__linux__)
++    static int lastPad = -3;
++    const int selectedPad = sonyPad ? -2 : gamepad;
++    if (selectedPad != lastPad)
++    {
++        if (sonyPad)
++            std::fprintf(stderr, "[pad] selected native Sony controller\n");
++        else if (gamepad >= 0)
++            std::fprintf(stderr, "[pad] selected gamepad %d: %s\n", gamepad, GetGamepadName(gamepad));
++        else
++            std::fprintf(stderr, "[pad] no gamepad selected\n");
++        lastPad = selectedPad;
++    }
++#endif
+     // (TODO 200: a GLFW gamepad gets the game's vibration through XInput, ps2_xinput_rumble.h)
+     ps2x::xinput::notePadRead(gamepad >= 0);
+     if (gamepad >= 0)
+@@ -968,11 +994,18 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+     // The stick as the pad gives it: "the gamepad was used" (below) is judged on this, so the response's
+     // lift does not let a resting stick's small drift take the prompts from the keyboard.
+     const float padLx = lx, padLy = ly, padRx = rx, padRy = ry;
++#if defined(__linux__)
++    const bool stickMenu = g_stickMenu.load(std::memory_order_relaxed);
++#endif
+     if (sonyPad || gamepad >= 0)
+     {
+         std::lock_guard<std::mutex> lock(g_stickMutex);
+         const bool fresh = std::chrono::steady_clock::now() - g_stickSample < std::chrono::milliseconds(500);
++#if defined(__linux__)
++        ps2_stick_response::map(lx, ly, rx, ry, response, fresh ? g_vehicleWeight : 0.0f, g_vehicleDeadzone, sonyPad, stickMenu);
++#else
+         ps2_stick_response::map(lx, ly, rx, ry, response, fresh ? g_vehicleWeight : 0.0f, g_vehicleDeadzone, sonyPad);
++#endif
+     }
+ 
+     // The triggers as the pad has them (gamepadTriggers).
+@@ -1148,5 +1181,21 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+     data[5] = axisByte(ry);
+     data[6] = axisByte(lx);
+     data[7] = axisByte(ly);
++#if defined(__linux__)
++    static const bool tracePad = std::getenv("PS2X_PAD_TRACE") != nullptr;
++    if (tracePad)
++    {
++        static float lastX = 2.0f, lastY = 2.0f;
++        static int lastByteX = -1, lastByteY = -1, lastButtons = -1, lastMenu = -1;
++        if (padLx != lastX || padLy != lastY || data[6] != lastByteX || data[7] != lastByteY ||
++            btns != lastButtons || stickMenu != lastMenu)
++        {
++            std::fprintf(stderr, "[pad] raw %.3f,%.3f guest %u,%u buttons %04x menu %d\n",
++                         padLx, padLy, static_cast<unsigned>(data[6]), static_cast<unsigned>(data[7]),
++                         static_cast<unsigned>(btns), stickMenu);
++            lastX = padLx; lastY = padLy; lastByteX = data[6]; lastByteY = data[7]; lastButtons = btns; lastMenu = stickMenu;
++        }
++    }
++#endif
+     return true;
+ }
+diff --git a/ps2xRuntime/src/lib/ps2_rom_device.cpp b/ps2xRuntime/src/lib/ps2_rom_device.cpp
+index a72105b..3323574 100644
+--- a/ps2xRuntime/src/lib/ps2_rom_device.cpp
++++ b/ps2xRuntime/src/lib/ps2_rom_device.cpp
+@@ -18,6 +18,15 @@ namespace
+         return profiles;
+     }
+ 
++    int lowerGuestByte(unsigned char c)
++    {
++#if !defined(_WIN32)
++        return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c;
++#else
++        return std::tolower(c);
++#endif
++    }
++
+     bool equalsIgnoreCaseAscii(std::string_view lhs, std::string_view rhs)
+     {
+         if (lhs.size() != rhs.size())
+@@ -26,7 +35,7 @@ namespace
+         {
+             const auto left = static_cast<unsigned char>(lhs[i]);
+             const auto right = static_cast<unsigned char>(rhs[i]);
+-            if (std::tolower(left) != std::tolower(right))
++            if (lowerGuestByte(left) != lowerGuestByte(right))
+                 return false;
+         }
+         return true;
+@@ -159,7 +168,7 @@ std::string PS2RomDevice::normalizePath(std::string_view path)
+     std::string normalized(path);
+     std::replace(normalized.begin(), normalized.end(), '\\', '/');
+     std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char value)
+-                   { return static_cast<char>(std::tolower(value)); });
++                   { return static_cast<char>(lowerGuestByte(value)); });
+     return normalized;
+ }
+ 
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 48c12b9..b6e4053 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -3791,6 +3791,9 @@ void PS2Runtime::run()
+         m_debugUiInitialized = false;
+     }
+     UnloadTexture(frameTex);
++    // The GS thread first: its GPU context (a hidden window sharing this one's GL) would otherwise still be current
++    // there while CloseWindow destroys it - Mesa's Zink crashed in that teardown (abort / a jump into unloaded code).
++    gs().shutdownBackend();
+     CloseWindow();
+ 
+     RUNTIME_LOG("[run] exiting loop");
+diff --git a/ps2xRuntime/src/lib/ps2_settings.cpp b/ps2xRuntime/src/lib/ps2_settings.cpp
+index 297aeaf..a947fb9 100644
+--- a/ps2xRuntime/src/lib/ps2_settings.cpp
++++ b/ps2xRuntime/src/lib/ps2_settings.cpp
+@@ -23,6 +23,8 @@
+ #endif
+ #include <windows.h>
+ #else
++#include <iterator>
++#include <spawn.h>
+ extern char **environ;
+ #endif
+ 
+@@ -107,7 +109,7 @@ namespace ps2_settings
+             for (char **p = environ; p && *p; ++p)
+             {
+                 if (const char *equals = std::strchr(*p, '='))
+-                    g_launch.insert(std::string(*p, equals));
++                    g_launch.insert(std::string(*p, static_cast<std::size_t>(equals - *p)));
+             }
+ #endif
+         }
+@@ -550,9 +552,79 @@ namespace ps2_settings
+             CloseHandle(process.hProcess);
+             return true;
+ #else
+-            (void)state;
+-            error = "not on this system";
+-            return false;
++            // (Linux: the same - this process's environment but for the settings, its command line - started anew; this
++            // one then ends as on Windows. Under Steam the new one stays the game's: Steam waits for all its processes.)
++            std::vector<std::string> variables;
++            for (char **p = environ; *p; ++p)
++                variables.emplace_back(*p);
++            const auto nameOf = [](const std::string &variable) { return variable.substr(0, variable.find('=')); };
++            const auto remove = [&](const std::string &name)
++            {
++                variables.erase(std::remove_if(variables.begin(), variables.end(), [&](const std::string &v)
++                                               { return nameOf(v) == name; }),
++                                variables.end());
++            };
++            const auto set = [&](const std::string &name, const std::string &value)
++            {
++                remove(name);
++                if (!value.empty())
++                    variables.push_back(name + "=" + value);
++            };
++            {
++                std::lock_guard lock(g_mutex);
++                std::set<std::string> listed;
++                for (const Entry &entry : g_entries)
++                {
++                    listed.insert(entry.setting.key);
++                    if (entry.fromEnvironment)
++                        set(entry.setting.key, entry.chosen);
++                    else
++                        remove(entry.setting.key);
++                }
++                for (const std::string &key : g_fromFile)
++                {
++                    if (!listed.count(key))
++                        remove(key);
++                }
++            }
++            remove("PS2X_LOAD_STATE_TICK");
++            remove("PS2X_SETTINGS_RESTART"); // (the testing aid: once)
++            set("PS2X_LOAD_STATE", state.string());
++            set("PS2X_RESTART_STATE", state.string());
++            std::vector<char *> envp;
++            for (std::string &variable : variables)
++                envp.push_back(variable.data());
++            envp.push_back(nullptr);
++
++            std::ifstream in("/proc/self/cmdline", std::ios::binary);
++            std::string line((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
++            std::vector<std::string> args;
++            for (size_t at = 0; at < line.size();)
++            {
++                const size_t end = line.find('\0', at);
++                args.push_back(line.substr(at, end == std::string::npos ? std::string::npos : end - at));
++                at = end == std::string::npos ? line.size() : end + 1;
++            }
++            std::error_code ec;
++            const std::filesystem::path exe = std::filesystem::read_symlink("/proc/self/exe", ec);
++            if (args.empty() || ec)
++            {
++                error = "its command line was not found";
++                return false;
++            }
++            std::vector<char *> argv;
++            for (std::string &arg : args)
++                argv.push_back(arg.data());
++            argv.push_back(nullptr);
++            std::fflush(stdout);
++            std::fflush(stderr);
++            pid_t pid = 0;
++            if (const int failed = posix_spawn(&pid, exe.c_str(), nullptr, nullptr, argv.data(), envp.data()))
++            {
++                error = std::string("Linux did not start it: ") + std::strerror(failed);
++                return false;
++            }
++            return true;
+ #endif
+         }
+     }
+diff --git a/ps2xRuntime/src/lib/ps2_vfs.cpp b/ps2xRuntime/src/lib/ps2_vfs.cpp
+index aff25e6..5cea12f 100644
+--- a/ps2xRuntime/src/lib/ps2_vfs.cpp
++++ b/ps2xRuntime/src/lib/ps2_vfs.cpp
+@@ -51,9 +51,20 @@ namespace
+ 
+         int64_t seek(int64_t offset, int whence) override
+         {
++#if !defined(_WIN32)
++            if (offset < std::numeric_limits<int32_t>::min() || offset > std::numeric_limits<int32_t>::max())
++                return -1;
++#endif
+             if (!m_file || offset < std::numeric_limits<long>::min() || offset > std::numeric_limits<long>::max() || std::fseek(m_file, static_cast<long>(offset), whence) != 0)
+                 return -1;
+             const long position = std::ftell(m_file);
++#if !defined(_WIN32)
++            if (position > std::numeric_limits<int32_t>::max())
++            {
++                errno = EINVAL;
++                return -1;
++            }
++#endif
+             return position < 0 ? -1 : static_cast<int64_t>(position);
+         }
+ 
+@@ -266,6 +277,59 @@ bool PS2Vfs::stat(std::string_view path, const PS2VfsMounts &mounts, const PS2Ro
+     result.readOnly = (status.permissions() & std::filesystem::perms::owner_write) == std::filesystem::perms::none;
+     return true;
+ }
++#if !defined(_WIN32)
++bool PS2Vfs::resolveHostCase(const std::filesystem::path &base, const std::filesystem::path &relative,
++                             std::filesystem::path &result)
++{
++    result = (base / relative).lexically_normal();
++    std::error_code error;
++    const auto exact = std::filesystem::symlink_status(result, error);
++    if (!error && std::filesystem::exists(exact))
++        return true;
++    if (error && error != std::errc::no_such_file_or_directory && error != std::errc::not_a_directory)
++        return false;
++
++    const auto fold = [](unsigned char c) { return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c; };
++    result = base;
++    for (const auto &part : relative)
++    {
++        const auto direct = result / part;
++        error.clear();
++        const auto status = std::filesystem::symlink_status(direct, error);
++        if (!error && std::filesystem::exists(status))
++        {
++            result = direct;
++            continue;
++        }
++        if (error && error != std::errc::no_such_file_or_directory && error != std::errc::not_a_directory)
++            return false;
++
++        const std::string wanted = part.string();
++        std::filesystem::path match;
++        error.clear();
++        std::filesystem::directory_iterator it(result, error), end;
++        for (; !error && it != end; it.increment(error))
++        {
++            const std::string name = it->path().filename().string();
++            if (wanted.size() == name.size() &&
++                std::equal(wanted.begin(), wanted.end(), name.begin(),
++                           [&](unsigned char a, unsigned char b) { return fold(a) == fold(b); }))
++            {
++                // Windows cannot have case-colliding siblings; do not pick one to overwrite.
++                if (!match.empty())
++                    return false;
++                match = it->path();
++            }
++        }
++        if (error && error != std::errc::no_such_file_or_directory && error != std::errc::not_a_directory)
++            return false;
++        result = match.empty() ? direct : match;
++    }
++    result = result.lexically_normal();
++    return true;
++}
++#endif
++
+ 
+ bool PS2Vfs::resolveHostPath(std::string_view path, const PS2VfsMounts &mounts, std::filesystem::path &result) const
+ {
+@@ -297,8 +361,12 @@ bool PS2Vfs::resolveHostPath(std::string_view path, const PS2VfsMounts &mounts,
+     std::filesystem::path relative;
+     if (base.empty() || !safeRelativePath(parsed.path, relative))
+         return false;
++#if !defined(_WIN32)
++    return resolveHostCase(base, relative, result);
++#else
+     result = (base / relative).lexically_normal();
+     return true;
++#endif
+ }
+ 
+ std::vector<PS2VfsDescriptorInfo> PS2Vfs::descriptors() const
+diff --git a/ps2xRuntime/src/lib/ps2_xinput_rumble.cpp b/ps2xRuntime/src/lib/ps2_xinput_rumble.cpp
+index 9e5c63a..7b10716 100644
+--- a/ps2xRuntime/src/lib/ps2_xinput_rumble.cpp
++++ b/ps2xRuntime/src/lib/ps2_xinput_rumble.cpp
+@@ -17,6 +17,14 @@
+ #define NOMINMAX
+ #endif
+ #include <windows.h> // this file never includes raylib, whose names clash with it
++#elif defined(__linux__)
++#include <cerrno>
++#include <cstring>
++#include <string>
++#include <fcntl.h>
++#include <linux/input.h>
++#include <sys/ioctl.h>
++#include <unistd.h>
+ #endif
+ 
+ namespace ps2x::xinput
+@@ -156,6 +164,90 @@ namespace ps2x::xinput
+                 g_user = -1;
+             }
+         }
++#elif defined(__linux__)
++        // Linux: the kernel's force feedback (evdev FF_RUMBLE) on the first gamepad that has it - Steam's virtual pad
++        // under Steam (it passes the rumble on to the real controller), else an Xbox pad's own xpad driver. One effect,
++        // uploaded again when the speeds change; strong = the low-frequency motor, weak = the high-frequency one.
++        int g_fd = -1;
++        int g_effect = -1;
++        int64_t g_nextScan = 0;
++        int64_t g_uploadedAt = 0;
++        Speeds g_written;
++
++        bool hasBit(const unsigned long *bits, int bit)
++        {
++            constexpr int kBits = static_cast<int>(sizeof(unsigned long) * CHAR_BIT);
++            return (bits[bit / kBits] >> (bit % kBits)) & 1ul;
++        }
++
++        int openRumblePad()
++        {
++            for (int i = 0; i < 64; ++i)
++            {
++                const std::string path = "/dev/input/event" + std::to_string(i);
++                const int fd = open(path.c_str(), O_RDWR | O_CLOEXEC | O_NONBLOCK);
++                if (fd < 0)
++                    continue;
++                unsigned long ff[(FF_MAX + 1) / (sizeof(unsigned long) * CHAR_BIT) + 1] = {};
++                unsigned long keys[(KEY_MAX + 1) / (sizeof(unsigned long) * CHAR_BIT) + 1] = {};
++                if (ioctl(fd, EVIOCGBIT(EV_FF, sizeof(ff)), ff) >= 0 && hasBit(ff, FF_RUMBLE) &&
++                    ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keys)), keys) >= 0 && hasBit(keys, BTN_GAMEPAD))
++                {
++                    char name[128] = {};
++                    ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name);
++                    std::fprintf(stderr, "[rumble] vibration through %s (%s)\n", path.c_str(), name);
++                    return fd;
++                }
++                close(fd);
++            }
++            return -1;
++        }
++
++        void dropPad()
++        {
++            if (g_fd >= 0)
++                close(g_fd);
++            g_fd = g_effect = -1;
++            g_written = Speeds{};
++        }
++
++        void write(const Speeds &s, const char *why, int64_t now)
++        {
++            bool ok = true;
++            if (s == Speeds{})
++            {
++                const input_event stopIt{{}, EV_FF, static_cast<uint16_t>(g_effect < 0 ? 0 : g_effect), 0};
++                ok = g_effect < 0 || ::write(g_fd, &stopIt, sizeof(stopIt)) == static_cast<ssize_t>(sizeof(stopIt));
++            }
++            else
++            {
++                ff_effect effect{};
++                effect.type = FF_RUMBLE;
++                effect.id = static_cast<int16_t>(g_effect);
++                effect.u.rumble.strong_magnitude = s.left;
++                effect.u.rumble.weak_magnitude = s.right;
++                effect.replay.length = 0xFFFFu; // (the longest the kernel takes, ~65 s: tick uploads it again before that)
++                ok = ioctl(g_fd, EVIOCSFF, &effect) >= 0;
++                if (ok)
++                {
++                    g_effect = effect.id;
++                    const input_event play{{}, EV_FF, static_cast<uint16_t>(g_effect), 1};
++                    ok = ::write(g_fd, &play, sizeof(play)) == static_cast<ssize_t>(sizeof(play));
++                    g_uploadedAt = now;
++                }
++            }
++            if (settings().trace)
++            {
++                const sonypad::Motors m = sonypad::guestMotors(0);
++                std::fprintf(stderr, "[rumble] motors: guest small %s large %u -> strong %u weak %u (%s): %s\n", m.small ? "on" : "off",
++                             static_cast<unsigned>(m.large), static_cast<unsigned>(s.left), static_cast<unsigned>(s.right), why,
++                             ok ? "ok" : std::strerror(errno));
++            }
++            if (ok)
++                g_written = s;
++            else
++                dropPad(); // (a pad that went away; one found again starts from off)
++        }
+ #endif
+     }
+ 
+@@ -205,6 +297,37 @@ namespace ps2x::xinput
+             }
+         }
+         write(want, active ? "the game" : "off: the game is not taking the pad");
++#elif defined(__linux__)
++        const Settings &cfg = settings();
++        const bool test = cfg.trace >= 2;
++        if (cfg.hidden && !test)
++            return;
++        const int64_t now = nowMs();
++        const bool reading = now - g_lastReadMs.load(std::memory_order_relaxed) < kReadStaleMs;
++        const bool active = reading && !inputBlocked && (test || (focused && g_glfwGamepad.load(std::memory_order_relaxed)));
++        Speeds want;
++        if (active)
++        {
++            const sonypad::Motors m = sonypad::guestMotors(0);
++            want = speedsFor(m.small, m.large, cfg.percent);
++        }
++        const bool expiring = want != Speeds{} && now - g_uploadedAt > 30000; // (the effect's ~65 s run renewed)
++        if (want == g_written && !expiring)
++            return;
++        if (g_fd < 0)
++        {
++            if (want == Speeds{})
++            {
++                g_written = Speeds{};
++                return;
++            }
++            if (now < g_nextScan)
++                return;
++            g_nextScan = now + kScanMs;
++            if ((g_fd = openRumblePad()) < 0)
++                return;
++        }
++        write(want, active ? "the game" : "off: the game is not taking the pad", now);
+ #else
+         (void)focused;
+         (void)inputBlocked;
+@@ -216,6 +339,10 @@ namespace ps2x::xinput
+ #if defined(_WIN32)
+         if (g_user >= 0 && g_written != Speeds{} && api().setState)
+             write(Speeds{}, "off: exit");
++#elif defined(__linux__)
++        if (g_fd >= 0 && g_written != Speeds{})
++            write(Speeds{}, "off: exit", nowMs());
++        dropPad();
+ #endif
+     }
+ }

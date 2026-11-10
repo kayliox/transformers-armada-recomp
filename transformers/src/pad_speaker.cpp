@@ -52,6 +52,40 @@ namespace pad_speaker
             return s;
         }
 
+        // (TODO 268) The HQ's radio lines, wherever they play: the scripted first-time calls (a warp gate's intro, the
+        // first Data-Con, Mini-Con, Golden Disk, sidekick, energon, gliding, sentry drone) and the level's welcome play
+        // them with no HQ beep before, so the call window never opens for them. By the game's sound list (SOUNDLST.TXT):
+        // every line in a level's folder (audiocue/amazon/, antarc/ ...) is an _HQ_ event; audiocue/misc/<autobot>/
+        // (optimus, redalert, hotshot) holds _HQ_ events (the intros, the Mini-Con quest and area messages, "to
+        // Cybertron", the asked / answered lines more/<x>_ask, more/<x>_yes) and the Autobot's own quips (selected, death,
+        // transform, power link, Mini-Con safe, warp from HQ, the cheat accepted), which stay on the PC.
+        bool hqRadioLine(const std::string &lowerFile)
+        {
+            const std::string root = "audiocue/";
+            size_t at = lowerFile.find(root);
+            if (at == std::string::npos)
+                return false;
+            at += root.size();
+            if (lowerFile.compare(at, 5, "misc/") != 0)
+                return true; // (a level's folder)
+            at += 5;
+            const size_t slash = lowerFile.find('/', at);
+            if (slash == std::string::npos)
+                return false; // (misc/mg_mock, misc/ss_mock: the bosses' taunts, not the HQ)
+            const std::string who = lowerFile.substr(at, slash - at);
+            if (who != "optimus" && who != "redalert" && who != "hotshot")
+                return false;
+            std::string stem = lowerFile.substr(lowerFile.find_last_of('/') + 1);
+            if (const size_t dot = stem.find('.'); dot != std::string::npos)
+                stem.resize(dot);
+            if (stem.size() > 3 && stem[2] == '_')
+                stem.erase(0, 3); // (op_ / ra_ / hs_)
+            while (!stem.empty() && std::isdigit(static_cast<unsigned char>(stem.back())))
+                stem.pop_back();
+            static const char *const kQuips[] = {"sel", "die", "xform", "link", "safe", "warp", "cht"};
+            return std::none_of(std::begin(kQuips), std::end(kQuips), [&](const char *q) { return stem == q; });
+        }
+
         Mode modeOf(const std::string &v)
         {
             const std::string s = lower(v);
@@ -191,8 +225,12 @@ namespace pad_speaker
             g_callStreams = 0;
         const bool fromPause = g_levelPaused.load(std::memory_order_relaxed) || now - g_unpausedAt.load(std::memory_order_relaxed) < kUnpauseWindow;
         const bool again = std::find(g_callFiles.begin(), g_callFiles.end(), f) != g_callFiles.end() || fromPause;
-        if (g_callStreams <= 0 && now >= g_callUntil && !again)
+        const bool radio = hqRadioLine(f);
+        if (g_callStreams <= 0 && now >= g_callUntil && !again && !radio)
             return false;
+        if (radio && g_callStreams <= 0 && now >= g_callUntil)
+            std::fprintf(stderr, "[pad speaker] '%s': an HQ line with no call before it (a scripted intro), for the controller's speaker\n",
+                         file.c_str());
         if (!again)
         {
             g_callFiles.push_back(f);

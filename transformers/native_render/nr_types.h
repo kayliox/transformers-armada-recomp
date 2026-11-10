@@ -407,9 +407,10 @@ namespace nr
 
     namespace d3d
     {
-        // The window's height in pixels (the window's thread, nr_present.cpp, each frame): the
-        // native picture is drawn with that many lines unless TF_NATIVE_HEIGHT says otherwise.
-        void setWindowLines(int lines);
+        // The window's size in pixels (the window's thread, nr_present.cpp, each frame): the native picture is drawn
+        // with as many lines as it shows in the window (the window's height, or fewer when it is narrower than the
+        // picture's shape), unless TF_NATIVE_HEIGHT says otherwise.
+        void setWindowSize(int width, int height);
 
         // The large images' video memory policy (TODO 94), from the adapter's video memory (its dedicated
         // memory; TF_NATIVE_VRAM_MB=<n> pretends another size): the longest side a large image is used at

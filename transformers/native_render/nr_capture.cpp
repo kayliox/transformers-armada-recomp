@@ -5229,7 +5229,7 @@ namespace nr
                                 std::fprintf(f, "%08x: %08x %08x\n", a, word(rdram, a + 4u), word(rdram, a));
                         std::fclose(f);
                     }
-                    dumpFrame("runs\\native_" + std::to_string(asked) + ".txt");
+                    dumpFrame("runs/native_" + std::to_string(asked) + ".txt"); // ('/': Windows takes it, Linux needs it)
                 }
                 {
                     // The shader combos the frame drew with (routine addresses, ? = not identified).
@@ -5256,7 +5256,7 @@ namespace nr
                         std::fprintf(stderr, "[native render]   %4d draws: %s\n", sorted[i].first, sorted[i].second.c_str());
                 }
                 warp::gameFrame();
-                submitFrame(std::move(g_frame), "runs\\native_" + std::to_string(asked) + ".bmp");
+                submitFrame(std::move(g_frame), "runs/native_" + std::to_string(asked) + ".bmp");
             }
             g_frame.draws.clear();
             g_frame.list.clear();
@@ -6267,8 +6267,13 @@ namespace nr
             s.help = "Native (DX12, preview): the game drawn by the PC renderer (Direct3D 12) - more frames, sharper "
                      "pictures; menus and movies too, the PS2 graphics chip left with nothing to draw. Emulated: the PS2's "
                      "graphics chip emulated, as before. Takes a restart.";
+#if defined(_WIN32) || defined(TF_NATIVE_RENDERER)
             s.choices = {{"emulated", "Emulated (PS2)"}, {"native", "Native (DX12, preview)"}};
             s.defaultValue = "native"; // (TODO 163: the port's renderer; main.cpp sets TF_RENDERER=native when nothing chose)
+#else
+            s.choices = {{"emulated", "Emulated (PS2)"}}; // (no native renderer in this Linux build: nr_none.cpp, main.cpp)
+            s.defaultValue = "emulated";
+#endif
             s.apply = [](const std::string &) { return false; }; // (takes a restart)
             ps2_settings::add(s);
             const char *chosen = std::getenv("TF_RENDERER");

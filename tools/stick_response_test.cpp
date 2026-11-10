@@ -18,6 +18,17 @@ int main() {
     int checks=0,failures=0;
     auto check=[&](bool ok,const char* what){++checks;if(!ok){if(failures<15)std::printf("FAIL %s\n",what);++failures;}};
     Config c;
+#if defined(__linux__)
+    for(int sign:{-1,1}) {
+        float x=0,y=sign*.092f,rx=.12f,ry=-.17f;
+        map(x,y,rx,ry,c,0,.2f,false,true);
+        check(x==0&&y==sign*.092f&&rx==.12f&&ry==-.17f&&axis(axisByte(y))==0,
+              "menu keeps small resting drift below the guest deadzone");
+        check(move(0,sign*.092f,c)==0,"gameplay ignores a 9% resting drift (Linux dead zone)");
+        check(move(0,sign*.13f,c)>.5f,"gameplay walks just outside the Linux dead zone");
+    }
+    c.inner=.05f; // (the checks below pin the Windows response)
+#endif
     for(int i=0;i<3600;++i) {
         const float a=i*3.14159265358979323846f/1800.f;
         for(float r:{.050001f,.05001f,.051f,.06f}) {

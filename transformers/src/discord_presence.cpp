@@ -36,6 +36,12 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#elif defined(__linux__)
+#include <cerrno>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 #endif
 
 namespace discord_presence
@@ -237,6 +243,124 @@ namespace discord_presence
             }
             return false;
         }
+#elif defined(__linux__)
+        // ---- The worker's socket (Linux): Discord's Unix socket, under the names the shared worker below uses ----------
+        constexpr int INVALID_HANDLE_VALUE = -1;
+        int g_pipe = INVALID_HANDLE_VALUE;
+        std::string g_pipeName;
+        unsigned g_nonce = 0u;
+        unsigned GetCurrentProcessId() { return static_cast<unsigned>(getpid()); }
+
+        void closePipe()
+        {
+            if (g_pipe != INVALID_HANDLE_VALUE)
+                close(g_pipe);
+            g_pipe = INVALID_HANDLE_VALUE;
+        }
+
+        bool writeFrame(uint32_t op, const std::string &json)
+        {
+            std::vector<uint8_t> frame(8 + json.size());
+            const uint32_t length = static_cast<uint32_t>(json.size());
+            std::memcpy(frame.data(), &op, 4);
+            std::memcpy(frame.data() + 4, &length, 4);
+            std::memcpy(frame.data() + 8, json.data(), json.size());
+            return send(g_pipe, frame.data(), frame.size(), MSG_NOSIGNAL) == static_cast<ssize_t>(frame.size());
+        }
+
+        // A whole frame when one is there within timeoutMs (false: none, or the socket broke - broken set).
+        bool readFrame(uint32_t &op, std::string &json, int timeoutMs, bool &broken)
+        {
+            broken = false;
+            const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+            uint32_t header[2] = {0u, 0u};
+            for (;;)
+            {
+                const ssize_t n = recv(g_pipe, header, 8, MSG_PEEK | MSG_DONTWAIT);
+                if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
+                {
+                    broken = true;
+                    return false;
+                }
+                if (n == 8)
+                    break;
+                if (std::chrono::steady_clock::now() >= until)
+                    return false;
+                pollfd p{g_pipe, POLLIN, 0};
+                poll(&p, 1, 20);
+            }
+            if (recv(g_pipe, header, 8, MSG_WAITALL) != 8 || header[1] > (1u << 20))
+            {
+                broken = true;
+                return false;
+            }
+            op = header[0];
+            json.assign(header[1], '\0');
+            if (header[1] && recv(g_pipe, json.data(), header[1], MSG_WAITALL) != static_cast<ssize_t>(header[1]))
+            {
+                broken = true;
+                return false;
+            }
+            return true;
+        }
+
+        // Discord's socket: discord-ipc-0..9 in XDG_RUNTIME_DIR (or TMPDIR, /tmp), directly or in the Flatpak / Snap
+        // app's folder there. TF_DISCORD_PIPE: that socket's path only (tests).
+        bool connectPipe()
+        {
+            std::vector<std::string> names;
+            if (const char *test = std::getenv("TF_DISCORD_PIPE"); test && *test)
+                names.push_back(test);
+            else
+            {
+                std::string base = "/tmp";
+                for (const char *v : {"XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"})
+                    if (const char *dir = std::getenv(v); dir && *dir)
+                    {
+                        base = dir;
+                        break;
+                    }
+                for (const char *sub : {"/", "/app/com.discordapp.Discord/", "/snap.discord/"})
+                    for (int i = 0; i < 10; ++i)
+                        names.push_back(base + sub + "discord-ipc-" + std::to_string(i));
+            }
+            for (const std::string &name : names)
+            {
+                sockaddr_un address{};
+                address.sun_family = AF_UNIX;
+                if (name.size() >= sizeof(address.sun_path))
+                    continue;
+                std::memcpy(address.sun_path, name.c_str(), name.size() + 1);
+                g_pipe = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+                if (g_pipe < 0 || connect(g_pipe, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0)
+                {
+                    closePipe();
+                    continue;
+                }
+                const std::string id = applicationId();
+                uint32_t op = 0u;
+                std::string reply;
+                bool broken = false;
+                if (writeFrame(0u, "{\"v\":1,\"client_id\":" + jsonText(id) + "}") && readFrame(op, reply, 3000, broken) && op == 1u &&
+                    reply.find("\"READY\"") != std::string::npos)
+                {
+                    g_pipeName = name;
+                    std::fprintf(stderr, "[discord] connected (%s)\n", name.c_str());
+                    return true;
+                }
+                static bool told = false;
+                if (!told)
+                {
+                    told = true;
+                    std::fprintf(stderr, "[discord] the Discord app did not accept application id %s (%s)\n", id.c_str(),
+                                 reply.empty() ? "no answer" : reply.substr(0, 160).c_str());
+                }
+                closePipe();
+            }
+            return false;
+        }
+#endif
+#if defined(_WIN32) || defined(__linux__)
 
         std::string activityCommand(const Status *status)
         {
@@ -351,7 +475,7 @@ namespace discord_presence
             g_done.store(true);
         }
 #else
-        void worker() { g_done.store(true); } // (other systems: Discord's Unix socket is a later step)
+        void worker() { g_done.store(true); } // (other systems: no Discord connection)
 #endif
 
         // What to show now (the game thread).

@@ -113,7 +113,7 @@ namespace nr
         virtual int pacingMode() = 0;
 
         // ---- settings (any thread, from the next frame) ----
-        virtual void setWindowLines(int lines) = 0;
+        virtual void setWindowSize(int width, int height) = 0;
         virtual void setAntiAliasing(int mode) = 0;
         virtual void setSupersampling(bool on) = 0;
         virtual void setSpeedupsForced(int on) = 0;

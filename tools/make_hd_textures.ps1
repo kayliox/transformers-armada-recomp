@@ -37,7 +37,7 @@
 #>
 param([switch]$SkipUpscale, [switch]$CrispFontsOnly, [switch]$FontsOnly, [string]$Python = "python",
       [ValidateSet("", "best", "fast")][string]$Quality = "",
-      [switch]$Resume)
+      [switch]$Resume, [int]$GamePid = 0)
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path $PSScriptRoot -Parent
@@ -51,9 +51,19 @@ if ($Resume) {
     try { $Host.UI.RawUI.WindowTitle = "Making the HD textures (you can close this; it carries on next time)" } catch {}
     . (Join-Path $PSScriptRoot "setup_common.ps1")
     if ($Python -eq "python") { $found = Find-Python; if ($found) { $Python = $found } }
-    Write-Host "Making the rest of the HD textures. It waits while the game runs and carries on when you close it."
-    Write-Host "You can close this window at any time: it carries on the next time you start the game."
+    if ($GamePid -gt 0) {
+        # (TODO 267, the user's choice: the game's own window makes them only while the game is open - beside it,
+        # gently; it stops when the game closes (the game ends it), and the next start carries on)
+        Write-Host "Making the rest of the HD textures while the game is open. Closing the game stops this;"
+        Write-Host "what is made is kept and the next start of the game carries on."
+    }
+    else {
+        Write-Host "Making the rest of the HD textures. It waits while the game runs and carries on when you close it."
+        Write-Host "You can close this window at any time: it carries on the next time you start the game."
+    }
 }
+# (TODO 267) Beside the game (-GamePid): never waiting for it; the upscale stops when it ends.
+$withGame = if ($GamePid -gt 0) { @("--game-pid", "$GamePid") } else { @() }
 # (in that window a stop is shown for a minute before it closes; otherwise an error ends the script as always)
 trap {
     if ($Resume) {
@@ -203,12 +213,13 @@ if (-not (Test-Path $exe)) {
 # (TODO 241) A set made before the maker checked its images: every image checked once (a graphics card that gives
 # black, junk-striped or red-and-blue-exchanged images - a GTX 1660 SUPER did): exchanged ones put right, broken ones
 # removed and made again below. Again whenever "Check HD textures" (F1) runs this on a finished set.
-$checkedMark = Join-Path $Out ".images_checked_1"
+$checkedMark = Join-Path $Out ".images_checked_2"
 $finished = $false
 if (Test-Path $StatusFile) { try { $finished = ((Get-Content $StatusFile -Raw | ConvertFrom-Json).state -in @("done", "card_broken")) } catch {} }
 if ((Test-Path (Join-Path $Out "upscaled\upscale_manifest.jsonl")) -and (-not (Test-Path $checkedMark) -or ($Resume -and $finished))) {
     Step "Checking the HD textures made so far (a few minutes)"
-    Run $Python @((Join-Path $Py "upscale_textures.py"), $converted, "--out", (Join-Path $Out "upscaled"), "--check-colours")
+    Run $Python (@((Join-Path $Py "upscale_textures.py"), $converted, "--out", (Join-Path $Out "upscaled"), "--check-colours") +
+        $(if ($GamePid -gt 0) { @("--no-wait-for-game") } else { @() }))
     Set-Content -LiteralPath $checkedMark -Value "checked $(Get-Date -Format s)"
 }
 
@@ -220,8 +231,10 @@ $ErrorActionPreference = "Continue"
 # (TODO 219) In batches, the textures seen first made first, each colour-matched as it is made; it waits while the
 # game runs (unless hd_options.json says to carry on) and says "HD textures: N of M made" after each batch.
 & $Python (Join-Path $Py "upscale_textures.py") $converted --out (Join-Path $Out "upscaled") `
-    --work (Join-Path $Out "work") --exe $exe --quality $Quality --match-colour 2>&1 | ForEach-Object { "$_" } | Tee-Object -Variable lines | Out-Host
+    --work (Join-Path $Out "work") --exe $exe --quality $Quality --match-colour @withGame 2>&1 | ForEach-Object { "$_" } | Tee-Object -Variable lines | Out-Host
 $code = $LASTEXITCODE
+# (TODO 267) Exit 4: the game closed and the upscale stopped with it - the rest waits for the next start.
+if ($code -eq 4) { exit 0 }
 $ErrorActionPreference = "Stop"
 $summary = $lines | Where-Object { $_ -match '^upscaled \d+/\d+ uniques' } | Select-Object -Last 1
 # (TODO 242) Exit 3: this graphics card's upscales come out broken in every way the upscaler has (a GTX 1660 SUPER's

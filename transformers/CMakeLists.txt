@@ -12,18 +12,6 @@ set(TF_BATCH_DIR "${TF_WORK_DIR}/batches")
 file(GLOB TF_BATCH_SOURCES CONFIGURE_DEPENDS "${TF_BATCH_DIR}/batch_*.cpp")
 set(TF_REGISTER_FUNCTIONS "${TF_GENERATED_DIR}/register_functions.cpp")
 
-if(NOT TF_BATCH_SOURCES OR NOT EXISTS "${TF_REGISTER_FUNCTIONS}")
-    message(WARNING
-        "No generated game code in ${TF_WORK_DIR}.
-"
-        "Run build.ps1 with your own Transformers (USA) disc image first; "
-        "only the tools and runtime will be built.")
-    return()
-endif()
-
-list(LENGTH TF_BATCH_SOURCES TF_BATCH_COUNT)
-message(STATUS "Transformers: ${TF_BATCH_COUNT} batches of generated code")
-
 file(GLOB TF_GAME_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 # The decompiled code (decomp/README.md), a folder per part of the game.
 file(GLOB_RECURSE TF_DECOMP_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/decomp/*.cpp")
@@ -31,6 +19,84 @@ file(GLOB_RECURSE TF_DECOMP_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DI
 file(GLOB TF_NATIVE_RENDER_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/native_render/*.cpp")
 # (The large images' BC7 encoder, TODO 94: bc7enc, MIT / public domain - native_render/ext/bc7enc/README.txt.)
 list(APPEND TF_NATIVE_RENDER_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/native_render/ext/bc7enc/bc7enc.cpp")
+# Direct3D 12 and its GL interop are Windows' alone; elsewhere nr_none.cpp stands in. On Linux TF_VKD3D_DIR (a static
+# vkd3d 2.1 or newer, Wine's Direct3D 12 on Vulkan) brings nr_d3d.cpp back: nr_none.cpp then stubs only the GL interop.
+if(WIN32)
+    list(FILTER TF_NATIVE_RENDER_SOURCES EXCLUDE REGEX "/nr_none\\.cpp$")
+else()
+    set(TF_VKD3D_DIR "" CACHE PATH "A static vkd3d (2.1 or newer) install: the native renderer on Vulkan; empty: none")
+    if(TF_VKD3D_DIR AND EXISTS "${TF_VKD3D_DIR}/lib/libvkd3d-utils.a")
+        set(TF_NATIVE_VKD3D ON)
+        list(FILTER TF_NATIVE_RENDER_SOURCES EXCLUDE REGEX "/nr_glshare\\.cpp$")
+        message(STATUS "TransformersRecomp: the native renderer through vkd3d (${TF_VKD3D_DIR})")
+    else()
+        list(FILTER TF_NATIVE_RENDER_SOURCES EXCLUDE REGEX "/nr_(d3d|glshare)\\.cpp$")
+    endif()
+endif()
+# (per file, not for the target: a new definition or include folder there would compile all of the game's code again)
+if(TF_NATIVE_VKD3D)
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/native_render/nr_capture.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/native_render/nr_none.cpp"
+        PROPERTIES COMPILE_DEFINITIONS TF_NATIVE_RENDERER=1)
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/native_render/nr_d3d.cpp" PROPERTIES
+        COMPILE_DEFINITIONS TF_NATIVE_RENDERER=1 INCLUDE_DIRECTORIES "${TF_VKD3D_DIR}/include/vkd3d;${TF_VKD3D_DIR}/include")
+    set(TF_VKD3D_LIBS "${TF_VKD3D_DIR}/lib/libvkd3d-utils.a" "${TF_VKD3D_DIR}/lib/libvkd3d.a"
+        "${TF_VKD3D_DIR}/lib/libvkd3d-shader.a" dl pthread m)
+endif()
+
+# The version the build is made from (TODO 104, updates.h): tf_version.h, written at every build by
+# version.cmake (only when it changes: the commit, its branch and date, a copy of the home repository
+# or a development checkout).
+set(TF_VERSION_HEADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/tf_version")
+set(TF_VERSION_COMMIT_OVERRIDE "" CACHE STRING "The commit a build says it is made from (prebuilt binaries, tests); empty: git's")
+set(TF_VERSION_KIND_OVERRIDE "" CACHE STRING "install or dev (prebuilt binaries, tests); empty: found from the folders")
+add_custom_target(tf_version
+    COMMAND "${CMAKE_COMMAND}" -DSOURCE=${CMAKE_SOURCE_DIR} -DOUTPUT=${TF_VERSION_HEADER_DIR}/tf_version.h
+            -DCOMMIT_OVERRIDE=${TF_VERSION_COMMIT_OVERRIDE} -DKIND_OVERRIDE=${TF_VERSION_KIND_OVERRIDE}
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/version.cmake"
+    BYPRODUCTS "${TF_VERSION_HEADER_DIR}/tf_version.h"
+    COMMENT "tf_version.h"
+    VERBATIM)
+# (its folder for updates.cpp only: an include folder for the whole target would change every file's
+# command line, and the first build after this change would compile all of the game's code again)
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/updates.cpp"
+    PROPERTIES INCLUDE_DIRECTORIES "${TF_VERSION_HEADER_DIR}")
+
+# The native renderer's shaders built in (nr_d3d.cpp, cache::loadBaked): build.ps1 runs the linked executable with
+# --bake-shaders to write this table, then links again if it changed. Until then (or with another build path) an
+# empty one: the shaders are compiled at run time and kept in the shader cache, as before.
+set(TF_BAKED_SHADERS "${CMAKE_CURRENT_BINARY_DIR}/baked/nr_shaders_baked.inc")
+if(NOT EXISTS "${TF_BAKED_SHADERS}")
+    file(WRITE "${TF_BAKED_SHADERS}" "// Empty until build.ps1 runs TransformersRecomp --bake-shaders (nr_d3d.cpp).
+static const BakedShader kBakedShaders[] = {{0ull, nullptr, 0u}};
+")
+endif()
+
+if(NOT TF_BATCH_SOURCES OR NOT EXISTS "${TF_REGISTER_FUNCTIONS}")
+    message(WARNING
+        "No generated game code in ${TF_WORK_DIR}.
+"
+        "Run build.ps1 (build.sh on Linux) with your own Transformers (USA) disc image first; "
+        "only the tools and runtime will be built.")
+    # The port's own code still compiles without a disc (CI: tf_port_objects). vu1_native.cpp needs microcode made
+    # from the disc, so it is left out.
+    set(TF_PORT_CHECK_SOURCES ${TF_GAME_SOURCES} ${TF_DECOMP_SOURCES} ${TF_NATIVE_RENDER_SOURCES})
+    list(FILTER TF_PORT_CHECK_SOURCES EXCLUDE REGEX "/vu1_native\\.cpp$")
+    add_library(tf_port_objects OBJECT EXCLUDE_FROM_ALL ${TF_PORT_CHECK_SOURCES})
+    add_dependencies(tf_port_objects tf_version)
+    target_include_directories(tf_port_objects PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/decomp" "${CMAKE_CURRENT_SOURCE_DIR}/native_render"
+        "${CMAKE_CURRENT_BINARY_DIR}/baked")
+    target_link_libraries(tf_port_objects PRIVATE ps2_runtime)
+    if(PS2X_ENABLE_DEBUG_UI)
+        target_link_libraries(tf_port_objects PRIVATE rlImGui imgui)
+        target_compile_definitions(tf_port_objects PRIVATE PS2X_ENABLE_DEBUG_UI=1)
+    endif()
+    return()
+endif()
+
+list(LENGTH TF_BATCH_SOURCES TF_BATCH_COUNT)
+message(STATUS "Transformers: ${TF_BATCH_COUNT} batches of generated code")
 
 add_executable(TransformersRecomp
     ${TF_BATCH_SOURCES}
@@ -47,16 +113,6 @@ target_include_directories(TransformersRecomp PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/native_render"
     "${CMAKE_CURRENT_BINARY_DIR}/baked"
 )
-
-# The native renderer's shaders built in (nr_d3d.cpp, cache::loadBaked): build.ps1 runs the linked executable with
-# --bake-shaders to write this table, then links again if it changed. Until then (or with another build path) an
-# empty one: the shaders are compiled at run time and kept in the shader cache, as before.
-set(TF_BAKED_SHADERS "${CMAKE_CURRENT_BINARY_DIR}/baked/nr_shaders_baked.inc")
-if(NOT EXISTS "${TF_BAKED_SHADERS}")
-    file(WRITE "${TF_BAKED_SHADERS}" "// Empty until build.ps1 runs TransformersRecomp --bake-shaders (nr_d3d.cpp).
-static const BakedShader kBakedShaders[] = {{0ull, nullptr, 0u}};
-")
-endif()
 
 target_link_libraries(TransformersRecomp PRIVATE ps2_runtime)
 
@@ -84,27 +140,13 @@ else()
     message(STATUS "TransformersRecomp: the public build (no overlay)")
 endif()
 
-# The version the build is made from (TODO 104, updates.h): tf_version.h, written at every build by
-# version.cmake (only when it changes: the commit, its branch and date, a copy of the home repository
-# or a development checkout).
-set(TF_VERSION_HEADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/tf_version")
-set(TF_VERSION_COMMIT_OVERRIDE "" CACHE STRING "The commit a build says it is made from (prebuilt binaries, tests); empty: git's")
-set(TF_VERSION_KIND_OVERRIDE "" CACHE STRING "install or dev (prebuilt binaries, tests); empty: found from the folders")
-add_custom_target(tf_version
-    COMMAND "${CMAKE_COMMAND}" -DSOURCE=${CMAKE_SOURCE_DIR} -DOUTPUT=${TF_VERSION_HEADER_DIR}/tf_version.h
-            -DCOMMIT_OVERRIDE=${TF_VERSION_COMMIT_OVERRIDE} -DKIND_OVERRIDE=${TF_VERSION_KIND_OVERRIDE}
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/version.cmake"
-    BYPRODUCTS "${TF_VERSION_HEADER_DIR}/tf_version.h"
-    COMMENT "tf_version.h"
-    VERBATIM)
 add_dependencies(TransformersRecomp tf_version)
 # The exe's icon, made from the player's disc into the build folder (icon.cmake, TODO 198).
 include("${CMAKE_CURRENT_SOURCE_DIR}/icon.cmake")
-# (its folder for updates.cpp only: an include folder for the whole target would change every file's
-# command line, and the first build after this change would compile all of the game's code again)
-set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/updates.cpp" PROPERTIES INCLUDE_DIRECTORIES "${TF_VERSION_HEADER_DIR}")
 if(WIN32)
     target_link_libraries(TransformersRecomp PRIVATE d3d12 dxgi d3dcompiler)
+elseif(TF_NATIVE_VKD3D)
+    target_link_libraries(TransformersRecomp PRIVATE ${TF_VKD3D_LIBS})
 endif()
 
 # register_functions.cpp is one 50 MB constructor filling the function table

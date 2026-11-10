@@ -1,5 +1,9 @@
 // Updates (TODO 104): updates.h has the long form.
 
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include "updates.h"
 
 #include "guest_code.h"
@@ -31,9 +35,20 @@
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <cerrno>
+#include <csignal>
+#include <fcntl.h>
+#include <poll.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+extern char **environ;
+#endif
 
 namespace fs = std::filesystem;
 
@@ -48,21 +63,31 @@ namespace updates
 
         fs::path exeDir()
         {
+#if defined(_WIN32)
             std::wstring buffer(32768, L'\0');
             const DWORD n = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
             buffer.resize(n);
             return fs::path(buffer).parent_path();
+#else
+            std::error_code ec;
+            return fs::read_symlink("/proc/self/exe", ec).parent_path();
+#endif
         }
 
-        // An installed copy, under git with update.ps1 at its top: a clone of the game's repository
-        // (the game's folder itself: build.ps1 and transformers\ beside update.ps1), or a repository
-        // that holds the game's folder as its port\ (port\ beside update.ps1).
+        // An installed copy under git, with the updater at the game's top or in its port folder.
         bool isRepo(const fs::path &dir)
         {
             std::error_code ec;
+#if defined(_WIN32)
             if (!fs::exists(dir / "update.ps1", ec) || !fs::exists(dir / ".git", ec))
                 return false;
             return fs::is_directory(dir / "port", ec) || (fs::exists(dir / "build.ps1", ec) && fs::is_directory(dir / "transformers", ec));
+#else
+            if (!fs::exists(dir / ".git", ec))
+                return false;
+            return (fs::exists(dir / "update.sh", ec) && fs::is_directory(dir / "transformers", ec)) ||
+                   (fs::exists(dir / "port" / "update.sh", ec) && fs::is_directory(dir / "port" / "transformers", ec));
+#endif
         }
 
         // The copy the game was built in (its exe is under out\build\... of the game's folder), or
@@ -71,8 +96,17 @@ namespace updates
         {
             static const fs::path root = []() -> fs::path
             {
+#if defined(_WIN32)
                 if (const char *env = std::getenv("TF_UPDATE_REPO"); env && *env)
                     return isRepo(env) ? fs::path(env) : fs::path();
+#else
+                if (const char *env = std::getenv("TF_UPDATE_REPO"); env && *env)
+                {
+                    std::error_code ec;
+                    const fs::path dir = fs::absolute(env, ec);
+                    return !ec && isRepo(dir) ? dir : fs::path();
+                }
+#endif
                 fs::path dir = exeDir();
                 for (int i = 0; i < 10 && !dir.empty(); ++i)
                 {
@@ -100,7 +134,11 @@ namespace updates
                 fs::path dir = exeDir();
                 for (int i = 0; i < 10 && !dir.empty(); ++i)
                 {
+#if defined(_WIN32)
                     if (fs::exists(dir / "build.ps1", ec) && fs::is_directory(dir / "transformers", ec))
+#else
+                    if (fs::exists(dir / "build.sh", ec) && fs::is_directory(dir / "transformers", ec))
+#endif
                         return dir;
                     if (dir == dir.parent_path())
                         break;
@@ -120,6 +158,8 @@ namespace updates
         // tfa-setup.exe write it: TODO 111), read and deleted at the next start.
         fs::path updateKept() { return statesDir() / "update_kept.txt"; }
 
+        // (transformers/version.cmake: "install" once setup.ps1 / setup.sh wrote .setup.json; a development checkout
+        // never checks for updates)
         bool installed() { return std::strcmp(TF_VERSION_KIND, "install") == 0 || std::getenv("TF_UPDATE_REPO") != nullptr; }
 
         std::string shortHash(const std::string &h) { return h.substr(0, std::min<size_t>(h.size(), 7)); }
@@ -131,6 +171,7 @@ namespace updates
             return text;
         }
 
+#if defined(_WIN32)
         std::wstring widen(const std::string &s)
         {
             if (s.empty())
@@ -141,6 +182,7 @@ namespace updates
                 MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
             return w;
         }
+#endif
 
         void removeQuietly(const fs::path &p)
         {
@@ -151,6 +193,7 @@ namespace updates
         // ---------------------------------------------------------------------------------
         // Environments and processes.
 
+#if defined(_WIN32)
         std::vector<std::wstring> g_launchEnvironment;
 
         std::vector<std::wstring> currentEnvironment()
@@ -205,16 +248,60 @@ namespace updates
         }
 
         std::wstring quoted(const fs::path &p) { return L"\"" + p.wstring() + L"\""; }
+#else
+        std::vector<std::string> g_launchEnvironment;
+
+        std::vector<std::string> currentEnvironment()
+        {
+            std::vector<std::string> out;
+            for (char **p = environ; p && *p; ++p)
+                out.emplace_back(*p);
+            return out;
+        }
+
+        void setVariable(std::vector<std::string> &env, const std::string &name, const std::string &value)
+        {
+            env.erase(std::remove_if(env.begin(), env.end(), [&](const std::string &v)
+                                     { return v.size() > name.size() && v.compare(0, name.size(), name) == 0 && v[name.size()] == '='; }),
+                      env.end());
+            if (!value.empty())
+                env.push_back(name + "=" + value);
+        }
+
+        std::vector<std::string> childEnvironment()
+        {
+            std::vector<std::string> env = g_launchEnvironment.empty() ? currentEnvironment() : g_launchEnvironment;
+            for (const char *name : {"PS2X_LOAD_STATE", "PS2X_LOAD_STATE_TICK", "PS2X_RESTART_STATE", "PS2X_SAVE_STATE",
+                                     "PS2X_SAVE_STATE_TICK", "PS2X_SETTINGS_RESTART", "TF_UPDATE_TEST", "TF_RESUME_FAILED"})
+                setVariable(env, name, "");
+            return env;
+        }
+
+        std::vector<char *> pointers(const std::vector<std::string> &strings)
+        {
+            std::vector<char *> result;
+            result.reserve(strings.size() + 1);
+            for (const std::string &s : strings)
+                result.push_back(const_cast<char *>(s.c_str()));
+            result.push_back(nullptr);
+            return result;
+        }
+#endif
 
         struct Ran
         {
             bool started = false;
             bool timedOut = false;
+#if defined(_WIN32)
             DWORD code = 0;
+#else
+            int code = 1;
+#endif
             std::string out; // stdout and stderr together
         };
 
         // A program run hidden, its output read, killed after `timeout`.
+#if defined(_WIN32)
         Ran runHidden(const std::wstring &commandLine, const std::vector<std::wstring> &environment, std::chrono::seconds timeout)
         {
             Ran r;
@@ -278,6 +365,109 @@ namespace updates
             CloseHandle(readEnd);
             return r;
         }
+#else
+        Ran runHidden(const std::vector<std::string> &args, const std::vector<std::string> &environment, std::chrono::seconds timeout)
+        {
+            Ran r;
+            int fds[2];
+            if (pipe2(fds, O_CLOEXEC) != 0)
+                return r;
+            // Keep the pipe away from standard descriptors, even if the game inherited them closed.
+            for (int &fd : fds)
+            {
+                if (fd <= STDERR_FILENO)
+                {
+                    const int copy = fcntl(fd, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+                    if (copy < 0)
+                    {
+                        close(fds[0]);
+                        close(fds[1]);
+                        return r;
+                    }
+                    close(fd);
+                    fd = copy;
+                }
+            }
+            const int flags = fcntl(fds[0], F_GETFL);
+            if (flags < 0 || fcntl(fds[0], F_SETFL, flags | O_NONBLOCK) < 0)
+            {
+                close(fds[0]);
+                close(fds[1]);
+                return r;
+            }
+            posix_spawn_file_actions_t actions;
+            int error = posix_spawn_file_actions_init(&actions);
+            if (error != 0)
+            {
+                close(fds[0]);
+                close(fds[1]);
+                return r;
+            }
+            error = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+            if (!error) error = posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
+            if (!error) error = posix_spawn_file_actions_adddup2(&actions, fds[1], STDERR_FILENO);
+            if (!error) error = posix_spawn_file_actions_addclose(&actions, fds[0]);
+            if (!error) error = posix_spawn_file_actions_addclose(&actions, fds[1]);
+            std::vector<char *> argv = pointers(args), env = pointers(environment);
+            pid_t pid = 0;
+            if (!error)
+                error = posix_spawnp(&pid, argv[0], &actions, nullptr, argv.data(), env.data());
+            posix_spawn_file_actions_destroy(&actions);
+            close(fds[1]);
+            if (error)
+            {
+                close(fds[0]);
+                return r;
+            }
+            r.started = true;
+            const auto until = Clock::now() + timeout;
+            bool readOpen = true;
+            char buffer[4096];
+            for (;;)
+            {
+                const ssize_t got = readOpen ? read(fds[0], buffer, sizeof(buffer)) : 0;
+                if (got > 0)
+                    r.out.append(buffer, static_cast<size_t>(got));
+                else if (got == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
+                    readOpen = false;
+                int status = 0;
+                const pid_t waited = waitpid(pid, &status, WNOHANG);
+                if (waited == pid)
+                {
+                    while (readOpen && Clock::now() < until)
+                    {
+                        const ssize_t n = read(fds[0], buffer, sizeof(buffer));
+                        if (n > 0)
+                            r.out.append(buffer, static_cast<size_t>(n));
+                        else if (n < 0 && errno == EINTR)
+                            continue;
+                        else
+                            break;
+                    }
+                    r.code = WIFEXITED(status) ? WEXITSTATUS(status) : WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 1;
+                    break;
+                }
+                if (waited < 0 && errno != EINTR)
+                    break;
+                const auto now = Clock::now();
+                if (now >= until)
+                {
+                    kill(pid, SIGKILL);
+                    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+                    r.timedOut = true;
+                    r.code = 128 + SIGKILL;
+                    break;
+                }
+                if (got > 0)
+                    continue;
+                pollfd pfd{readOpen ? fds[0] : -1, POLLIN, 0};
+                const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(until - now).count();
+                poll(&pfd, 1, static_cast<int>(std::clamp<decltype(remaining)>(remaining, 1, 50)));
+            }
+            close(fds[0]);
+            return r;
+        }
+#endif
 
         std::string trimmed(std::string s)
         {
@@ -299,6 +489,7 @@ namespace updates
         // git in the copy, hidden, never asking for anything.
         Ran git(const std::string &args, std::chrono::seconds timeout = std::chrono::seconds(60))
         {
+#if defined(_WIN32)
             std::vector<std::wstring> env = currentEnvironment();
             setVariable(env, L"GIT_TERMINAL_PROMPT", L"0");
             setVariable(env, L"GCM_INTERACTIVE", L"never");
@@ -307,6 +498,20 @@ namespace updates
             if (!std::getenv("GIT_SSH_COMMAND"))
                 setVariable(env, L"GIT_SSH_COMMAND", L"ssh -o BatchMode=yes");
             return runHidden(L"git -C " + quoted(repoRoot()) + L" " + widen(args), env, timeout);
+#else
+            std::vector<std::string> env = currentEnvironment();
+            setVariable(env, "GIT_TERMINAL_PROMPT", "0");
+            setVariable(env, "GCM_INTERACTIVE", "never");
+            setVariable(env, "GIT_ASKPASS", "");
+            setVariable(env, "SSH_ASKPASS", "");
+            if (!std::getenv("GIT_SSH_COMMAND"))
+                setVariable(env, "GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+            std::vector<std::string> command{"git", "-C", repoRoot().string()};
+            std::istringstream words(args);
+            for (std::string word; words >> word;)
+                command.push_back(std::move(word));
+            return runHidden(command, env, timeout);
+#endif
         }
 
         // A version's number (TODO 111): "0.1.3" from the VERSION file a commit of the copy has
@@ -427,7 +632,11 @@ namespace updates
                     c.error = "no answer from the repository (network?)";
                 else if (line.find("could not read Username") != std::string::npos || line.find("Authentication") != std::string::npos ||
                          line.find("terminal prompts disabled") != std::string::npos)
+#if defined(_WIN32)
                     c.error = "the repository asked for a sign-in: run update.ps1 once in the install folder (it asks), then check again";
+#else
+                    c.error = "the repository asked for a sign-in: run update.sh once in the install folder, then check again";
+#endif
                 else
                     c.error = line.empty() ? "git fetch failed" : line;
                 return c;
@@ -595,14 +804,17 @@ namespace updates
         {
             const std::time_t t = std::time(nullptr);
             std::tm tm{};
+#if defined(_WIN32)
             localtime_s(&tm, &t);
+#else
+            localtime_r(&t, &tm);
+#endif
             char text[32];
             std::strftime(text, sizeof(text), "%Y-%m-%d %H:%M:%S", &tm);
             return text;
         }
 
-        // The updater, started detached: tfa-setup.exe in the install folder (a window with the steps),
-        // else update.ps1 in a console window of its own. It waits for this process to end.
+        // The updater waits for this process to end and starts the game again afterwards.
         bool launchUpdater(std::string &error)
         {
             const fs::path repo = repoRoot();
@@ -611,6 +823,7 @@ namespace updates
                 error = "this is not an installed copy of the game (no repository to update)";
                 return false;
             }
+#if defined(_WIN32)
             const DWORD pid = GetCurrentProcessId();
             const bool hidden = [] { const char *e = std::getenv("TF_UPDATE_HIDDEN"); return e && *e == '1'; }();
             std::error_code ec;
@@ -643,6 +856,52 @@ namespace updates
             CloseHandle(pi.hProcess);
             std::fprintf(stderr, "[updates] the updater started: %ls\n", command.c_str());
             return true;
+#else
+            const fs::path port = portRoot();
+            const fs::path updater = port / "update.sh";
+            if (access(updater.c_str(), R_OK) != 0)
+            {
+                error = "cannot read " + updater.string() + ": " + std::strerror(errno);
+                return false;
+            }
+            const std::vector<std::string> command{"bash", updater.string(), "--wait-pid", std::to_string(getpid()), "--play"};
+            const std::vector<std::string> environment = childEnvironment();
+            std::vector<char *> argv = pointers(command), env = pointers(environment);
+            posix_spawn_file_actions_t actions;
+            int status = posix_spawn_file_actions_init(&actions);
+            if (status != 0)
+            {
+                error = "could not start the updater: " + std::string(std::strerror(status));
+                return false;
+            }
+            status = posix_spawn_file_actions_addchdir_np(&actions, port.c_str());
+            if (!status) status = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+            // (update.sh writes update.log itself)
+            if (!status) status = posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+            if (!status) status = posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO, STDERR_FILENO);
+            posix_spawnattr_t attr;
+            bool haveAttr = false;
+            if (!status)
+            {
+                status = posix_spawnattr_init(&attr);
+                haveAttr = status == 0;
+            }
+            if (!status) status = posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSID);
+            pid_t pid = 0;
+            if (!status)
+                status = posix_spawnp(&pid, argv[0], &actions, &attr, argv.data(), env.data());
+            if (haveAttr)
+                posix_spawnattr_destroy(&attr);
+            posix_spawn_file_actions_destroy(&actions);
+            if (status != 0)
+            {
+                error = "could not start the updater: " + std::string(std::strerror(status));
+                return false;
+            }
+            std::fprintf(stderr, "[updates] the updater started: bash %s --wait-pid %ld --play\n", updater.c_str(),
+                         static_cast<long>(getpid()));
+            return true;
+#endif
         }
 
         void clearResumeFiles()
@@ -774,6 +1033,7 @@ namespace updates
             return false;
         // The runtime stopped at the load (it says why in the log): the game once more, normally.
         clearResumeFiles();
+#if defined(_WIN32)
         std::vector<std::wstring> env = childEnvironment();
         setVariable(env, L"TF_RESUME_FAILED", L"1");
         std::wstring block = environmentBlock(env);
@@ -796,6 +1056,26 @@ namespace updates
         CloseHandle(process.hThread);
         CloseHandle(process.hProcess);
         return true;
+#else
+        std::ifstream commandLine("/proc/self/cmdline", std::ios::binary);
+        std::vector<std::string> command;
+        for (std::string arg; std::getline(commandLine, arg, '\0');)
+            command.push_back(std::move(arg));
+        if (commandLine.bad() || command.empty())
+        {
+            std::fprintf(stderr, "[updates] cannot read the game's original command line\n");
+            return false;
+        }
+        std::vector<std::string> environment = childEnvironment();
+        setVariable(environment, "TF_RESUME_FAILED", "1");
+        std::vector<char *> argv = pointers(command), env = pointers(environment);
+        std::fprintf(stderr, "[updates] the saved moment did not load: the game starts again, normally\n");
+        std::fflush(stdout);
+        std::fflush(stderr);
+        execve("/proc/self/exe", argv.data(), env.data());
+        std::fprintf(stderr, "[updates] could not restart the game: %s\n", std::strerror(errno));
+        return false;
+#endif
     }
 
     void frame(PS2Runtime &runtime)
@@ -943,7 +1223,11 @@ namespace updates
         menu_style::heading("Updates");
         if (!installed() || repoRoot().empty())
         {
+#if defined(_WIN32)
             ImGui::TextDisabled("Updates come with an install made by tfa-setup.exe or setup.ps1.");
+#else
+            ImGui::TextDisabled("Updates need a git checkout with update.sh.");
+#endif
             return;
         }
         if (settings)
@@ -953,7 +1237,11 @@ namespace updates
         if (c.at != 0)
         {
             std::tm tm{};
+#if defined(_WIN32)
             localtime_s(&tm, &c.at);
+#else
+            localtime_r(&c.at, &tm);
+#endif
             std::strftime(when, sizeof(when), "%H:%M", &tm);
         }
         switch (c.status)

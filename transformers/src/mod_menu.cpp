@@ -49,6 +49,7 @@
 #if defined(PS2X_ENABLE_DEBUG_UI)
 #include "imgui.h"
 #include "raylib.h"
+#include "rlgl.h"
 #include "rlImGui.h"
 #include "runtime/ps2_sony_pad.h"
 #include "ps2_runtime.h"
@@ -72,6 +73,23 @@ namespace mod_menu
 {
     namespace
     {
+        // The controller layout used when settings.ini has none: on a Steam Deck the triggers fire and jump (its
+        // bumpers are hard to reach in a hand-held grip), elsewhere each game button on its own controller button.
+        const char *padDefault()
+        {
+#if defined(__linux__)
+            static const bool deck = []
+            {
+                std::ifstream in("/sys/class/dmi/id/sys_vendor");
+                std::string vendor;
+                return std::getline(in, vendor) && vendor == "Valve";
+            }();
+            if (deck)
+                return "l1=l2;l2=l1;r1=r2;r2=r1"; // (as "Triggers fire")
+#endif
+            return "";
+        }
+
         // ---------------------------------------------------------------------------------
         // The 32 cheat codes (docs/CHEATS.md of github.com/kayliox/transformers-armada-ps2-mods:
         // decoded from the game's own table, the same in the PAL and USA releases).
@@ -1094,7 +1112,7 @@ namespace mod_menu
                 if (list != name)
                     out += (out.empty() ? "" : ";") + std::string(name) + "=" + list;
             }
-            return out;
+            return out.empty() && *padDefault() ? "l1=l1" : out; // (the plain layout kept when the default is another)
         }
 
         void setPadLayout(const std::string &layout)
@@ -1175,7 +1193,7 @@ namespace mod_menu
                 menu_style::setHelp("Fire and jump on the triggers (R2, L2), the Mini-Con abilities on the bumpers (R1, L1).");
             ImGui::SameLine();
             if (menu_style::button("Reset to default"))
-                setPadLayout("");
+                setPadLayout(padDefault());
         }
 
         // ---------------------------------------------------------------------------------
@@ -2407,26 +2425,31 @@ namespace mod_menu
             dl->AddLine(ImVec2(pad, bottom + size * 0.4f), ImVec2(w - pad, bottom + size * 0.4f), colour("line"), 1.0f);
             const float restartWidth = size * 13.0f;
             const bool modRestart = ext::restartPending();
-            const std::string helpText = modRestart ? std::string("Mod changes need a restart. Save your game first; restart returns to the title screen.") : help().empty() ? std::string("Point at a setting for what it does. Changes are saved at once.")
-                                                        : help();
+            const std::string helpText = modRestart ? std::string("Mod changes need a restart. Save your game first; restart returns to the title screen.")
+                                         : help().empty() && hd_progress::readyToRestart() && !anyPending()
+                                             ? std::string("The HD textures made in the background are ready. Restart to use them: you come back where you are.")
+                                         : help().empty() ? std::string("Point at a setting for what it does. Changes are saved at once.")
+                                                          : help();
             dl->AddText(f.text, size * 0.85f, ImVec2(pad, bottom + size * 0.9f), colour("dim"), helpText.c_str(), nullptr,
                         w - pad * 2.0f - restartWidth);
             {
                 // (TODO 212) The Restart button appearing takes the pad's focus (it is the next widget drawn); Circle
                 // gives the focus back to the row that made it appear.
                 static bool restartWas = false;
-                const bool restartNow = anyPending() && !ps2_settings::restarting() && !g_modRestarting;
+                const bool restartNow = (anyPending() || hd_progress::readyToRestart()) && !ps2_settings::restarting() && !g_modRestarting;
                 if (restartNow && !restartWas && g_navPad && g_navLevel == 1)
                     navFocusNext();
                 restartWas = restartNow;
             }
-            if (anyPending() || ps2_settings::restarting() || g_modRestarting)
+            // (TODO 267: HD textures or sharp text made while the game ran: a restart, back where the player is, uses them)
+            const bool hdRestart = hd_progress::readyToRestart() && !anyPending();
+            if (anyPending() || hdRestart || ps2_settings::restarting() || g_modRestarting)
             {
                 ImGui::SetCursorScreenPos(ImVec2(w - pad - restartWidth, bottom + size * 0.8f));
                 ImGui::PushFont(f.text, size);
                 if (ps2_settings::restarting() || g_modRestarting)
                     ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(colour("amber")), "Restarting...");
-                else if (button(modRestart ? "Restart game" : "Restart to apply", true))
+                else if (button(modRestart ? "Restart game" : hdRestart ? "Restart for HD textures" : "Restart to apply", true))
                 {
                     if (modRestart && ext::restartGame(true))
                     {
@@ -2495,7 +2518,15 @@ namespace mod_menu
             pad.key = "PS2X_PADMAP";
             pad.section = "Controller";
             pad.label = "Controller buttons";
-            pad.defaultValue = "";
+            pad.defaultValue = padDefault();
+#if defined(__linux__)
+            if (*padDefault() && !std::getenv("PS2X_PADMAP"))
+            {
+                setenv("PS2X_PADMAP", padDefault(), 1); // (no saved layout: the default, as the runtime reads it)
+                ps2_host_input::setPadBindings(padDefault());
+                std::fprintf(stderr, "[pad] controller buttons: %s (a Steam Deck's default)\n", ps2_host_input::padBindings().c_str());
+            }
+#endif
             pad.apply = [](const std::string &value)
             {
                 ps2_host_input::setPadBindings(value);
@@ -2710,6 +2741,75 @@ namespace mod_menu
             {
                 DrawText(notice.c_str(), size + 2, y + 2, size, Color{0, 0, 0, 170});
                 DrawText(notice.c_str(), size, y, size, Color{120, 220, 255, 220});
+            }
+            // (TODO 267) The HD textures (or the sharp text) being made in the background: how far, small, in the bottom right
+            // corner; once done, that a restart uses them (F1 has the button). Nothing shows otherwise.
+            if (const std::string hd = hd_progress::cornerLine(); !hd.empty())
+            {
+                const int width = MeasureText(hd.c_str(), size);
+                const int x = GetScreenWidth() - width - size, hy = GetScreenHeight() - size * 2;
+                const bool ready = hd_progress::readyToRestart() && hd.find("eady") != std::string::npos;
+                DrawText(hd.c_str(), x + 2, hy + 2, size, Color{0, 0, 0, 170});
+                DrawText(hd.c_str(), x, hy, size, ready ? Color{255, 200, 90, 235} : Color{120, 220, 255, 200});
+            }
+        }
+        // TF_HD_SHOT=<vblank>,<vblank>... (tests): the window's picture with the menu closed at those VBlanks, to
+        // runs/hd_shot_<vblank>.png (the corner line, on a machine nobody watches).
+        {
+            static std::vector<unsigned long long> hdShots = []
+            {
+                std::vector<unsigned long long> list;
+                for (const char *s = std::getenv("TF_HD_SHOT"); s && *s;)
+                {
+                    char *end = nullptr;
+                    list.push_back(std::strtoull(s, &end, 10));
+                    s = end && *end == ',' ? end + 1 : nullptr;
+                }
+                return list;
+            }();
+            if (!hdShots.empty() && !g_open && runtime.eeScheduler().currentVSyncTick() >= hdShots.front())
+            {
+                const std::string file = "runs/hd_shot_" + std::to_string(hdShots.front()) + ".png";
+                hdShots.erase(hdShots.begin());
+                rlDrawRenderBatchActive(); // (what is drawn so far, out of raylib's batch)
+                Image shot = LoadImageFromScreen();
+                ExportImage(shot, file.c_str());
+                UnloadImage(shot);
+                std::fprintf(stderr, "[mod menu] TF_HD_SHOT: %s (%dx%d), corner '%s'\n", file.c_str(), shot.width, shot.height,
+                             hd_progress::cornerLine().c_str());
+            }
+        }
+        // TF_HD_BUTTON_AT=<vblank>,<vblank>... (tests): F1 > Graphics' Make / Stop / Resume HD textures button pressed at
+        // those VBlanks (TODO 267).
+        {
+            static std::vector<unsigned long long> presses = []
+            {
+                std::vector<unsigned long long> list;
+                for (const char *s = std::getenv("TF_HD_BUTTON_AT"); s && *s;)
+                {
+                    char *end = nullptr;
+                    list.push_back(std::strtoull(s, &end, 10));
+                    s = end && *end == ',' ? end + 1 : nullptr;
+                }
+                return list;
+            }();
+            if (!presses.empty() && runtime.eeScheduler().currentVSyncTick() >= presses.front())
+            {
+                presses.erase(presses.begin());
+                const std::string label = hd_progress::makeLabel();
+                const std::string note = hd_progress::makeHdTextures();
+                std::fprintf(stderr, "[mod menu] TF_HD_BUTTON_AT: '%s' -> %s\n", label.c_str(), note.c_str());
+            }
+        }
+        // TF_MOD_MENU_AT=<vblank> (tests): the menu opened at that VBlank (with TF_MENU_SHOT: its picture).
+        if (static const unsigned long long openAt = std::getenv("TF_MOD_MENU_AT") ? std::strtoull(std::getenv("TF_MOD_MENU_AT"), nullptr, 10) : 0ull;
+            openAt != 0ull)
+        {
+            static bool opened = false;
+            if (!opened && runtime.eeScheduler().currentVSyncTick() >= openAt)
+            {
+                opened = true;
+                g_open = true;
             }
         }
         if (!g_open)

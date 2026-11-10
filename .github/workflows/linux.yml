@@ -1,0 +1,41 @@
+# The Linux build without a disc: the PS2Recomp patch series applied as build.sh applies it, the recompiler tools,
+# the runtime and the port's own code (tf_port_objects: transformers/CMakeLists.txt compiles it when there is no
+# generated game code). No game data is involved; the game itself needs a player's disc (build.sh --iso).
+name: Linux build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    name: linux-${{ matrix.compiler }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang libgl-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev \
+            libxi-dev pkg-config libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev \
+            curl bison flex libjson-perl libvulkan-dev spirv-headers
+      - name: Apply the PS2Recomp patch series
+        run: ./build.sh --patches-only
+      - name: Build the recompiler tools, the runtime and the port's code
+        run: |
+          if [ "${{ matrix.compiler }}" = clang ]; then export CC=clang CXX=clang++; else export CC=gcc CXX=g++; fi
+          cmake -S PS2Recomp -B out/tools -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DPS2X_BUILD_RUNTIME=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_STUDIO=OFF
+          cmake --build out/tools --target ps2_recomp ps2_analyzer
+          vkd3d=$(tools/build_vkd3d.sh) # (the native renderer's vkd3d, from the packages setup.sh names)
+          [ -n "$vkd3d" ] || { tail -n 40 out/vkd3d-src/configure.log out/vkd3d-src/make.log; exit 1; }
+          cmake -S . -B out/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DTF_VKD3D_DIR="$vkd3d"
+          cmake --build out/build --target tf_port_objects -- -k 0
