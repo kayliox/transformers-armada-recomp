@@ -102,7 +102,7 @@ first HD run (not measured) filled the renderer's BC7 cache of the pack: 5 files
 - That the textures were used, not only found: with `TF_NATIVE_NAMES=1` (in a separate, unmeasured run) the renderer
   chose a large image for 180-186 different textures in the first 190 s, 73 of them Amazon Basin's own (for example
   `MACHU_STONE_WALL`, `MACHU_GROUND`, `HILL_TILE`), each matching the game's texture (difference 0.00); it rejected one
-  (a 16x16 grey texture whose alpha differed). With `TF_HIRES=0` the log says "HD textures off" and chose none.
+  (a 16x16 grey texture whose alpha differed). With `TF_HIRES=0` the log says "HD textures off (TF_HIRES=0): the game's own textures".
 
 ## Caveats
 
