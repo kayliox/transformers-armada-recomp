@@ -76,8 +76,10 @@ function Invoke-OptionalFonts([string]$Python, [string]$Port) {
     }
 }
 
-# Transformers (USA), SLUS-20668: the only disc the build accepts (the build checks its executable).
+# Transformers (USA), SLUS-20668, the disc the build is made for, and the European disc, SLES-52388 (En, Fr, De, Es,
+# It; experimental). The build checks the disc's executable; the sizes only tell the setup which one it is given.
 function Get-UsaDiscSize { 2900951040 }
+function Get-PalDiscSize { 4546691072 }
 
 # What the build needs and is not there: "git", "python", "vs" (Visual Studio's C++ tools).
 function Get-MissingPrerequisites {

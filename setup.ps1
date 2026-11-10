@@ -7,8 +7,9 @@
     1. Checks what the build needs: Git, Python 3.11+ (with Pillow and numpy), CMake, Visual Studio's
        C++ tools. -InstallPrerequisites installs the missing ones with winget (Visual Studio Build
        Tools is a few GB); without it the script says what to install and stops.
-    2. Builds the game (build.ps1): checks the disc is Transformers USA (SLUS-20668), extracts it into
-       game\, recompiles the game's code and builds the exe. The first build takes 15-25 minutes.
+    2. Builds the game (build.ps1): checks the disc is Transformers USA (SLUS-20668) - or the European
+       disc (SLES-52388), experimental - extracts it into game\, recompiles the game's code and builds the
+       exe. The first build takes 15-25 minutes.
     3. Makes the HD textures (tools\make_hd_textures.ps1): every texture upscaled on your GPU, tens of
        minutes to a few hours. -SkipHdTextures leaves the upscale out and makes only the sharp fonts
        and button prompts (the game then shows its original textures). -HdQuality fast: 2K characters
@@ -63,17 +64,20 @@ if ($Iso) {
 $state | ConvertTo-Json | Set-Content $StateFile -Encoding UTF8
 
 $gameDir = Join-Path $Port "game"
-$haveGame = Test-Path (Join-Path $gameDir "SLUS_206.68")
+$haveGame = (Test-Path (Join-Path $gameDir "SLUS_206.68")) -or (Test-Path (Join-Path $gameDir "SLES_523.88"))
 if (-not $haveGame -and -not $state.Iso) {
     Fail "first setup: give your disc image, e.g.  .\setup.ps1 -Iso `"D:\Games\Transformers (USA).iso`""
 }
-# The disc, checked before the long installs: only Transformers (USA), SLUS-20668, works. (The build
-# checks the game's executable inside it; a size other than the USA release's is only a warning.)
+# The disc, checked before the long installs: Transformers (USA), SLUS-20668, or the European disc, SLES-52388
+# (experimental). (The build checks the game's executable inside it; another size is only a warning.)
 if (-not $haveGame) {
     if (-not (Test-Path -LiteralPath $state.Iso -PathType Leaf)) { Fail "the disc image is gone: $($state.Iso) (give it again with -Iso)" }
     $size = (Get-Item -LiteralPath $state.Iso).Length
-    if ($size -ne (Get-UsaDiscSize)) {
-        Write-Host "warning: $($state.Iso) is not the size of the USA release (SLUS-20668, $(Get-UsaDiscSize) bytes); the build checks the disc's executable." -ForegroundColor Yellow
+    if ($size -eq (Get-PalDiscSize)) {
+        Write-Host "The European disc (SLES-52388, PAL): support for it is experimental - it is played less than the USA disc, so" -ForegroundColor Yellow
+        Write-Host "something may not work yet. Please report what you find (docs\TROUBLESHOOTING.md says how)." -ForegroundColor Yellow
+    } elseif ($size -ne (Get-UsaDiscSize)) {
+        Write-Host "warning: $($state.Iso) is not the size of the USA release (SLUS-20668, $(Get-UsaDiscSize) bytes) or of the European one (SLES-52388); the build checks the disc's executable." -ForegroundColor Yellow
     }
 }
 
