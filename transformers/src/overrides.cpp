@@ -8141,6 +8141,8 @@ namespace
 
     void frameKick(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (language::redirectForText(rdram, ctx, runtime)) // (the PAL release's text in another language: language.h)
+            return;
         testStall(runtime);
         reportSlowFrame(rdram, runtime);
         key_text::frame(rdram); // (the sticks' words for the keyboard: key_text.h)
@@ -8182,6 +8184,7 @@ namespace
         g_mouseLookRdram = rdram;
         mouseLook();
         updateDisplayAspect(rdram);
+        language::frame(rdram, ctx, runtime); // (the PAL release's language: language.h)
         applyFrameRate(rdram, ctx, runtime);
         applyDrawDistance(rdram, runtime);
         charDetailFrame(runtime);
