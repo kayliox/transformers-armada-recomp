@@ -1195,15 +1195,19 @@ namespace native_sound::mixer
         }
         else
         {
-            // ADPCM, the two channels alternating in 16-byte blocks (PAL movies; not on this disc)
-            for (uint32_t b = 0; b + 32u <= size; b += 32u)
-            {
-                int16_t l[28], r[28];
-                data::decodeBlock(bytes + b, l, s.h1[0], s.h2[0]);
-                data::decodeBlock(bytes + b + 16u, r, s.h1[1], s.h2[1]);
-                s.eeLeft.insert(s.eeLeft.end(), l, l + 28);
-                s.eeRight.insert(s.eeRight.end(), r, r + 28);
-            }
+            // ADPCM (the European disc's movies, SShd type 0x10): the two channels alternate every 0x20 bytes,
+            // two 16-byte blocks of one channel, then two of the other (the interleave of all 82 of them).
+            // Read as 16-byte alternation, half of each channel's blocks went to the other one: static.
+            constexpr uint32_t kInterleave = 0x20u;
+            for (uint32_t row = 0; row + 2u * kInterleave <= size; row += 2u * kInterleave)
+                for (uint32_t b = 0; b < kInterleave; b += 16u)
+                {
+                    int16_t l[28], r[28];
+                    data::decodeBlock(bytes + row + b, l, s.h1[0], s.h2[0]);
+                    data::decodeBlock(bytes + row + kInterleave + b, r, s.h1[1], s.h2[1]);
+                    s.eeLeft.insert(s.eeLeft.end(), l, l + 28);
+                    s.eeRight.insert(s.eeRight.end(), r, r + 28);
+                }
         }
         ++s.chunksQueued;
         s.playing = true;
