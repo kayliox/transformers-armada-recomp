@@ -4,8 +4,8 @@
 
 ### The setup says my disc is not supported
 
-Only **Transformers (USA)**, `SLUS-20668`, works. The European release (`SLES`) and the Japanese release do not
-work yet. Make sure the file is a full `.iso` image of the disc, not a compressed or partial copy.
+**Transformers (USA)**, `SLUS-20668`, works, and the European release, `SLES-52388`, experimentally. The Japanese
+release does not work yet. Make sure the file is a full `.iso` image of the disc, not a compressed or partial copy.
 
 ### "cmake not found" or "python not found" right after the setup installed it
 

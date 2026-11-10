@@ -21,7 +21,7 @@
 
 <p align="center">
   <b>The setup contains no game.</b> You need your own copy of <b>Transformers (USA, SLUS-20668)</b> as an
-  <code>.iso</code> disc image. The setup installs the tools it needs and builds the game on your PC from your disc.
+  <code>.iso</code> disc image (the European release, SLES-52388, works too, experimentally). The setup installs the tools it needs and builds the game on your PC from your disc.
 </p>
 
 <p align="center">
@@ -136,7 +136,8 @@ Some bugs are in the original game on the PlayStation 2 too. This version fixes 
 - Windows 10 or 11, 64-bit.
 - A graphics card with DirectX 12 and Vulkan (any recent AMD, NVIDIA or Intel card).
 - About 15 GB of free disk space.
-- Your own disc image of **Transformers (USA)**, `SLUS-20668`. Other regions do not work yet.
+- Your own disc image of **Transformers (USA)**, `SLUS-20668`. The European release, `SLES-52388` (English,
+  French, German, Spanish, Italian), works too, experimentally. The Japanese release does not work yet.
 
 The setup installs everything else for you (Git, Python and the Visual Studio C++ build tools).
 
