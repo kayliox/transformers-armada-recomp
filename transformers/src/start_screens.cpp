@@ -163,6 +163,30 @@ namespace start_screens
             return !keep && g_mode.load(std::memory_order_relaxed) == kMenu && !g_menuReached;
         }
 
+#if defined(TF_GAME_PAL)
+        // The PAL release asks, after the card check, for the TV's frequency (taScreenFrequencySelect: 50 Hz, 60 Hz,
+        // Test 60 Hz): the card check goes on to "%PAL_FrequencySelect" when 0x32E5C0 says the console is in its 50 Hz
+        // mode, else to "%Legal" (0x552350). The port times the game as in its 60 Hz mode in both (rates.cpp): the
+        // choice only picks the picture's mode. "Straight to the main menu" leaves the question out - the card check
+        // asked it is answered "not 50 Hz" and goes on to the copyright screen (itself left out), the game in its 50 Hz
+        // mode as it starts; "Everything" keeps it.
+        constexpr uint32_t kIsPal50Hz = 0x0032E5C0u;
+        constexpr uint32_t kCardCheckAsks = TF_VA(0u, 0x00552424u); // (PAL only: the USA release has no such screen)
+        PS2Runtime::RecompiledFunction g_isPal50Hz = nullptr;
+
+        void isPal50Hz(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (getRegU32(ctx, 31) == kCardCheckAsks && skipNotices())
+            {
+                std::fprintf(stderr, "[tf] start screens: the PAL 50/60 Hz menu left out (the game's speed is the same in both)\n");
+                setReturnU32(ctx, 0u);
+                ctx->pc = getRegU32(ctx, 31);
+                return;
+            }
+            g_isPal50Hz(rdram, ctx, runtime);
+        }
+#endif
+
         // The skip input for a start movie's item `self` (a1 = krInput 5) when the setting skips its movie.
         void skipInput(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t self)
         {
@@ -404,6 +428,10 @@ namespace start_screens
             runtime.registerFunction(kTimeoutProcessInput, timeoutProcessInput);
         if ((g_timeoutProcessInputThunk = runtime.lookupFunction(kTimeoutProcessInputThunk)) != nullptr)
             runtime.registerFunction(kTimeoutProcessInputThunk, timeoutProcessInputThunk);
+#if defined(TF_GAME_PAL)
+        if ((g_isPal50Hz = runtime.lookupFunction(kIsPal50Hz)) != nullptr)
+            runtime.registerFunction(kIsPal50Hz, isPal50Hz);
+#endif
         if (!(g_introProcessInputThunk && g_titleUpdate && g_startMenuUpdate && g_cardCheckProcessInput && g_timeoutProcessInputThunk))
             std::fprintf(stderr, "[tf] start screens: a front-end function not found - those screens are shown as usual\n");
     }
