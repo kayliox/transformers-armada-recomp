@@ -59,20 +59,56 @@ Elsewhere on the route (one reading each, PCSX2 1x): the HQ ran at 96% speed, th
 
 ## Reading the numbers
 
+The uncapped port and PCSX2 at 1x do very different amounts of work: 83 frames of 1280x720 (about 76 million pixels a
+second, at the player's High settings) against 30 frames of 512x448 (about 7 million). Like for like - 30 frames a
+second at nearly the same number of pixels (PCSX2 2x: 1024x894 = 0.92 million, the port: 1280x720 = 0.92 million):
+
+| 30 frames a second | Pixels a frame | CPU % | GPU busy % | Power W |
+|---|---|---|---|---|
+| PCSX2 2x | 0.92 M | 148.3 | 65.3 | 7.9 |
+| Port, native renderer, capped at 30 | 0.92 M | 117.7 | 57.3 | 7.1 |
+| PCSX2 1x (for reference) | 0.23 M | 149.6 | 24.3 | 6.1 |
+
 - The game itself runs at 30 frames a second on the PS2. PCSX2 keeps it there at 1x and 2x; from 3x it is held back by
   the Deck's GPU (busy 82-88%), not its CPU (EE 60-70%). The 3x and 4x frame rates differ by the view at the moment of
   the screenshot (the 4x one has a large tree trunk in front); GPU busy and PCSX2's GPU time put 4x above 3x.
-- At the same 30 frames a second the port uses less CPU than PCSX2 at 1x (118% against 150%) and draws 1280x720
-  instead of 512x448, with power close to PCSX2 at 2x.
+- At the same 30 frames a second the port uses about a fifth less CPU than PCSX2 at any scale (it runs the game's code
+  instead of emulating the PS2's processors), and at the same pixel count a little less GPU and power, with its higher
+  draw distance and anti-aliasing.
 - Uncapped, the port draws 83 frames a second with the player's High settings, using about 2.5 cores and nearly all of
   the GPU; it is the GPU that stops it short of the panel's 90.
 - The emulated renderer (the PS2's GS emulated, through Zink) is about half the native renderer's frame rate with more
   CPU, less power and less memory.
 
+## The port with its HD texture pack
+
+The pack was made on the Deck itself with the port's own tools (Real-ESRGAN on the Deck's GPU, then the colour match),
+for the textures Amazon Basin uses: its level textures and the shared ones (characters, pick-ups, interface, effects,
+sky). 1089 images, 2.8 GB, made in 2 h 14 min. PCSX2 has no such pack for this game.
+
+Same route and place as above, the native renderer, the player's settings; HD textures on (the default) and off
+(`TF_HIRES=0`, the same pack on disk). Here the frame rate was read from a screenshot at each of the three samples. The
+first HD run (not measured) filled the renderer's BC7 cache of the pack: 5 files (28 MB) before, 182 (644 MB) after.
+
+| Configuration | Frames a second (3 readings) | CPU % | GPU busy % | Power W | RSS MB | VRAM MB |
+|---|---|---|---|---|---|---|
+| HD textures on | 59 / 72 / 72 (68) | 233.6 | 97.3 | 15.0 | 1054 | 1015 |
+| HD textures on, again | 63 / 75 / 75 (71) | 242.3 | 92.7 | 15.2 | 1010 | 1015 |
+| HD textures off | 76 / 83 / 83 (81) | 243.7 | 91.7 | 15.6 | 782 | 638 |
+
+- The pack costs about 13 frames a second here (12-16%), 230-270 MB of memory and 377 MB of video memory. The GPU is
+  the limit with it (busy 93-97%); power stays at the same 15 W, the APU's level for this scene.
+- HD off reproduces the run without any pack (83 frames a second, 248% CPU, 91% GPU, 15.8 W, 762 MB).
+- That the textures were used, not only found: with `TF_NATIVE_NAMES=1` (in a separate, unmeasured run) the renderer
+  chose a large image for 180-186 different textures in the first 190 s, 73 of them Amazon Basin's own (for example
+  `MACHU_STONE_WALL`, `MACHU_GROUND`, `HILL_TILE`), each matching the game's texture (difference 0.00); it rejected one
+  (a 16x16 grey texture whose alpha differed). With `TF_HIRES=0` the log says "HD textures off" and chose none.
+
 ## Caveats
 
 - One place in one level; three samples per configuration. PCSX2's samples and the port's are the same place and the
-  same kind of view, not the same frames.
+  same kind of view, not the same frames. The frame rate moves within a run (57-90 frames a second in one run's own
+  log), more than three readings can show.
 - During the port's capped run the Steam library came to the front over the game for part of the samples; its numbers
   match an earlier capped measurement in the same place (119% CPU, 57% GPU).
 - Power readings move a lot from second to second; read them as a guide.
