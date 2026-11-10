@@ -1404,7 +1404,7 @@ void tfTestWindow(uint64_t vblank)
             if (to == std::string::npos)
                 to = all.size();
             const std::string item = all.substr(from, to - from);
-            if (const size_t at = item.find('@'); at != std::string::npos)
+            if (const size_t at = item.find_first_of("@:"); at != std::string::npos) // ("away:15" too: a test script's own escapes)
                 out.emplace_back(std::atof(item.c_str() + at + 1), item.substr(0, at));
             from = to + 1;
         }

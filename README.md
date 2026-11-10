@@ -16,6 +16,10 @@
 </p>
 
 <p align="center">
+  <a href="https://recomplauncher.com/game/transformers-armada-recomp"><img src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" alt="Get it on RecompLauncher"></a>
+</p>
+
+<p align="center">
   <b>The setup contains no game.</b> You need your own copy of <b>Transformers (USA, SLUS-20668)</b> as an
   <code>.iso</code> disc image. The setup installs the tools it needs and builds the game on your PC from your disc.
 </p>
@@ -238,6 +242,17 @@ Esc gives the mouse back.
 Every key can be changed in **F1 > Controls**. The full list, with the function keys, is in
 **[docs/PLAYING.md](docs/PLAYING.md)**.
 
+## Where things are
+
+Open the folder you installed into, then `transformers-armada-recomp`.
+
+- **Saves:** in `game\mc0`. In the game, F1 > Saves imports, exports and backs them up into the `Saves` folder.
+- **Settings:** `settings.ini`.
+- **Logs, for a bug report:** the game's logs are in `runs`. Zip the newest `play_...out` and `play_...err` files
+  and attach them. If the install or an update failed, also attach `setup.log` or `update-setup.log` from the
+  folder you installed into.
+- **Never attach** save files, save states or anything from the `game` folder: they contain game data.
+
 ## Help
 
 - **Player guide:** [docs/PLAYING.md](docs/PLAYING.md) (settings, controls, updates)
@@ -270,6 +285,7 @@ Issues and pull requests are welcome. See **[docs/CONTRIBUTING.md](docs/CONTRIBU
 - **kayliox:** the PC port, the renderer and the sound.
 - **Jenvery:** the HQ frame-rate fix.
 - **TPepperoni666:** the stick response and the Xbox button prompts.
+- **galaxyawesome:** the ARM groundwork and the CPU thread placement setting.
 - **SirCebollo:** testing, and finding and reporting bugs.
 - The approach follows [Project Amp](https://gitlab.com/ztpeditor/project-amp), which brought *Amplitude* to PC the same way.
 - Third-party components and their licences: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

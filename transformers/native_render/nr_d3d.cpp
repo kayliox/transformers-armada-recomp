@@ -15,6 +15,7 @@
 #include "nr_device.h"
 #include "nr_frame.h"
 #include "nr_glshare.h"
+#include "runtime/ps2_thread_placement.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -3724,6 +3725,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
 
             void work()
             {
+                ps2_thread_placement::place(ps2_thread_placement::Role::Helper); // (PS2X_THREAD_PLACEMENT: the HD texture uploads)
                 // (At most this much staging in one copy batch: the batch's copies run, the staging is
                 // let go of, the next taken - the upload heap never holds a level's worth at once.)
                 // (48 MB, was 160: the game's own textures - stand-ins drawn meanwhile, TODO 76 - wait behind at most

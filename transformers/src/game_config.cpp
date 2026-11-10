@@ -113,6 +113,8 @@ namespace game_config
                 const int want = photo_mode::hudHidden() ? 0 : g_hudWant.load(std::memory_order_relaxed);
                 if (uint8_t *flag = hud ? getMemPtr(rdram, hud + kHudShown) : nullptr)
                 {
+                    if (photo_mode::takeHudRestore() && want < 0)
+                        *flag = 1u;
                     if (want >= 0)
                     {
                         if (g_hudForced != hud)

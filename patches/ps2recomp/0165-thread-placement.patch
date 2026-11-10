@@ -1,0 +1,410 @@
+Subject: [PATCH] Runtime: thread placement on processors, a setting (PS2X_THREAD_PLACEMENT, off by default)
+
+ps2_thread_placement::place(role), called by each busy thread as it starts, gives it an affinity mask from the
+processor topology (Windows; a no-op elsewhere). Adapted from another recompilation of this game, where placing its
+EE and geometry threads on one L3 group and its GS threads on the other took a Ryzen 5 3600 from ~37 ms a frame,
+unsteady, to a steady 33.3 ms. Here the threads are different, so the mapping is too:
+
+- two or more L3 groups: EE, VIF1 and the native renderer's read thread (the threads that touch the frame in guest
+  memory) on three cores of a group without core 0; the native render thread and the GS feed on the second and
+  third cores of core 0's group;
+- one L3: those five on cores 1 to 5;
+- only the fast cores count on a CPU with performance and efficiency cores; fewer than 6, or more than one processor
+  group: nothing placed;
+- helpers (sound mixer, movie decoder, HD texture uploads and loaders, the controller thread): anywhere but the EE's
+  and the render thread's cores.
+
+PS2X_THREAD_PLACEMENT=off (the default) or unset makes no system call and changes nothing; =auto places. It is on the
+Graphics page and takes a restart. PS2X_THREAD_CPUS=<ee>,<vif1>,<read>,<render>,<gsfeed> overrides auto's processor
+for each, to try placements on a bench. Each placed thread logs "[threads] <role> thread -> processors 0x...".
+
+This patch places the runtime's threads (game thread, VIF1, GS feed, Sony pad host); the port places its own
+(native renderer, sound mixer, movie decoder, HD uploads) through the same call.
+
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index 862e3f9..50b5349 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -456,6 +456,7 @@ add_library(ps2_runtime STATIC
+     src/lib/ps2_savestate.cpp
+     src/lib/ps2_settings.cpp
+     src/lib/ps2_settings_panel.cpp
++    src/lib/ps2_thread_placement.cpp
+     src/lib/ps2_vif1_interpreter.cpp
+     src/lib/ps2_vif1_thread.cpp
+     src/lib/vu/ps2_vu1_core.cpp
+diff --git a/ps2xRuntime/include/runtime/ps2_thread_placement.h b/ps2xRuntime/include/runtime/ps2_thread_placement.h
+new file mode 100644
+index 0000000..9f9c440
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_thread_placement.h
+@@ -0,0 +1,45 @@
++#ifndef PS2_THREAD_PLACEMENT_H
++#define PS2_THREAD_PLACEMENT_H
++
++// Which processors the busy threads run on (Windows; elsewhere nothing happens).
++//
++// The game is a pipeline of threads handing a lot of data to each other: the game (EE) thread writes a frame into
++// guest memory; the VIF1 thread and the native renderer's read thread take it from there; the render thread builds
++// the GPU's work. On a processor whose cores share an L3 cache in groups (Zen 2: an L3 per 3-4 cores), where the
++// scheduler puts them matters: in another recompilation of this game, the EE and geometry threads on one L3 group and
++// the GS threads on the other, none on core 0, took a Ryzen 5 3600 from ~37 ms a frame (unsteady) to a steady
++// 33.3 ms.
++//
++// PS2X_THREAD_PLACEMENT (a setting, Graphics page; read at start):
++//   off  (default) nothing is placed: exactly as without this file.
++//   auto from the processor topology, with 6 or more cores (the fast ones, on a CPU with performance and efficiency
++//        cores) in processor group 0:
++//        two or more L3 groups - EE, VIF1 and the native renderer's read thread on three cores of an L3 group without
++//          core 0; the render thread and the GS feed on the second and third cores of core 0's group;
++//        one L3 - EE, VIF1, read, render and GS feed on cores 1 to 5.
++//        Each may run on both SMT threads of its core. The helpers (sound mixer, movie decoder, HD texture uploads and
++//        loaders, the controller thread) may run anywhere but the EE's and the render thread's cores.
++// PS2X_THREAD_CPUS=<ee>,<vif1>,<read>,<render>,<gsfeed> (with auto, for trying placements on a bench): a logical
++// processor for each instead (its core's SMT threads with it); negative or left out: auto's choice for that one.
++namespace ps2_thread_placement
++{
++    enum class Role : int
++    {
++        Ee = 0,     // the game thread
++        Vif1,       // ps2_vif1_thread.cpp's worker
++        GsFeed,     // ps2_vif1_thread.cpp's GS feed
++        RenderRead, // the native renderer's guest-memory reader
++        Render,     // the native renderer's render thread
++        Helper,     // sound mixer, movie decoder, HD texture uploads, controller thread
++        Count
++    };
++
++    // From the thread itself, as it starts. Does nothing with PS2X_THREAD_PLACEMENT off (or unset), on a machine
++    // auto leaves alone, and outside Windows.
++    void place(Role role);
++
++    // The setting for the panel (from ps2_settings::addRuntimeSettings).
++    void addSetting();
++}
++
++#endif
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 4d31aa9..3ebccd5 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -10,6 +10,7 @@
+ #include "runtime/ee_scheduler.h"
+ #include "runtime/ps2_savestate.h"
+ #include "runtime/ps2_host_display.h"
++#include "runtime/ps2_thread_placement.h"
+ #include "runtime/ps2_host_present.h"
+ #include "runtime/ps2_host_input.h"
+ #include "runtime/ps2_settings.h"
+@@ -3500,6 +3501,7 @@ void PS2Runtime::run()
+     std::thread gameThread([&]()
+                            {
+         ThreadNaming::SetCurrentThreadName("GameThread");
++        ps2_thread_placement::place(ps2_thread_placement::Role::Ee);
+         try
+         {
+             m_eeScheduler->reset(m_memory.getRDRAM(), m_cpuContext);
+diff --git a/ps2xRuntime/src/lib/ps2_settings_panel.cpp b/ps2xRuntime/src/lib/ps2_settings_panel.cpp
+index 320df7c..8f9104a 100644
+--- a/ps2xRuntime/src/lib/ps2_settings_panel.cpp
++++ b/ps2xRuntime/src/lib/ps2_settings_panel.cpp
+@@ -11,6 +11,7 @@
+ #include "runtime/gs/gs_gpu.h"
+ #include "runtime/ps2_audio_stream.h"
+ #include "runtime/ps2_host_input.h"
++#include "runtime/ps2_thread_placement.h"
+ #include "raylib.h"
+ 
+ #include <algorithm>
+@@ -924,6 +925,7 @@ void ps2_settings::addRuntimeSettings()
+     added = true;
+     const auto onOff = []()
+     { return std::vector<Choice>{{"0", "Off"}, {"1", "On"}}; };
++    ps2_thread_placement::addSetting();
+ 
+     {
+         Setting s;
+diff --git a/ps2xRuntime/src/lib/ps2_sony_pad_host.cpp b/ps2xRuntime/src/lib/ps2_sony_pad_host.cpp
+index 1e8c214..a3d54b3 100644
+--- a/ps2xRuntime/src/lib/ps2_sony_pad_host.cpp
++++ b/ps2xRuntime/src/lib/ps2_sony_pad_host.cpp
+@@ -4,6 +4,7 @@
+ // thread only copies the latest report and posts motor values. A pad that disconnects or goes silent is dropped (the
+ // pad backend falls back to GLFW) and looked for again every two seconds. Other platforms: no device half.
+ #include "runtime/ps2_sony_pad.h"
++#include "runtime/ps2_thread_placement.h"
+ 
+ #if defined(_WIN32)
+ 
+@@ -635,6 +636,7 @@ namespace ps2x::sonypad::host
+             void run()
+             {
+                 nameThread();
++                ps2_thread_placement::place(ps2_thread_placement::Role::Helper);
+                 size_t lastPadCount = static_cast<size_t>(-1);
+                 while (!stopping())
+                 {
+diff --git a/ps2xRuntime/src/lib/ps2_thread_placement.cpp b/ps2xRuntime/src/lib/ps2_thread_placement.cpp
+new file mode 100644
+index 0000000..d18f52e
+--- /dev/null
++++ b/ps2xRuntime/src/lib/ps2_thread_placement.cpp
+@@ -0,0 +1,230 @@
++// Placement of the busy threads on processors: ps2_thread_placement.h.
++//
++// Adapted from ThreadPlacement.cpp of galaxyawesome/tfps2-recomp (GPL-3.0), where the four threads were geometry,
++// GS front end, GS and EE; here they are the EE, VIF1, the native renderer's read and render threads and the GS feed,
++// with the helper threads kept off the two most critical cores.
++#include "runtime/ps2_thread_placement.h"
++#include "runtime/ps2_settings.h"
++
++#include <algorithm>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++#include <vector>
++
++#if defined(_WIN32)
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++#endif
++
++namespace ps2_thread_placement
++{
++    namespace
++    {
++        constexpr int kRoles = static_cast<int>(Role::Count);
++        [[maybe_unused]] const char *const kNames[kRoles] = {"EE", "VIF1", "GS feed", "native read", "native render", "helper"};
++
++        // An affinity mask (processor group 0) for each role; 0: left to the scheduler.
++        struct Plan
++        {
++            uint64_t masks[kRoles] = {};
++        };
++
++        bool autoChosen()
++        {
++            const char *value = std::getenv("PS2X_THREAD_PLACEMENT");
++            return value && std::strcmp(value, "auto") == 0;
++        }
++
++        struct Core
++        {
++            uint64_t mask = 0;  // its logical processors (SMT threads)
++            int efficiency = 0; // EfficiencyClass: higher is faster
++        };
++
++        // The plan for a topology (processor group 0): its cores in processor order and its L3 caches' masks.
++        // cpus: PS2X_THREAD_CPUS. (Apart from the system calls, so that it can be tried on made-up processors.)
++        [[maybe_unused]] Plan planFor(const std::vector<Core> &cores, const std::vector<uint64_t> &l3s, const char *cpus)
++        {
++            Plan plan;
++            // The fast cores only (all of them where they are all alike), in processor order.
++            int fastest = 0;
++            uint64_t all = 0;
++            for (const Core &core : cores)
++            {
++                fastest = std::max(fastest, core.efficiency);
++                all |= core.mask;
++            }
++            std::vector<uint64_t> fast;
++            for (const Core &core : cores)
++                if (core.efficiency == fastest)
++                    fast.push_back(core.mask);
++            if (fast.size() < 6u)
++            {
++                std::fprintf(stderr, "[threads] placement: %zu fast cores (6 needed) - left to the system\n", fast.size());
++                return plan;
++            }
++            // The fast cores of each L3 group; core 0's group first.
++            std::vector<std::vector<uint64_t>> groups;
++            for (uint64_t l3 : l3s)
++            {
++                std::vector<uint64_t> members;
++                for (uint64_t core : fast)
++                    if ((core & l3) == core)
++                        members.push_back(core);
++                if (!members.empty())
++                    groups.push_back(members);
++            }
++            for (size_t i = 0; i < groups.size(); ++i)
++                if (groups[i][0] & 1u)
++                    std::swap(groups[i], groups[0]);
++            const std::vector<uint64_t> *other = nullptr;
++            for (size_t i = 1; i < groups.size() && !other; ++i)
++                if (groups[i].size() >= 3u)
++                    other = &groups[i];
++            uint64_t *m = plan.masks;
++            if (other && (groups[0][0] & 1u) && groups[0].size() >= 3u)
++            {
++                m[static_cast<int>(Role::Ee)] = (*other)[0];
++                m[static_cast<int>(Role::Vif1)] = (*other)[1];
++                m[static_cast<int>(Role::RenderRead)] = (*other)[2];
++                m[static_cast<int>(Role::Render)] = groups[0][1];
++                m[static_cast<int>(Role::GsFeed)] = groups[0][2];
++            }
++            else
++            {
++                m[static_cast<int>(Role::Ee)] = fast[1];
++                m[static_cast<int>(Role::Vif1)] = fast[2];
++                m[static_cast<int>(Role::RenderRead)] = fast[3];
++                m[static_cast<int>(Role::Render)] = fast[4];
++                m[static_cast<int>(Role::GsFeed)] = fast[5];
++            }
++            // PS2X_THREAD_CPUS: a logical processor for each, in that order (its core with it).
++            if (cpus && *cpus)
++            {
++                const Role order[] = {Role::Ee, Role::Vif1, Role::RenderRead, Role::Render, Role::GsFeed};
++                const char *value = cpus;
++                for (Role role : order)
++                {
++                    if (!*value)
++                        break;
++                    char *end = nullptr;
++                    const long processor = std::strtol(value, &end, 10);
++                    if (end == value)
++                        break;
++                    if (processor >= 0 && processor < 64)
++                    {
++                        uint64_t mask = 1ull << processor;
++                        for (const Core &core : cores)
++                            if (core.mask & mask)
++                                mask = core.mask;
++                        if (mask & all)
++                            m[static_cast<int>(role)] = mask;
++                    }
++                    value = (*end == ',') ? end + 1 : end;
++                }
++            }
++            // The helpers: anywhere but the EE's and the render thread's cores.
++            m[static_cast<int>(Role::Helper)] = all & ~(m[static_cast<int>(Role::Ee)] | m[static_cast<int>(Role::Render)]);
++            std::fprintf(stderr, "[threads] placement (auto, %zu fast cores, %zu L3 groups):", fast.size(), groups.size());
++            for (int r = 0; r < kRoles; ++r)
++                std::fprintf(stderr, " %s 0x%llx%s", kNames[r], static_cast<unsigned long long>(m[r]), r + 1 < kRoles ? "," : "\n");
++            return plan;
++        }
++
++#if defined(_WIN32)
++        Plan fromTopology()
++        {
++            // (A thread in another processor group cannot take a group 0 mask: machines with more than 64 logical
++            // processors are left alone.)
++            if (GetActiveProcessorGroupCount() != 1)
++            {
++                std::fprintf(stderr, "[threads] placement: more than one processor group - left to Windows\n");
++                return Plan{};
++            }
++            DWORD length = 0;
++            GetLogicalProcessorInformationEx(RelationAll, nullptr, &length);
++            if (length == 0)
++                return Plan{};
++            std::vector<uint8_t> buffer(length);
++            auto *info = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(buffer.data());
++            if (!GetLogicalProcessorInformationEx(RelationAll, info, &length))
++                return Plan{};
++            std::vector<Core> cores;
++            std::vector<uint64_t> l3s;
++            for (DWORD offset = 0; offset < length;)
++            {
++                const auto *item = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(buffer.data() + offset);
++                if (item->Relationship == RelationProcessorCore && item->Processor.GroupCount == 1 && item->Processor.GroupMask[0].Group == 0)
++                {
++                    // (EfficiencyClass: the byte after Flags - older SDK headers call it Reserved[0], and it reads 0 on
++                    // Windows before 10, where every core is then alike.)
++                    const int efficiency = reinterpret_cast<const BYTE *>(&item->Processor.Flags)[1];
++                    cores.push_back(Core{static_cast<uint64_t>(item->Processor.GroupMask[0].Mask), efficiency});
++                }
++                else if (item->Relationship == RelationCache && item->Cache.Level == 3 && item->Cache.GroupMask.Group == 0)
++                    l3s.push_back(static_cast<uint64_t>(item->Cache.GroupMask.Mask));
++                offset += item->Size;
++            }
++            return planFor(cores, l3s, std::getenv("PS2X_THREAD_CPUS"));
++        }
++#endif
++
++        [[maybe_unused]] const Plan &plan()
++        {
++            static const Plan chosen = []
++            {
++                Plan result;
++                if (!autoChosen())
++                    return result; // (off: no system calls at all)
++#if defined(_WIN32)
++                result = fromTopology();
++#endif
++                return result;
++            }();
++            return chosen;
++        }
++    }
++
++    void place(Role role)
++    {
++        const int r = static_cast<int>(role);
++        if (r < 0 || r >= kRoles)
++            return;
++#if defined(_WIN32)
++        const uint64_t mask = plan().masks[r];
++        if (mask == 0u)
++            return;
++        const DWORD_PTR previous = SetThreadAffinityMask(GetCurrentThread(), static_cast<DWORD_PTR>(mask));
++        if (role != Role::Helper || previous == 0)
++            std::fprintf(stderr, "[threads] %s thread -> processors 0x%llx%s\n", kNames[r], static_cast<unsigned long long>(mask),
++                         previous ? "" : " (failed)");
++#endif
++    }
++
++    void addSetting()
++    {
++        ps2_settings::Setting s;
++        s.key = "PS2X_THREAD_PLACEMENT";
++        s.section = "Graphics";
++        s.label = "CPU thread placement";
++        s.order = 900;
++        s.help = "Auto: the game's busiest threads each get a processor core of their own, the ones that pass data to "
++                 "each other on cores that share a cache. Can steady the frame rate on processors with 6 or more cores, "
++                 "Ryzen especially. Off: Windows decides, as before. Takes a restart.";
++        s.choices = {{"off", "Off"}, {"auto", "Auto"}};
++        s.defaultValue = "off";
++#if !defined(_WIN32)
++        s.available = []() { return false; };
++        s.unavailableHelp = "Windows only for now.";
++#endif
++        ps2_settings::add(s);
++    }
++}
+diff --git a/ps2xRuntime/src/lib/ps2_vif1_thread.cpp b/ps2xRuntime/src/lib/ps2_vif1_thread.cpp
+index 17734d1..2dc842b 100644
+--- a/ps2xRuntime/src/lib/ps2_vif1_thread.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_thread.cpp
+@@ -1,5 +1,6 @@
+ #include "ThreadNaming.h"
+ #include "runtime/ps2_vif1_thread.h"
++#include "runtime/ps2_thread_placement.h"
+ #include "runtime/ps2_memory.h"
+ 
+ #include <algorithm>
+@@ -694,14 +695,14 @@ namespace
+                                return;
+                            g_worker = new Worker();
+                            g_worker->thread = std::thread([]()
+-                                                          { ThreadNaming::SetCurrentThreadName("Vif1"); run(*g_worker); });
++                                                          { ThreadNaming::SetCurrentThreadName("Vif1"); ps2_thread_placement::place(ps2_thread_placement::Role::Vif1); run(*g_worker); });
+                            const char *feed = std::getenv("PS2X_GS_FEED");
+                            if (!(feed && feed[0] == '0'))
+                            {
+                                g_gsFeed = new GsFeed();
+                                g_gsBatch.bytes.reserve(kGsBatchBytes + 4096u);
+                                g_gsFeed->thread = std::thread([]()
+-                                                              { ThreadNaming::SetCurrentThreadName("GsFeed"); runGs(*g_gsFeed); });
++                                                              { ThreadNaming::SetCurrentThreadName("GsFeed"); ps2_thread_placement::place(ps2_thread_placement::Role::GsFeed); runGs(*g_gsFeed); });
+                            }
+                        });
+         return g_stopped.load(std::memory_order_relaxed) ? nullptr : g_worker;

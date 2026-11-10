@@ -8,6 +8,7 @@ namespace nr
 {
     std::filesystem::path hdTextureFolder() { return std::filesystem::current_path() / "hd_textures" / "upscaled"; }
     bool crispFontsFound() { return std::filesystem::is_regular_file(hdTextureFolder().parent_path() / "crisp_fonts" / "manifest.json"); }
+    std::string hdSetAside() { return {}; } // (no set here has upscaled/.made_on.json saying it was set aside)
 }
 
 namespace

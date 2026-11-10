@@ -1694,6 +1694,15 @@ walk from the dropship the two steps gave 76.8 to 78.6 and 78.2 to 88.5 fps.
 
 ### Modern host stick response (0084)
 
+Dead zones and menus (0163, TODO 274): `Config::leftDeadzone` / `rightDeadzone` (settings
+`PS2X_STICK_LEFT_DEADZONE` / `PS2X_STICK_RIGHT_DEADZONE`, default 0.05 = the response's own) replace the
+fixed 5% of `radial` and `vehicleAxis`; the travel runs from the dead zone's edge to 95% of the stick.
+`map(..., play)`: the lift is not applied while a game menu's list is shown (`setMenuShown`, called each
+frame by `menu_mouse.cpp`: the front end, the HQ, a pause, the pickup menus; after ravioli-gh's Linux
+port). There the sticks go on as the pad gives them (`cut`: zero inside a dead zone
+set above the default). Before, the left lift (0.625 x 1.33) turned a stick resting 6% off centre into a
+stick held 83% over, and the menus scrolled on their own.
+
 `runtime/ps2_stick_response.h` is the pure mapping used by `PSPadBackend::readState` and the
 standalone host test. `PS2X_STICK_VEHICLE_MODE=original` (default) preserves the incoming
 GLFW axes and reapplies Sony's legacy 0.08 per-axis drift filter at the car endpoint, on

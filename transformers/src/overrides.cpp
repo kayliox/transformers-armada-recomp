@@ -338,6 +338,11 @@ namespace
         bool lastLetThrough = false;
     };
     std::vector<SceneStreamPace> g_sceneStreamPace;
+    // (TODO 282) A state loaded in the HQ: its preview movie's player is in the state's memory, but this list is the
+    // port's own and starts empty - the player then ran unpaced, every frame waited for the movie's next picture and
+    // the Drop Zones screen fell to half and a quarter of the screen's refresh (15 a second at 60 Hz). Set by the
+    // load; the first player updated in the HQ with no movie of the window's own playing is taken as the preview's.
+    bool g_adoptSceneStream = false;
     uint32_t g_fmvFrames = 0;
     bool g_skipFmv = false;
     bool g_skipIntroMovie = false; // (the movie playing is a start movie the "Intro screens" switch skips: game_config)
@@ -617,6 +622,7 @@ namespace
         if (getRegU32(ctx, 2) != 0u && hd_movies::movieKey(movie).rfind("LEVELS/", 0) == 0)
         {
             g_inSceneStreams.push_back(getRegU32(ctx, 2));
+            g_adoptSceneStream = false; // (a preview begun in this session: nothing left over from a loaded state)
             // (TODO 159) Its upscaled copy, if there is one (movies_hd/LEVELS/<name>.mkv, tools/upscale_previews.py), drawn
             // by the native renderer in place of its pictures. TF_HD_PREVIEWS=0: the game's pictures.
             static const bool hdPreviews = !(std::getenv("TF_HD_PREVIEWS") && *std::getenv("TF_HD_PREVIEWS") == '0');
@@ -701,6 +707,12 @@ namespace
         // 266: this was told by the VBlank rate, not 60 a second, and an HQ at 60 - a 60 Hz screen caps it there - has 60
         // VBlanks a second too: its player then went unpaced, every frame waited for the next picture, the HQ fell to 30
         // and, at 30 VBlanks a second, to 15 frames.)
+        if (g_adoptSceneStream && ctx->pc == kFmvStreamUpdate && self != 0u && g_executorVtable == 0x006B7360u && g_liveFmvStreams == 0 &&
+            std::find(g_inSceneStreams.begin(), g_inSceneStreams.end(), self) == g_inSceneStreams.end())
+        {
+            g_inSceneStreams.push_back(self);
+            std::fprintf(stderr, "[tf] the HQ's preview movie of the loaded state: its player %08x paced again\n", self);
+        }
         if (ctx->pc == kFmvStreamUpdate && g_levelRate != 0 &&
             std::find(g_inSceneStreams.begin(), g_inSceneStreams.end(), self) != g_inSceneStreams.end())
         {
@@ -3221,6 +3233,12 @@ namespace
     std::chrono::steady_clock::time_point g_ceilingUntil{};
     int g_ceilingFails = 0;             // (follow: misses in a row - the wall's 10 s doubles with each, to 120 s; forgotten 30 s on)
     std::chrono::steady_clock::time_point g_lastFallAt{};
+    // (TODO 272) The last step down: when, from which rate (its place among the rates), and whether it was held against it.
+    std::chrono::steady_clock::time_point g_lastDownAt{};
+    size_t g_lastDownIndex = 0;
+    int g_lastDownFrom = 0;
+    bool g_lastDownCounted = false;
+    std::chrono::steady_clock::time_point g_rateExplainUntil{}; // (after the window came back: why a lower rate is held, said)
     double g_switchMsMax = 0.0, g_switchMsSum = 0.0; // (the changes' own cost, said with the rates' times)
     int g_switches = 0;
 
@@ -3624,11 +3642,27 @@ namespace
         // (TODO 117: nor while the player has left the window - minimised, or another window has the focus - and for
         // 2 s after they come back: those frames are timed by what the system gives a window in the background, not by
         // what this PC manages, and a rate stepped down or barred for them stayed down once the player was back.)
+        // (TODO 272: a player's rate stayed where it was after alt-tabbing back - 30, or the 107 it had when he left - "until
+        // I tab out and back again". Leaving the window and coming back are hitches of their own: the task switcher over
+        // the game, the screen changing how it shows the window. A step down in the 3 s before the window was left was
+        // made by leaving, yet it was held against the rate like any miss: nothing up for 15 s, doubling to 2 minutes
+        // with each fall. And the first seconds back were judged like any others. Now a change of window is taken like
+        // a load: a fall in the 3 s before leaving is forgiven on the way back (its bar and its hold-offs gone), and for
+        // 12 s after coming back a fall is not held against the rate and the way up is judged on 2 s, not 6. For 30 s
+        // after coming back the log says every 10 s why a lower rate is held, so a stuck moment explains itself.
+        // TF_RATE_FOCUS=0: as before.)
+        static const bool focusGrace = !(std::getenv("TF_RATE_FOCUS") && *std::getenv("TF_RATE_FOCUS") == '0');
         static bool awayBefore = false;
+        static std::chrono::steady_clock::time_point leftAt{};
+        static int rateWhenLeft = 0;
         if (tfWindowAway())
         {
             if (!awayBefore)
+            {
+                leftAt = now;
+                rateWhenLeft = g_levelRate;
                 std::fprintf(stderr, "[tf] the window was left: the frame-rate steps wait until it is back\n");
+            }
             awayBefore = true;
             g_rateSamples.clear();
             return;
@@ -3638,7 +3672,49 @@ namespace
             awayBefore = false;
             g_rateHeldUntil = std::max(g_rateHeldUntil, now + std::chrono::seconds(2));
             g_rateSamples.clear();
-            std::fprintf(stderr, "[tf] the window is back: the frame-rate steps judge again in 2 s\n");
+            bool forgiven = false;
+            if (focusGrace)
+            {
+                if (g_lastDownAt != std::chrono::steady_clock::time_point{} && g_lastDownAt + std::chrono::seconds(3) >= leftAt &&
+                    g_lastDownAt <= leftAt + std::chrono::seconds(1))
+                {
+                    forgiven = true;
+                    if (g_lastDownCounted && g_lastDownIndex < g_failCount.size() && g_failCount[g_lastDownIndex] > 0)
+                        --g_failCount[g_lastDownIndex];
+                    if (g_lastDownIndex < g_barredUntil.size())
+                        g_barredUntil[g_lastDownIndex] = now;
+                    if (g_ceilingFails > 0)
+                        --g_ceilingFails;
+                    g_ceilingUntil = now;
+                    if (!g_rateFalls.empty())
+                        g_rateFalls.pop_back();
+                    g_raiseHoldSeconds = 2.0;
+                    g_raiseHeldUntil = now + std::chrono::seconds(2);
+                    g_lastDownAt = {};
+                }
+                g_rateRecoverUntil = std::max(g_rateRecoverUntil, now + std::chrono::seconds(14)); // (the 2 s held, then 12 s)
+                g_rateExplainUntil = now + std::chrono::seconds(32);
+            }
+            std::fprintf(stderr, "[tf] the window is back at %d frames a second (%d when it was left%s): the frame-rate steps judge again in 2 s\n",
+                         g_levelRate, rateWhenLeft, forgiven ? "; the fall while leaving is not held against the rate" : "");
+            // (The fall undone at once: back at the rate the level had before leaving made it fall. If this PC does not
+            // hold it, it falls again as from any miss - that one is its own and counts.)
+            if (forgiven && g_adaptiveRate && g_pictureLock == 0 && g_levelRate != 0 && g_liveFmvStreams == 0 && !ee.turboActive() &&
+                g_lastDownIndex < g_rates.size() && g_rates[g_lastDownIndex] == g_lastDownFrom && g_lastDownFrom > g_levelRate)
+            {
+                const int from = g_levelRate, to = g_lastDownFrom;
+                std::fprintf(stderr, "[tf] back to the %d frames a second the level had before the window was left\n", to);
+                g_rateIndex = g_lastDownIndex;
+                playrec::noteRate(2, to);
+                g_carsPhase = g_carsPhase * to / from;
+                switchFrameRate(rdram, ctx, runtime, to, false, true);
+                if (!g_inHq)
+                    convertLevel(rdram, ctx, runtime, from, to);
+                if (g_fastGameFallback)
+                    setInBetween(rdram, runtime, to * 2 <= g_frameRate);
+                g_rateRaisedAt = now;
+                return;
+            }
         }
         // (N9: the native ladder on a screen with a clock of its own begins at its refresh, below the setting - a level
         // begun at the setting's rate goes to it at once)
@@ -3904,7 +3980,7 @@ namespace
                             }
                         }
                     }
-                    else if (g_rateLog)
+                    else if (g_rateLog || now < g_rateExplainUntil)
                     {
                         static auto lastSaid = std::chrono::steady_clock::time_point{};
                         if (now - lastSaid >= std::chrono::seconds(10))
@@ -3962,6 +4038,8 @@ namespace
         {
             g_failedPeriodMs[g_rateIndex] = percentile(recent, 0.5);
             g_failedAt[g_rateIndex] = now;
+            g_lastDownAt = now, g_lastDownIndex = g_rateIndex, g_lastDownFrom = g_levelRate; // (TODO 272)
+            g_lastDownCounted = now - g_adaptingSince >= std::chrono::seconds(5) && now >= g_rateRecoverUntil;
             // (Not after the level's first seconds - loading, the textures coming in: those are not held against it.)
             // (TODO 168: nor in the first seconds after a load's settle: g_rateRecoverUntil)
             if (now - g_adaptingSince >= std::chrono::seconds(5) && now >= g_rateRecoverUntil)
@@ -4084,10 +4162,25 @@ namespace
     // the views two passes. Without it such a state ran at half speed at 30 (its frame period a
     // 60th of a second, two fields a frame). Its cars keep the period of their last reset until
     // the next one (at the PC rate it is the console's already: rates.cpp).
+    // (TODO 282) Whether memory holds a running HQ: its executor (the taUIPreGame, by its vtable) and no level.
+    bool hqInMemory(const uint8_t *rdram)
+    {
+        constexpr uint32_t kPreGameObject = 0x006CF688u; // (the pointer to the taUIPreGame: hq_rate.cpp)
+        uint32_t game = 0u, preGame = 0u, vtable = 0u;
+        std::memcpy(&game, rdram + kGame, sizeof(game));
+        std::memcpy(&preGame, rdram + kPreGameObject, sizeof(preGame));
+        if (game != 0u || preGame == 0u)
+            return false;
+        if (const uint8_t *p = getConstMemPtr(rdram, preGame))
+            std::memcpy(&vtable, p, sizeof(vtable));
+        return vtable == kPreGameVtable;
+    }
+
     void adoptLoadedState(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         nr::resetFrameTexturePolicy(); // also clears interframe microcode receipts/prefix and advances their epoch
         g_statesSeen = runtime->eeScheduler().loadedStateCount();
+        tuning::thawLoadedState(rdram); // (TODO 269: before the level's rate is read from its period below)
         // (TODO 150) The port's carry-overs from frame to frame, which the state does not hold, as in a game just started
         // with it: the cars' 30ths and held time and the bodies moved on for the frames between their steps (a body the
         // state holds moved on was put back by the session that made it, and not by one started with it), the contacts'
@@ -4159,6 +4252,25 @@ namespace
                 decomp::GuestScope scope(rdram, ctx, runtime);
                 g_unpinnedCarPeriod = tf::timing::LevelFramePeriod(madeAt).v;
             }
+            // (TODO 282) A state loaded in the HQ: the HQ at its rate again, as an HQ just begun has it. The HQ has no
+            // level in memory to read a rate from, so it was left at the console's 30 "until the next HQ" - and every
+            // start that resumes from a state (an update, a setting's "Restart to apply") put a player who was in the
+            // HQ at 30 frames a second, 15 on its Drop Zones screen, on a 60 Hz screen and on any other. The executor
+            // is known again too (the level-load mute, the HQ's per-frame steps and its field of view go by it).
+            g_inSceneStreams.clear(); // (the players of the memory before the load)
+            g_sceneStreamPace.clear();
+            g_adoptSceneStream = false;
+            if (g_hqRate != 0 && hqInMemory(rdram))
+            {
+                const int hqRate = g_hqRate < 0 ? g_frameRate : g_hqRate;
+                g_adoptSceneStream = true;
+                g_executorVtable = kPreGameVtable;
+                std::fprintf(stderr, "[tf] the HQ at %d frames a second (a state loaded in it)\n", hqRate);
+                switchFrameRate(rdram, ctx, runtime, hqRate);
+                g_inHq = true;
+                if (hqRate > 30)
+                    startAdapting();
+            }
         }
         setFrameWords(rdram, ctx, runtime);
     }
@@ -4217,7 +4329,9 @@ namespace
         if (lock >= 0)
             g_pictureLock = lock;
         g_lockShown.store(g_pictureLock);
-        if (g_frameRate <= 30)
+        // (TODO 282: by the hooks, not by the rate now - a limit set to 30 on the way through the list left the rate
+        // at 30 for the rest of the session, whatever was chosen after it: no "settings:" line, the next HQ at 30)
+        if (!g_levelHooks)
             return;
         // (TODO 161 a: the cap caps pictures; TODO 217: with the cap deciding the rates, a picture lock no longer means 60)
         g_frameRate = g_pictureLock != 0 && !followRates() ? 60 : g_logicRate.load() > 0 ? g_logicRate.load() : g_rateSetting;
@@ -7948,8 +8062,37 @@ namespace
             static uint64_t windowPictures = 0;
             static uint64_t windowLeftOut = 0;
             static auto windowIdle = runtime->eeScheduler().idleHostTime();
+            // The 1% low (issue 12's thread placement bench): the frames of the last 30 s (the state load left out, as
+            // bench.ps1 does), the average of the slowest 1% as a rate. A ring buffer, so a long session costs no more
+            // than a short one and the report does not hitch the frames it measures.
+            struct FrameTime
+            {
+                clock::time_point at;
+                float ms;
+            };
+            constexpr size_t kRingFrames = 16384u; // (30 s at up to ~540 frames a second; faster, the window is shorter)
+            constexpr auto kLowWindow = std::chrono::seconds(30);
+            static std::vector<FrameTime> ring(kRingFrames);
+            static std::vector<float> slowest = []
+            {
+                std::vector<float> v;
+                v.reserve(kRingFrames);
+                return v;
+            }();
+            static size_t ringNext = 0;
+            static size_t ringCount = 0;
+            static clock::time_point lastFrame{};
+            static bool reportedOnce = false;
+            const auto frameNow = clock::now();
+            if (reportedOnce && lastFrame != clock::time_point{})
+            {
+                ring[ringNext] = FrameTime{frameNow, std::chrono::duration<float, std::milli>(frameNow - lastFrame).count()};
+                ringNext = (ringNext + 1u) % kRingFrames;
+                ringCount = std::min(ringCount + 1u, kRingFrames);
+            }
+            lastFrame = frameNow;
             ++frames;
-            const double elapsed = std::chrono::duration<double>(clock::now() - windowStart).count();
+            const double elapsed = std::chrono::duration<double>(frameNow - windowStart).count();
             if (elapsed >= 2.0)
             {
                 const uint64_t tick = runtime->eeScheduler().currentVSyncTick();
@@ -7963,8 +8106,27 @@ namespace
                           << " host idle ms a frame "
                           << std::chrono::duration<double, std::milli>(runtime->eeScheduler().idleHostTime() - windowIdle).count() /
                                  std::max(frames, 1u)
-                          << " in-between left out " << ps2_host_display::secondFieldsLeftOut() - windowLeftOut
-                          << std::endl;
+                          << " in-between left out " << ps2_host_display::secondFieldsLeftOut() - windowLeftOut;
+                // (newest first, up to the first frame older than the window)
+                slowest.clear();
+                for (size_t i = 0; i < ringCount; ++i)
+                {
+                    const FrameTime &f = ring[(ringNext + kRingFrames - 1u - i) % kRingFrames];
+                    if (frameNow - f.at > kLowWindow)
+                        break;
+                    slowest.push_back(f.ms);
+                }
+                if (slowest.size() >= 100u)
+                {
+                    const size_t count = slowest.size() / 100u;
+                    std::nth_element(slowest.begin(), slowest.begin() + static_cast<std::ptrdiff_t>(count - 1u), slowest.end(), std::greater<float>());
+                    double sum = 0.0;
+                    for (size_t i = 0; i < count; ++i)
+                        sum += slowest[i];
+                    std::cerr << " 1% low " << (sum > 0.0 ? 1000.0 * static_cast<double>(count) / sum : 0.0);
+                }
+                std::cerr << std::endl;
+                reportedOnce = true;
                 frames = 0;
                 windowTick = tick;
                 windowPictures = pictures;

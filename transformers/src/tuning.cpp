@@ -22,6 +22,8 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 
 namespace tuning
@@ -38,6 +40,8 @@ namespace tuning
         float g_base = 0.0f;    // the level's own period
         float g_written = 0.0f; // the period last written (0: none)
         uint32_t g_game = 0u;
+        constexpr float kFrozen = 1.0e-4f; // the speed that stands for "stopped" (photo mode's 0)
+        std::atomic<bool> g_frozenState{false};
 
         float loadFloat(const uint8_t *rdram, uint32_t a)
         {
@@ -58,6 +62,39 @@ namespace tuning
     float gravity() { return g_gravity.load(); }
     void setSpeed(float s) { g_speed.store(std::clamp(s, 0.0f, 4.0f)); }
     void setGravity(float g) { g_gravity.store(std::clamp(g, 0.1f, 4.0f)); }
+    bool takeFrozenState() { return g_frozenState.exchange(false); }
+
+    // TODO 269: a state saved while the game was stopped (F6 in photo mode, or the restart that applies a
+    // setting) holds the stopped period: the level's own times kFrozen. The level's own rates give periods
+    // of 1/480 to 1/25 s and the Game speed setting goes down to a tenth at most, so a period of 1e-5 or
+    // less can only be that. Left as it is, the port reads the state as made at no PC rate (the level then
+    // runs at the console's 30) and takes the stopped period as the level's own: stopped for good. Here,
+    // right after the load and before anything reads it, the period, the clock's step and the gravity step
+    // are put back as the level had them. TF_TUNING_FROZENFIX=0: not done (tests).
+    bool thawLoadedState(uint8_t *rdram)
+    {
+        static const bool repair = !(std::getenv("TF_TUNING_FROZENFIX") && *std::getenv("TF_TUNING_FROZENFIX") == '0');
+        uint32_t game = 0u, clock = 0u;
+        std::memcpy(&game, rdram + kGame, sizeof(game));
+        std::memcpy(&clock, rdram + kGameClock, sizeof(clock));
+        if (!repair || !game || !clock)
+            return false;
+        const float period = loadFloat(rdram, game + kGamePeriod);
+        const float own = period / kFrozen;
+        if (!(period > 0.0f && period <= 1.0e-5f && own > 0.0005f && own < 0.1f))
+            return false;
+        storeFloat(rdram, game + kGamePeriod, own);
+        const float time = loadFloat(rdram, clock + 0x04u), step = loadFloat(rdram, clock + 0x08u);
+        const float scale = loadFloat(rdram, clock + 0x0Cu);
+        storeFloat(rdram, clock + 0x08u, own);
+        if (uint8_t *p = getMemPtr(rdram, clock + 0x10u))
+            std::memset(p, 0, 4);
+        storeFloat(rdram, clock + 0x14u, time + step * scale);
+        storeFloat(rdram, kGravityStep, loadFloat(rdram, kGravityPerSecond) * own);
+        g_frozenState.store(true);
+        std::fprintf(stderr, "[tuning] the state was saved with the game stopped (period %.7f): the level's own %.6f put back\n", period, own);
+        return true;
+    }
 
     void frame(uint8_t *rdram, bool inLevel)
     {
@@ -77,6 +114,9 @@ namespace tuning
             g_base = period;
             g_written = 0.0f;
             g_writtenGravity = 1.0f; // (the level set its own gravity step)
+            static float logged = 0.0f;
+            if (g_base != logged)
+                std::fprintf(stderr, "[tuning] level period %.6f\n", logged = g_base);
         }
         if (!(g_base > 0.0005f && g_base < 0.1f))
             return;

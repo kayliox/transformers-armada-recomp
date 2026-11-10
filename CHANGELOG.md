@@ -32,10 +32,8 @@
 - The first level (Amazon Basin) no longer stops with "Generic fatal error" on Linux: a C library function the game
   uses behaved differently there.
 - The game no longer crashes when it closes on Linux with Zink.
-- Linux: a game menu no longer keeps scrolling on its own after the left stick is touched (a stick that rests a
-  little off centre, as a Steam Deck's can, read as held). Gameplay keeps the stick response.
-- Linux: the robot no longer walks on its own in play with a stick that rests a little off centre (a dead zone of
-  12%; F1 > Controller > Stick dead zone changes it).
+- Linux: the robot no longer walks on its own in play with a stick that rests a little off centre (the sticks' dead
+  zones are 12% there, 5% on Windows; F1 > Controls > Left stick dead zone and Right stick dead zone change them).
 - Linux: the frame rate no longer goes past what the screen shows (a Steam Deck's 90 Hz panel ran parts of the game
   at 175 frames a second, the extra pictures never seen): less CPU, GPU and battery used.
 - The F1 menu no longer shows red stripes and broken text with Zink (Mesa's command reordering is turned off
@@ -49,7 +47,42 @@
   a helper thread at every draw (on a Steam Deck at 60 frames a second: 12% less CPU, about 1.2 W less), and the
   finished picture is copied to the window in one piece instead of row by row (half the time).
 - Linux and Steam Deck: "Finishing HD textures" no longer stays on screen after the HD set is finished, including
-  sets made before this fix.
+  sets made before this fix, and "HD textures ready" no longer comes back at every start once the set is finished.
+  `make_hd_textures.sh` checks the set's images once, as the Windows maker does (0.4.7's checks too).
+
+## 0.4.8
+
+**Fixed**
+- 0.4.7 could turn a good set of HD textures off and say "this graphics card makes broken HD images" when the
+  card was fine. The card is now tested properly, and a set that 0.4.7 turned off comes back with this update.
+- After "Restart to apply", or after an update that brings you back where you were, the game could stay at
+  30 frames a second, and the HQ's Drop Zones screen at 15. It now comes back at your frame rate.
+- Choosing 30 in the frame rate limit list, even in passing, no longer keeps the game at 30 after you pick
+  another limit.
+- After alt-tabbing out and back, the frame rate returns at once to what it was before.
+
+## 0.4.7
+
+**New**
+- F1 > Controls has dead zone settings for the left and the right stick. Raise them if a stick that rests a
+  little off centre moves you or the camera on its own.
+- F1 has a Quit game page at the bottom of the list. It closes the game after you confirm.
+- F1 > Graphics has a Thread placement setting (Off by default) that places the game's threads on the processor's
+  cores. On some processors it gives a slightly steadier frame rate. It takes a restart. Thanks to galaxyawesome.
+- The README has a "Where things are" section: where your saves, settings and logs are, and what to send with a
+  bug report.
+
+**Fixed**
+- Deep Amazon, the boss on the temple roof: when he grabs you and spins, you are now held and spun with him.
+  Above 30 frames a second you stayed standing on the ground.
+- A stick that rests slightly off centre no longer keeps the menus scrolling on its own.
+- HD textures made on a graphics card that gives broken images (some GTX 16 series cards) are now set aside, and
+  the game draws its own textures instead of wrong ones (green and purple floors, a riverbed with another
+  picture). Nothing is deleted. After a graphics driver update, F1 > Graphics > Check HD textures tries again.
+- The HD texture check also catches an image that shows another picture, or is wrong in one part.
+- Photo mode: turning HD textures on or off there, or loading a state saved there, no longer leaves the world
+  frozen or the game running slow.
+- The menus no longer drop to half the screen's refresh rate and stay there on some graphics cards.
 
 ## 0.4.6
 

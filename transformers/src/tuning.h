@@ -12,4 +12,9 @@ namespace tuning
     void setGravity(float gravity);
     // Once a game frame (overrides.cpp).
     void frame(uint8_t *rdram, bool inLevel);
+    // Right after a state has loaded, before anything reads its level (overrides.cpp adoptLoadedState): a state saved
+    // while the game was stopped gets the level's own frame period back (TODO 269). True when it was one.
+    bool thawLoadedState(uint8_t *rdram);
+    // True once after such a state was repaired: photo mode's hidden HUD comes back too.
+    bool takeFrozenState();
 }

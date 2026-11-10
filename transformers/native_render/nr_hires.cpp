@@ -17,14 +17,15 @@
 #include "raylib.h"
 
 #include "runtime/ps2_host_input.h"
+#include "runtime/ps2_thread_placement.h"
 
 #include "ext/bc7enc/bc7enc.h"
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <chrono>
 #include <cctype>
-#include <cmath>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -168,21 +169,56 @@ namespace nr
             return {};
         }
 
+        // (TODO 259) The set's marker (upscaled/.made_on.json, written by the maker: upscale_textures.py) says the set
+        // was set aside: made on a graphics card whose HD images come out broken, or by an unknown card on a PC whose
+        // card's do. Returns why ("" when it is not set aside). TF_HIRES_TRUST=1: used all the same.
+        std::string setAsideWhy(const fs::path &upscaled)
+        {
+            if (const char *trust = std::getenv("TF_HIRES_TRUST"); trust && *trust == '1')
+                return {};
+            std::error_code ec;
+            const fs::path marker = upscaled / ".made_on.json";
+            if (upscaled.empty() || !fs::is_regular_file(marker, ec))
+                return {};
+            std::ifstream in(marker, std::ios::binary);
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            const size_t at = text.find("\"set_aside\"");
+            if (at == std::string::npos)
+                return {};
+            const size_t value = text.find_first_not_of(" \t\r\n:", at + 11u);
+            if (value == std::string::npos || text.compare(value, 4u, "true") != 0)
+                return {};
+            std::string why = "made on a graphics card whose HD images come out broken";
+            if (const size_t w = text.find("\"why\""); w != std::string::npos)
+                if (const size_t open = text.find('"', text.find(':', w)); open != std::string::npos)
+                    if (const size_t close = text.find('"', open + 1u); close != std::string::npos && close > open + 1u)
+                        why = text.substr(open + 1u, close - open - 1u);
+            return why;
+        }
+
         void build()
         {
             g.ready = true;
             // (TF_HIRES=0, F1 > Graphics > HD textures Off - TODO 243: the game's own textures; the sharp text still
             // follows its own setting)
             const char *off = std::getenv("TF_HIRES");
-            const bool hdOff = off && *off == '0';
+            bool hdOff = off && *off == '0';
             std::error_code ec;
             g.upscaled = resolveUpscaled();
+            if (const std::string why = hdOff ? std::string() : setAsideWhy(g.upscaled); !why.empty())
+            {
+                std::fprintf(stderr, "[native render] HD textures set aside (%s): the game's own textures. After a graphics driver "
+                                     "update, F1 > Graphics > Check HD textures tries the card again\n", why.c_str());
+                hdOff = true;
+            }
             g.native = g.upscaled.empty() ? fs::path() : g.upscaled.parent_path() / "converted" / "textures";
             chooseCrisp();
             if (hdOff || !fs::is_directory(g.upscaled, ec) || !fs::is_directory(g.native, ec))
             {
-                if (hdOff)
+                if (hdOff && off && *off == '0')
                     std::fprintf(stderr, "[native render] HD textures off (TF_HIRES=0): the game's own textures\n");
+                else if (hdOff)
+                    ; // (set aside: said above)
                 else
                     std::fprintf(stderr, "[native render] no upscaled textures at %s\n", g.upscaled.string().c_str());
                 g.fontsOnly = true;
@@ -302,6 +338,7 @@ namespace nr
             double gameSum[3] = {}, largeSum[3] = {}; // (each channel's sum over the texels compared)
             double light = 0.0, kept = 0.0; // (the game's light, and how much of it the large image has there)
             double chromaOff = 0.0, gameChroma = 0.0; // (TODO 259: red and blue against green - the large image's off the game's)
+            double gl = 0.0, ll = 0.0, gl2 = 0.0, ll2 = 0.0, glll = 0.0; // (TODO 259: the brightness of each, for their correlation)
             size_t counted = 0;
             for (size_t i = 0; i < avg.size() && i < texture.pixels.size(); ++i)
             {
@@ -325,6 +362,9 @@ namespace nr
                     const int gr = ch(g0, 0) - ch(g0, 1), gb = ch(g0, 2) - ch(g0, 1), lr = ch(a, 0) - ch(a, 1), lb = ch(a, 2) - ch(a, 1);
                     chromaOff += std::abs(lr - gr) + std::abs(lb - gb);
                     gameChroma += std::abs(gr) + std::abs(gb);
+                    const double gy = 0.299 * ch(g0, 0) + 0.587 * ch(g0, 1) + 0.114 * ch(g0, 2);
+                    const double ly = 0.299 * ch(a, 0) + 0.587 * ch(a, 1) + 0.114 * ch(a, 2);
+                    gl += gy, ll += ly, gl2 += gy * gy, ll2 += ly * ly, glll += gy * ly;
                 }
                 ++counted;
             }
@@ -371,6 +411,29 @@ namespace nr
             if (shifted)
                 std::fprintf(stderr, "[native render] upscale %s: its colours are shifted off the game's (red and blue against green off by %.1f, "
                                      "at most %.1f) - not used\n", name.c_str(), chromaMean, chromaAllowed);
+            // (TODO 259) Another picture altogether: the same player's Deep Amazon riverbed drew a sci-fi floor with round green
+            // lights - a wrong image under the right name, whose colours can be near enough to pass everything above (of the
+            // images of a river texture's size, 2 to 5 in 100 do). Box-averaged down, a right upscale follows the game's
+            // texture texel by texel: their brightness correlates (median 0.99 over a whole set). Where it does not, the
+            // image is the wrong picture if it has a structure of its own: an upscaler that only smoothed a grainy texture
+            // away (variation a tenth to a fifth of the game's) correlates little too and is right. A flat game texture with
+            // a picture on it likewise. Over two whole good sets (one with hand-redrawn art) it flags only images the rules
+            // above reject already. TF_HIRES_STRUCTCHECK=0: not checked.
+            static const bool structCheck = !(std::getenv("TF_HIRES_STRUCTCHECK") && *std::getenv("TF_HIRES_STRUCTCHECK") == '0');
+            bool otherPicture = false;
+            double corr = 0.0, gameVar = 0.0, largeVar = 0.0;
+            if (structCheck && counted >= 16u)
+            {
+                const double n = static_cast<double>(counted);
+                gameVar = std::sqrt(std::max(0.0, gl2 / n - (gl / n) * (gl / n)));
+                largeVar = std::sqrt(std::max(0.0, ll2 / n - (ll / n) * (ll / n)));
+                if (gameVar > 0.0 && largeVar > 0.0)
+                    corr = (glll / n - (gl / n) * (ll / n)) / (gameVar * largeVar);
+                otherPicture = gameVar >= 5.0 ? corr < 0.3 && largeVar >= 4.0 && largeVar >= 0.25 * gameVar : largeVar > gameVar + 20.0;
+            }
+            if (otherPicture)
+                std::fprintf(stderr, "[native render] upscale %s: another picture than the game's (brightness correlation %.2f, variation %.1f where the game's has %.1f) - not used\n",
+                             name.c_str(), corr, largeVar, gameVar);
             // (And its alpha: a translucent layer whose large image has other alpha than the game's -
             // colour under once-transparent texels let through - draws that colour (Alaska's snow
             // overlay showed purple blotches). Off by more than 24 of 255 on average: not used.
@@ -393,7 +456,7 @@ namespace nr
             if (log)
                 std::fprintf(stderr, "[native render] upscale %s: the large image differs from the game's by %.2f, alpha %.2f%s\n", name.c_str(),
                              mean, meanAlpha, mean > 20.0 ? " - redrawn art, not used" : alphaOff ? " - its alpha is not the game's, not used" : "");
-            return !(mean > 20.0 || alphaOff || swapped || lost || shifted);
+            return !(mean > 20.0 || alphaOff || swapped || lost || shifted || otherPicture);
         }
 
         // (TODO 44) The large image's colour matched to the game's: per channel, the large image scaled so that,
@@ -975,6 +1038,7 @@ namespace nr
                     if (!backgroundAll || !SetThreadPriority(GetCurrentThread(), 0x00010000))
                         SetThreadPriority(GetCurrentThread(), loaderPriority());
 #endif
+                    ps2_thread_placement::place(ps2_thread_placement::Role::Helper); // (PS2X_THREAD_PLACEMENT)
                     work();
                 }).detach();
             std::fprintf(stderr, "[native render] upscaled images: %u loader threads (%u decoding at once, %s)\n", n, g_heavyMax,
@@ -1033,6 +1097,8 @@ namespace nr
 
     // (F1, "Sharp text") Whether the sharp font atlases exist where the game looks for them (TF_CRISP_DIR, else
     // crisp_fonts beside the HD set; the developer's tree last, as chooseCrisp). False: the old letters are drawn.
+    std::string hdSetAside() { return setAsideWhy(resolveUpscaled()); }
+
     bool crispFontsFound()
     {
         std::error_code ec;

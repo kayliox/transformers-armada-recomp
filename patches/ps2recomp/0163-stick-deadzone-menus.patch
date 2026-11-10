@@ -1,0 +1,170 @@
+Subject: [PATCH] Runtime: stick dead zone settings; no response lift in a game menu (TODO 274)
+
+A stick resting a little off centre scrolled the menus for ever: the modern response lifted anything
+past its fixed 5% dead zone to a strong push (0.625 x 1.33), in the menus as in play. Now each stick has
+a dead zone setting (PS2X_STICK_LEFT_DEADZONE / PS2X_STICK_RIGHT_DEADZONE, default 0.05 as before), and
+the lift is not applied while a game menu's list is shown (setMenuShown, called by the port each frame;
+the idea and the call are ravioli-gh's, from his Linux port). A menu gets the stick as the pad gives it.
+
+diff --git a/ps2xRuntime/include/runtime/ps2_stick_response.h b/ps2xRuntime/include/runtime/ps2_stick_response.h
+--- a/ps2xRuntime/include/runtime/ps2_stick_response.h
++++ b/ps2xRuntime/include/runtime/ps2_stick_response.h
+@@ -6,13 +6,24 @@
+ 
+ namespace ps2_stick_response
+ {
++    constexpr float kDeadzone = 0.05f; // the response's own dead zone, and the settings' default
+     struct Config
+     {
+         bool enabled = true;
+         bool vehicleOriginal = true;
+         float leftLift = 0.625f, rightLift = 0.20f, sensitivity = 1.33f;
+         float vehicleLift = -1.0f, vehicleResponse = 1.15f; // -1: first accepted guest byte
++        // (TODO 274) How far a stick must be pushed before anything comes of it, per stick (0.05: as always).
++        float leftDeadzone = kDeadzone, rightDeadzone = kDeadzone;
+     };
++    // (TODO 274) A stick's dead zone alone: nothing inside it, the stick as it is outside. For the places that pass
++    // the pad's own axes on (the menus, the response switched off, the port's original car axes). At the default
++    // those keep the bytes they always had: only a dead zone set above it cuts there.
++    inline void cut(float &x, float &y, float deadzone)
++    {
++        if (deadzone > kDeadzone + 0.001f && !(std::hypot(x, y) > deadzone))
++            x = y = 0.0f;
++    }
+     inline uint8_t axisByte(float value)
+     {
+         const float clamped = std::min(1.0f, std::max(-1.0f, value));
+@@ -25,15 +36,16 @@
+         const float v = (static_cast<float>(value) - 128.0f) / 127.0f;
+         return !enabled && std::fabs(v) < 0.08f ? 0.0f : std::clamp(v, -1.0f, 1.0f);
+     }
+-    inline void radial(float &x, float &y, float lift, float gain, float response = 1.0f)
++    inline void radial(float &x, float &y, float lift, float gain, float response = 1.0f, float deadzone = kDeadzone)
+     {
+         const float radius = std::hypot(x, y);
+-        if (!std::isfinite(radius) || radius <= 0.05f)
++        if (!std::isfinite(radius) || radius <= deadzone)
+         {
+             x = y = 0.0f;
+             return;
+         }
+-        const float travel = std::pow(std::min(1.0f, (radius - 0.05f) / 0.90f), response);
++        // (the stick's travel from the dead zone's edge to 95% of the way out; at the default dead zone 0.90 of it)
++        const float travel = std::pow(std::min(1.0f, (radius - deadzone) / std::max(0.05f, 0.95f - deadzone)), response);
+         const float scale = (lift + (1.0f - lift) * travel) * gain / radius;
+         x = std::clamp(x * scale, -1.0f, 1.0f);
+         y = std::clamp(y * scale, -1.0f, 1.0f);
+@@ -46,9 +58,10 @@
+     inline float vehicleAxis(float value, const Config &c, float deadzone)
+     {
+         const float a = std::fabs(value);
+-        if (!std::isfinite(a) || a <= 0.05f)
++        const float dz = c.leftDeadzone;
++        if (!std::isfinite(a) || a <= dz)
+             return 0.0f;
+-        const float travel = std::pow(std::min(1.0f, (a - 0.05f) / 0.90f), c.vehicleResponse);
++        const float travel = std::pow(std::min(1.0f, (a - dz) / std::max(0.05f, 0.95f - dz)), c.vehicleResponse);
+         const float anti = c.vehicleLift < 0.0f ? deadzone : c.vehicleLift;
+         float result = anti + (1.0f - anti) * travel;
+         if (c.vehicleLift < 0.0f)
+@@ -67,30 +80,50 @@
+         if (mode == 3) return std::max(0.0f, previous - seconds / 0.2f);
+         return 0.0f;
+     }
+-    inline void map(float &lx, float &ly, float &rx, float &ry, const Config &c, float weight, float deadzone, bool sony = false)
++    // play: the player moves a robot or a car with the sticks (false: a menu, the HQ, a pause). The response's lift
++    // is for play only (TODO 274): it starts the robot walking just outside the dead zone, and in a menu the same lift
++    // turned a stick resting a little off centre into a stick held over - the selection scrolled for ever. A menu gets
++    // the stick as the pad gives it, as the game's menus always read it (they answer from about a fifth of the way out).
++    inline void map(float &lx, float &ly, float &rx, float &ry, const Config &c, float weight, float deadzone, bool sony = false,
++                    bool play = true)
+     {
+-        if (!c.enabled) return;
++        if (!c.enabled || !play)
++        {
++            cut(lx, ly, c.leftDeadzone);
++            cut(rx, ry, c.rightDeadzone);
++            return;
++        }
+         // Sony has already been decoded to a clamped axis. Reapply its old drift filter
+         // only at the original-car endpoint; the robot still receives the unfiltered axis.
+         const auto original = [sony](float v) { return sony && std::fabs(v) < 0.08f ? 0.0f : v; };
+         const float vx = c.vehicleOriginal ? original(lx) : vehicleAxis(lx, c, deadzone);
+         const float vy = c.vehicleOriginal ? original(ly) : vehicleAxis(ly, c, deadzone);
+-        const float vrx = original(rx), vry = original(ry);
++        float vrx = original(rx), vry = original(ry);
++        float ox = vx, oy = vy;
++        if (c.vehicleOriginal)
++        {
++            cut(ox, oy, c.leftDeadzone);
++            cut(vrx, vry, c.rightDeadzone);
++        }
+         // The port keeps its 0.85 run threshold. Ease travel to retain the reference walking band.
+-        radial(lx, ly, c.leftLift, c.sensitivity, 1.3f);
+-        radial(rx, ry, c.rightLift, 1.0f);
++        radial(lx, ly, c.leftLift, c.sensitivity, 1.3f, c.leftDeadzone);
++        radial(rx, ry, c.rightLift, 1.0f, 1.0f, c.rightDeadzone);
+         if (weight >= 1.0f)
+         {
+-            lx = vx; ly = vy;
++            lx = ox; ly = oy;
+             if (c.vehicleOriginal) { rx = vrx; ry = vry; }
+         }
+         else if (weight > 0.0f)
+         {
+-            lx += weight * (vx - lx); ly += weight * (vy - ly);
++            lx += weight * (ox - lx); ly += weight * (oy - ly);
+             if (c.vehicleOriginal) { rx += weight * (vrx - rx); ry += weight * (vry - ry); }
+         }
+     }
+     // Called only on the EE thread after validating the player's transformer state.
+     // mode: 0 robot/unavailable, 1 car, 2 transforming to car, 3 transforming to robot.
+     void sampleVehicle(int mode, float deadzone);
++    // A game menu's list is on screen (the port's menu_mouse.cpp says so each frame: the front end, the HQ, a pause,
++    // the Mini-Con and Data-Con pickup menus): no lift while it is (map's play = false). The idea and the call are
++    // ravioli-gh's, from his Linux port.
++    void setMenuShown(bool shown);
+ }
+diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -44,6 +44,7 @@
+ {
+     std::mutex g_stickMutex;
+     float g_vehicleWeight = 0.0f, g_vehicleDeadzone = 0.2f;
++    std::atomic<bool> g_stickMenu{false}; // (TODO 274: a game menu's list is on screen - setMenuShown)
+     std::chrono::steady_clock::time_point g_stickSample{};
+     ps2_stick_response::Config stickConfig()
+     {
+@@ -63,6 +64,8 @@
+         const auto lift = ps2_settings::value("PS2X_STICK_VEHICLE_LIFT");
+         c.vehicleLift = lift == "off" ? 0.0f : number("PS2X_STICK_VEHICLE_LIFT", -1.0f, 0.0f, 0.9f);
+         c.vehicleResponse = number("PS2X_STICK_VEHICLE_RESPONSE", c.vehicleResponse, 0.25f, 4.0f);
++        c.leftDeadzone = number("PS2X_STICK_LEFT_DEADZONE", c.leftDeadzone, 0.0f, 0.6f);
++        c.rightDeadzone = number("PS2X_STICK_RIGHT_DEADZONE", c.rightDeadzone, 0.0f, 0.6f);
+         return c;
+     }
+ }
+@@ -78,6 +81,11 @@
+     g_stickSample = now;
+ }
+ 
++void ps2_stick_response::setMenuShown(bool shown)
++{
++    g_stickMenu.store(shown, std::memory_order_relaxed);
++}
++
+ namespace
+ {
+     constexpr uint8_t kPadAnalogMarker = 0x73;
+@@ -972,7 +980,9 @@
+     {
+         std::lock_guard<std::mutex> lock(g_stickMutex);
+         const bool fresh = std::chrono::steady_clock::now() - g_stickSample < std::chrono::milliseconds(500);
+-        ps2_stick_response::map(lx, ly, rx, ry, response, fresh ? g_vehicleWeight : 0.0f, g_vehicleDeadzone, sonyPad);
++        // (TODO 274: no lift while a game menu's list is shown - a menu gets the stick itself)
++        ps2_stick_response::map(lx, ly, rx, ry, response, fresh ? g_vehicleWeight : 0.0f, g_vehicleDeadzone, sonyPad,
++                                !g_stickMenu.load(std::memory_order_relaxed));
+     }
+ 
+     // The triggers as the pad has them (gamepadTriggers).

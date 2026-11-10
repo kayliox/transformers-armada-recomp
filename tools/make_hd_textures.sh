@@ -83,6 +83,13 @@ if [ ! -f "$exe" ]; then
     [ -f "$exe" ] || { echo 'Real-ESRGAN download did not contain the executable' >&2; exit 1; }
     chmod +x "$exe"
 fi
+# A set made before the maker checked its images, or before its newer checks: every image checked once, broken ones
+# removed and made again below (make_hd_textures.ps1's step; the game reads the same mark).
+if [ -f "$out/upscaled/upscale_manifest.jsonl" ] && [ ! -f "$out/.images_checked_3" ]; then
+    step 'Checking the HD textures made so far (a few minutes)'
+    "$python" "$py/upscale_textures.py" "$converted" --out "$out/upscaled" --check-colours
+    printf 'checked %s\n' "$(date +%Y-%m-%dT%H:%M:%S)" >"$out/.images_checked_3"
+fi
 step "Upscaling into $out/upscaled (resumable)"
 log=$(mktemp "$out/upscale-log.XXXXXX")
 trap 'rm -f "$log"' EXIT

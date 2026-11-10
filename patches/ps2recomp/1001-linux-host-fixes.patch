@@ -15,7 +15,6 @@ The runtime's C library stubs called host functions whose results differ between
 - localtime / gmtime: refused outside UCRT's range (1970 to 3001).
 - case folding (tolower, toupper, isalpha in paths, device names, ROM names): ASCII only. GLFW sets LC_CTYPE from
   the environment on X11; in some locales (Turkish I) the host functions folded otherwise.
-- ps2_settings.cpp: the non-Windows branch built a std::string from (char *, const char *): it did not compile.
 
 Paths: Windows finds a file whatever its case; Linux now does too for the game's files, the memory card and the host
 device (the exact name first, a case-blind match in each folder only when it is missing; two names differing only by
@@ -28,10 +27,10 @@ Zink crashed in that teardown (an abort, or a jump into a driver already unloade
 ps2_xinput_rumble: on Linux the game's vibration goes to the first gamepad with evdev force feedback (FF_RUMBLE):
 Steam's virtual pad under Steam, else an Xbox pad's own driver. Checked through Steam's virtual pad (SteamOS).
 
-Stick response, Linux: while a game menu is shown (the port says so: setMenuShown) the sticks reach the game as they
-are, without the movement's anti-deadzone, which turned a small resting drift (a Steam Deck stick) into a held
-direction and the menu cycled on its own. In play the inner dead zone is 12% (PS2X_STICK_DEADZONE; Windows keeps 5%):
-the anti-deadzone made a stick resting just past 5% walk the robot and turn the camera. Gameplay keeps the response.
+Stick response, Linux: the response's own dead zone (kDeadzone, the default of 0163's PS2X_STICK_LEFT_DEADZONE /
+PS2X_STICK_RIGHT_DEADZONE) is 12% (Windows keeps 5%): the anti-deadzone made a stick resting just past 5% (a Steam
+Deck's, after a push) walk the robot and turn the camera. At that default the menus get the sticks as the pad gives
+them, as Windows' do at 5% (0163 cuts there only for a dead zone set above the default).
 ---
 diff --git a/ps2xIOP/src/emulator/imports/iop_cdvd.cpp b/ps2xIOP/src/emulator/imports/iop_cdvd.cpp
 index 3ac7367..c393f84 100644
@@ -323,88 +322,22 @@ index 22cf985..3d38362 100644
      void Initialize(uint8_t *vram, uint32_t vramSize) override;
      void Reset() override;
 diff --git a/ps2xRuntime/include/runtime/ps2_stick_response.h b/ps2xRuntime/include/runtime/ps2_stick_response.h
-index 4236121..27f5829 100644
+index da11123..76ebd49 100644
 --- a/ps2xRuntime/include/runtime/ps2_stick_response.h
 +++ b/ps2xRuntime/include/runtime/ps2_stick_response.h
-@@ -12,6 +12,12 @@ namespace ps2_stick_response
-         bool vehicleOriginal = true;
-         float leftLift = 0.625f, rightLift = 0.20f, sensitivity = 1.33f;
-         float vehicleLift = -1.0f, vehicleResponse = 1.15f; // -1: first accepted guest byte
+@@ -6,7 +6,12 @@
+ 
+ namespace ps2_stick_response
+ {
 +#if defined(__linux__)
-+        // (a Steam Deck's sticks can rest past 5% after a push: the lift made that a walk - PS2X_STICK_DEADZONE)
-+        float inner = 0.12f;
++    // (Linux: 12% - a Steam Deck's sticks can rest past 5% after a push, and the lift made that a walk)
++    constexpr float kDeadzone = 0.12f; // the response's own dead zone, and the settings' default
 +#else
-+        float inner = 0.05f;
+     constexpr float kDeadzone = 0.05f; // the response's own dead zone, and the settings' default
 +#endif
-     };
-     inline uint8_t axisByte(float value)
+     struct Config
      {
-@@ -25,15 +31,15 @@ namespace ps2_stick_response
-         const float v = (static_cast<float>(value) - 128.0f) / 127.0f;
-         return !enabled && std::fabs(v) < 0.08f ? 0.0f : std::clamp(v, -1.0f, 1.0f);
-     }
--    inline void radial(float &x, float &y, float lift, float gain, float response = 1.0f)
-+    inline void radial(float &x, float &y, float lift, float gain, float response = 1.0f, float inner = 0.05f)
-     {
-         const float radius = std::hypot(x, y);
--        if (!std::isfinite(radius) || radius <= 0.05f)
-+        if (!std::isfinite(radius) || radius <= inner)
-         {
-             x = y = 0.0f;
-             return;
-         }
--        const float travel = std::pow(std::min(1.0f, (radius - 0.05f) / 0.90f), response);
-+        const float travel = std::pow(std::min(1.0f, (radius - inner) / (0.95f - inner)), response);
-         const float scale = (lift + (1.0f - lift) * travel) * gain / radius;
-         x = std::clamp(x * scale, -1.0f, 1.0f);
-         y = std::clamp(y * scale, -1.0f, 1.0f);
-@@ -46,9 +52,9 @@ namespace ps2_stick_response
-     inline float vehicleAxis(float value, const Config &c, float deadzone)
-     {
-         const float a = std::fabs(value);
--        if (!std::isfinite(a) || a <= 0.05f)
-+        if (!std::isfinite(a) || a <= c.inner)
-             return 0.0f;
--        const float travel = std::pow(std::min(1.0f, (a - 0.05f) / 0.90f), c.vehicleResponse);
-+        const float travel = std::pow(std::min(1.0f, (a - c.inner) / (0.95f - c.inner)), c.vehicleResponse);
-         const float anti = c.vehicleLift < 0.0f ? deadzone : c.vehicleLift;
-         float result = anti + (1.0f - anti) * travel;
-         if (c.vehicleLift < 0.0f)
-@@ -67,8 +73,15 @@ namespace ps2_stick_response
-         if (mode == 3) return std::max(0.0f, previous - seconds / 0.2f);
-         return 0.0f;
-     }
-+#if defined(__linux__)
-+    inline void map(float &lx, float &ly, float &rx, float &ry, const Config &c, float weight, float deadzone, bool sony = false, bool inMenu = false)
-+#else
-     inline void map(float &lx, float &ly, float &rx, float &ry, const Config &c, float weight, float deadzone, bool sony = false)
-+#endif
-     {
-+#if defined(__linux__)
-+        if (inMenu) return;
-+#endif
-         if (!c.enabled) return;
-         // Sony has already been decoded to a clamped axis. Reapply its old drift filter
-         // only at the original-car endpoint; the robot still receives the unfiltered axis.
-@@ -77,8 +90,8 @@ namespace ps2_stick_response
-         const float vy = c.vehicleOriginal ? original(ly) : vehicleAxis(ly, c, deadzone);
-         const float vrx = original(rx), vry = original(ry);
-         // The port keeps its 0.85 run threshold. Ease travel to retain the reference walking band.
--        radial(lx, ly, c.leftLift, c.sensitivity, 1.3f);
--        radial(rx, ry, c.rightLift, 1.0f);
-+        radial(lx, ly, c.leftLift, c.sensitivity, 1.3f, c.inner);
-+        radial(rx, ry, c.rightLift, 1.0f, 1.0f, c.inner);
-         if (weight >= 1.0f)
-         {
-             lx = vx; ly = vy;
-@@ -93,4 +106,7 @@ namespace ps2_stick_response
-     // Called only on the EE thread after validating the player's transformer state.
-     // mode: 0 robot/unavailable, 1 car, 2 transforming to car, 3 transforming to robot.
-     void sampleVehicle(int mode, float deadzone);
-+#if defined(__linux__)
-+    void setMenuShown(bool shown);
-+#endif
- }
+         bool enabled = true;
 diff --git a/ps2xRuntime/include/runtime/ps2_vfs.h b/ps2xRuntime/include/runtime/ps2_vfs.h
 index ea7f761..4a57c01 100644
 --- a/ps2xRuntime/include/runtime/ps2_vfs.h
@@ -845,10 +778,10 @@ index 1e38bd4..c48693d 100644
                  return false;
              }
 diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
-index 8b2451b..ef0a569 100644
+index 007f630..12ef47d 100644
 --- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
 +++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
-@@ -2608,6 +2608,13 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
+@@ -2612,6 +2612,13 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
      m_drawStateSent = false;
  }
  
@@ -933,43 +866,10 @@ index ca95f67..1e866ac 100644
              return;
          }
 diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
-index 6f5320b..fa25431 100644
+index 6cf376e..587f0b2 100644
 --- a/ps2xRuntime/src/lib/ps2_pad.cpp
 +++ b/ps2xRuntime/src/lib/ps2_pad.cpp
-@@ -45,6 +45,9 @@ namespace
-     std::mutex g_stickMutex;
-     float g_vehicleWeight = 0.0f, g_vehicleDeadzone = 0.2f;
-     std::chrono::steady_clock::time_point g_stickSample{};
-+#if defined(__linux__)
-+    std::atomic<bool> g_stickMenu{false};
-+#endif
-     ps2_stick_response::Config stickConfig()
-     {
-         ps2_stick_response::Config c;
-@@ -63,6 +66,9 @@ namespace
-         const auto lift = ps2_settings::value("PS2X_STICK_VEHICLE_LIFT");
-         c.vehicleLift = lift == "off" ? 0.0f : number("PS2X_STICK_VEHICLE_LIFT", -1.0f, 0.0f, 0.9f);
-         c.vehicleResponse = number("PS2X_STICK_VEHICLE_RESPONSE", c.vehicleResponse, 0.25f, 4.0f);
-+#if defined(__linux__)
-+        c.inner = number("PS2X_STICK_DEADZONE", c.inner, 0.0f, 0.5f);
-+#endif
-         return c;
-     }
- }
-@@ -77,6 +83,12 @@ void ps2_stick_response::sampleVehicle(int mode, float deadzone)
-     g_vehicleDeadzone = std::isfinite(deadzone) ? std::clamp(deadzone, 0.0f, 0.9f) : 0.2f;
-     g_stickSample = now;
- }
-+#if defined(__linux__)
-+void ps2_stick_response::setMenuShown(bool shown)
-+{
-+    g_stickMenu.store(shown, std::memory_order_relaxed);
-+}
-+#endif
- 
- namespace
- {
-@@ -930,6 +942,20 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+@@ -938,6 +938,20 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
      }
  
      const int gamepad = live && !sonyPad && ps2x::sonypad::glfwGamepadsAllowed() ? firstGamepad() : -1;
@@ -990,26 +890,7 @@ index 6f5320b..fa25431 100644
      // (TODO 200: a GLFW gamepad gets the game's vibration through XInput, ps2_xinput_rumble.h)
      ps2x::xinput::notePadRead(gamepad >= 0);
      if (gamepad >= 0)
-@@ -968,11 +994,18 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
-     // The stick as the pad gives it: "the gamepad was used" (below) is judged on this, so the response's
-     // lift does not let a resting stick's small drift take the prompts from the keyboard.
-     const float padLx = lx, padLy = ly, padRx = rx, padRy = ry;
-+#if defined(__linux__)
-+    const bool stickMenu = g_stickMenu.load(std::memory_order_relaxed);
-+#endif
-     if (sonyPad || gamepad >= 0)
-     {
-         std::lock_guard<std::mutex> lock(g_stickMutex);
-         const bool fresh = std::chrono::steady_clock::now() - g_stickSample < std::chrono::milliseconds(500);
-+#if defined(__linux__)
-+        ps2_stick_response::map(lx, ly, rx, ry, response, fresh ? g_vehicleWeight : 0.0f, g_vehicleDeadzone, sonyPad, stickMenu);
-+#else
-         ps2_stick_response::map(lx, ly, rx, ry, response, fresh ? g_vehicleWeight : 0.0f, g_vehicleDeadzone, sonyPad);
-+#endif
-     }
- 
-     // The triggers as the pad has them (gamepadTriggers).
-@@ -1148,5 +1181,21 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+@@ -1158,5 +1172,22 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
      data[5] = axisByte(ry);
      data[6] = axisByte(lx);
      data[7] = axisByte(ly);
@@ -1019,6 +900,7 @@ index 6f5320b..fa25431 100644
 +    {
 +        static float lastX = 2.0f, lastY = 2.0f;
 +        static int lastByteX = -1, lastByteY = -1, lastButtons = -1, lastMenu = -1;
++        const bool stickMenu = g_stickMenu.load(std::memory_order_relaxed);
 +        if (padLx != lastX || padLy != lastY || data[6] != lastByteX || data[7] != lastByteY ||
 +            btns != lastButtons || stickMenu != lastMenu)
 +        {
@@ -1070,10 +952,10 @@ index a72105b..3323574 100644
  }
  
 diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
-index 48c12b9..b6e4053 100644
+index d8eb525..a7ead61 100644
 --- a/ps2xRuntime/src/lib/ps2_runtime.cpp
 +++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
-@@ -3791,6 +3791,9 @@ void PS2Runtime::run()
+@@ -3793,6 +3793,9 @@ void PS2Runtime::run()
          m_debugUiInitialized = false;
      }
      UnloadTexture(frameTex);
@@ -1084,7 +966,7 @@ index 48c12b9..b6e4053 100644
  
      RUNTIME_LOG("[run] exiting loop");
 diff --git a/ps2xRuntime/src/lib/ps2_settings.cpp b/ps2xRuntime/src/lib/ps2_settings.cpp
-index 297aeaf..a947fb9 100644
+index 99fbcb6..280c99c 100644
 --- a/ps2xRuntime/src/lib/ps2_settings.cpp
 +++ b/ps2xRuntime/src/lib/ps2_settings.cpp
 @@ -23,6 +23,8 @@
@@ -1096,15 +978,6 @@ index 297aeaf..a947fb9 100644
  extern char **environ;
  #endif
  
-@@ -107,7 +109,7 @@ namespace ps2_settings
-             for (char **p = environ; p && *p; ++p)
-             {
-                 if (const char *equals = std::strchr(*p, '='))
--                    g_launch.insert(std::string(*p, equals));
-+                    g_launch.insert(std::string(*p, static_cast<std::size_t>(equals - *p)));
-             }
- #endif
-         }
 @@ -550,9 +552,79 @@ namespace ps2_settings
              CloseHandle(process.hProcess);
              return true;

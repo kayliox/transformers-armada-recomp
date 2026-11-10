@@ -124,12 +124,34 @@ namespace ragdoll_step
             }
             if (d.shown) // (the simulation's own positions back before it goes on)
             {
+                // (Unless the game moved them since. All of them - a teleport: it goes on from there. Some of them - TODO 273,
+                // Cyclonus' whirlwind grab holds the player's ragdoll by one particle, set to his hand every frame: those
+                // keep where the game put them, the others get the simulation's own back. Before, one moved particle left
+                // every particle at the blend - the pose a step behind - so each step's work was thrown away the frame
+                // after: the held player stood still in his first pose for the whole spin, at every rate above 30.)
                 std::vector<float> now;
                 readPositions(rdram, d, now);
-                if (now == d.shown_) // (unless the game moved them since - a teleport: then it goes on from there)
-                    writePositions(rdram, d, d.real);
-                else
+                size_t moved = 0u;
+                for (uint32_t i = 0; i < d.count && 3u * i + 2u < now.size() && 3u * i + 2u < d.shown_.size() && 3u * i + 2u < d.real.size(); ++i)
+                {
+                    const size_t k = 3u * i;
+                    if (now[k] == d.shown_[k] && now[k + 1u] == d.shown_[k + 1u] && now[k + 2u] == d.shown_[k + 2u])
+                        continue;
+                    ++moved;
+                    for (size_t c = 0; c < 3u; ++c)
+                    {
+                        d.real[k + c] = now[k + c]; // (the game's own place for it: kept)
+                        if (k + c < d.last.size())
+                            d.last[k + c] = now[k + c]; // (and shown there, not blended from where it was)
+                    }
+                }
+                if (g_log && moved != 0u) // (TF_RAGDOLL_STEP_LOG: the game moved particles between two steps)
+                    std::fprintf(stderr, "[ragdoll step] doll %08x: the game moved %zu of %u particles between steps%s\n", self, moved, d.count,
+                                 moved >= d.count ? " (all: taken as a teleport)" : " (kept where it put them)");
+                if (moved >= d.count)
                     d.before = false;
+                else
+                    writePositions(rdram, d, d.real);
                 d.shown = false;
             }
             d.seen = tick;

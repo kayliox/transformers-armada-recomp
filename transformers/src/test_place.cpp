@@ -153,7 +153,9 @@ namespace test_place
         g_fn = guest_code::addResumable(runtime, "taTransformerData::Update (+ TF_PLACE)", updateFn, 2);
         if (PS2Runtime::RecompiledFunction original = runtime.lookupFunction(kDataUpdate); original && !g_places.empty())
         {
-            g_original = guest_code::addFunction(runtime, "taTransformerData::Update (original)", original);
+            // (the name the unused one has below: the names are part of a save state's layout key, and with another
+            // name here no state made without TF_PLACE loaded in a run with it - "a different memory layout")
+            g_original = guest_code::addFunction(runtime, "taTransformerData::Update (original, unused)", original);
             runtime.registerFunction(kDataUpdate, updateFn);
         }
         else

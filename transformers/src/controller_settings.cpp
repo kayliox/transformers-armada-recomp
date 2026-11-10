@@ -75,11 +75,24 @@ namespace controller_settings
         };
         responseSetting("PS2X_STICK_RESPONSE", "Stick response", "Modern: early robot walk/run and selectable car steering. Off restores the old host pad bytes.",
                         "on", {{"on", "Modern"}, {"off", "Off (original port)"}}, 40);
+        // (TODO 274) The sticks' dead zones: applied where the pad's state is made, so the menus, the robot, the car and
+        // every kind of controller get them. 5% is what the response always had.
 #if defined(__linux__)
-        responseSetting("PS2X_STICK_DEADZONE", "Stick dead zone", "How far a stick must move before it counts. Larger stops a drifting stick "
-                        "(a Steam Deck's can rest a little off centre) moving you or the camera on its own.",
-                        "0.12", {{"0.05", "5% (Windows)"}, {"0.08", "8%"}, {"0.12", "12% (default)"}, {"0.16", "16%"}, {"0.20", "20%"}}, 40);
+        // (Linux: 12%, the runtime's kDeadzone there - a Steam Deck's sticks can rest past 5% after a push)
+        const char *deadzone = "0.12";
+        const std::initializer_list<ps2_settings::Choice> deadzones = {{"0", "Off"}, {"0.05", "5% (Windows)"}, {"0.10", "10%"}, {"0.12", "12% (default)"},
+                                                                       {"0.15", "15%"}, {"0.20", "20%"}, {"0.25", "25%"}, {"0.30", "30%"}};
+#else
+        const char *deadzone = "0.05";
+        const std::initializer_list<ps2_settings::Choice> deadzones = {{"0", "Off"}, {"0.05", "5% (default)"}, {"0.10", "10%"}, {"0.15", "15%"},
+                                                                       {"0.20", "20%"}, {"0.25", "25%"}, {"0.30", "30%"}};
 #endif
+        responseSetting("PS2X_STICK_LEFT_DEADZONE", "Left stick dead zone",
+                        "How far the left stick must move before the game sees it. Raise it if the robot walks or a menu scrolls on its own.",
+                        deadzone, deadzones, 38);
+        responseSetting("PS2X_STICK_RIGHT_DEADZONE", "Right stick dead zone",
+                        "How far the right stick must move before the game sees it. Raise it if the view turns on its own.",
+                        deadzone, deadzones, 39);
         responseSetting("PS2X_STICK_LEFT_LIFT", "Left anti-deadzone", "Robot lift before sensitivity; 0.625 starts walking just outside 5% tilt.",
                         "0.625", {{"0", "Off"}, {"0.20", "0.20"}, {"0.625", "0.625 (default)"}, {"0.70", "0.70"}}, 41);
         responseSetting("PS2X_STICK_RIGHT_LIFT", "Right anti-deadzone", "Camera stick lift; the mouse and keyboard bypass it.",

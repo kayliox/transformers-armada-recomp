@@ -1,0 +1,28 @@
+Subject: [PATCH] ARM: sse2neon's float min / max follow x86's NaN rule (SSE2NEON_PRECISE_MINMAX)
+
+On x86, _mm_min_ps / _mm_max_ps return the second operand when either operand is NaN. sse2neon maps them to
+NEON's fmin / fmax, which return the NaN instead, unless SSE2NEON_PRECISE_MINMAX=1. Code that saturates the
+PS2's huge float values (the PS2 has no NaN) through min / max relies on x86's rule: in another recompilation of
+this game on Apple Silicon, a matrix came out NaN and the 3D scene was black until this was set.
+
+The runtime here saturates with integer compares today and has no float min / max, so nothing changes now; this
+keeps any that come (recompiled code, the VU paths, a library) behaving as on x86 for the ARM targets on the
+roadmap. Only builds with USE_SSE2NEON (ARM targets) see it; x86 builds are unchanged.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c7c7af5..ca7a601 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -54,7 +54,11 @@ if(PS2X_IS_ARM_TARGET)
+     FetchContent_MakeAvailable(sse2neon)
+ 
+     include_directories(${sse2neon_SOURCE_DIR})
+-    add_compile_definitions(USE_SSE2NEON)
++    # SSE2NEON_PRECISE_MINMAX: _mm_min_ps / _mm_max_ps return the second operand when either is NaN, as on
++    # x86; without it sse2neon uses NEON's fmin / fmax, which return the NaN. Saturating the PS2's huge
++    # values (it has no NaN) through min / max needs x86's rule: in another recompilation of this game the
++    # 3D scene came out black on ARM until this was set.
++    add_compile_definitions(USE_SSE2NEON SSE2NEON_PRECISE_MINMAX=1)
+ 
+     if(PS2X_IS_AARCH64_TARGET AND APPLE)
+         # macOS ARM64 already uses optimal defaults

@@ -213,7 +213,7 @@ if (-not (Test-Path $exe)) {
 # (TODO 241) A set made before the maker checked its images: every image checked once (a graphics card that gives
 # black, junk-striped or red-and-blue-exchanged images - a GTX 1660 SUPER did): exchanged ones put right, broken ones
 # removed and made again below. Again whenever "Check HD textures" (F1) runs this on a finished set.
-$checkedMark = Join-Path $Out ".images_checked_2"
+$checkedMark = Join-Path $Out ".images_checked_3"
 $finished = $false
 if (Test-Path $StatusFile) { try { $finished = ((Get-Content $StatusFile -Raw | ConvertFrom-Json).state -in @("done", "card_broken")) } catch {} }
 if ((Test-Path (Join-Path $Out "upscaled\upscale_manifest.jsonl")) -and (-not (Test-Path $checkedMark) -or ($Resume -and $finished))) {

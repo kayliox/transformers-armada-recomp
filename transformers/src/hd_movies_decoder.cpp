@@ -2,6 +2,7 @@
 // rest). Its own file: windows.h and raylib.h do not go in one translation unit.
 
 #include "hd_movies_decoder.h"
+#include "runtime/ps2_thread_placement.h"
 
 #include <atomic>
 #include <chrono>
@@ -220,6 +221,7 @@ namespace hd_movies_decoder
         impl->stop = false;
         impl->reader = std::thread([this, width, height, fps] {
             SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL); // (TODO 201: with the decoder)
+            ps2_thread_placement::place(ps2_thread_placement::Role::Helper); // (PS2X_THREAD_PLACEMENT)
             impl->readFrames(width, height, fps);
         });
         return true;
