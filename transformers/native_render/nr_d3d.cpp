@@ -4476,9 +4476,12 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                     // then swapped in under the lock: no copy is made while it is held.
                     static std::vector<uint32_t> back;
                     back.resize(static_cast<size_t>(w) * h);
-                    for (UINT y = 0; y < h; ++y)
-                        std::memcpy(back.data() + static_cast<size_t>(y) * w,
-                                    static_cast<const uint8_t *>(p) + fp.Offset + static_cast<size_t>(y) * fp.Footprint.RowPitch, w * 4u);
+                    const uint8_t *src = static_cast<const uint8_t *>(p) + fp.Offset;
+                    if (fp.Footprint.RowPitch == w * 4u) // (rows without padding - 1280 wide, say: one copy)
+                        std::memcpy(back.data(), src, static_cast<size_t>(w) * h * 4u);
+                    else
+                        for (UINT y = 0; y < h; ++y)
+                            std::memcpy(back.data() + static_cast<size_t>(y) * w, src + static_cast<size_t>(y) * fp.Footprint.RowPitch, w * 4u);
                     {
                         std::lock_guard<std::mutex> lock(g_published.mutex);
                         g_published.pixels.swap(back);

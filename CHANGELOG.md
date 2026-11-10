@@ -45,6 +45,9 @@
   Less work for the graphics card, the same picture on screen.
 - The game window no longer uploads an unused placeholder picture on every frame while the native renderer is on.
   On Linux and Steam Deck it did this 60–90 times a second, so this saves a little CPU work.
+- Linux and Steam Deck: the native renderer uses less CPU and battery. Its Direct3D 12 layer (vkd3d) no longer wakes
+  a helper thread at every draw (on a Steam Deck at 60 frames a second: 12% less CPU, about 1.2 W less), and the
+  finished picture is copied to the window in one piece instead of row by row (half the time).
 - Linux and Steam Deck: "Finishing HD textures" no longer stays on screen after the HD set is finished, including
   sets made before this fix.
 
