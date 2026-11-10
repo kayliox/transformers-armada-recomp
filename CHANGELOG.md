@@ -43,6 +43,8 @@
 - The native renderer no longer draws a larger picture than the screen shows on narrower screens. On a Steam Deck's
   16:10 screen, the 16:9 picture was drawn at 1424x801 and shrunk to 1280x720; it is now drawn at 1280x720.
   Less work for the graphics card, the same picture on screen.
+- The game window no longer uploads an unused placeholder picture on every frame while the native renderer is on.
+  On Linux and Steam Deck it did this 60–90 times a second, so this saves a little CPU work.
 
 ## 0.4.6
 
