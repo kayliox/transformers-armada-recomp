@@ -62,6 +62,16 @@ add_custom_target(tf_version
 set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/updates.cpp"
     PROPERTIES INCLUDE_DIRECTORIES "${TF_VERSION_HEADER_DIR}")
 
+# The native renderer's shaders built in (nr_d3d.cpp, cache::loadBaked): build.ps1 runs the linked executable with
+# --bake-shaders to write this table, then links again if it changed. Until then (or with another build path) an
+# empty one: the shaders are compiled at run time and kept in the shader cache, as before.
+set(TF_BAKED_SHADERS "${CMAKE_CURRENT_BINARY_DIR}/baked/nr_shaders_baked.inc")
+if(NOT EXISTS "${TF_BAKED_SHADERS}")
+    file(WRITE "${TF_BAKED_SHADERS}" "// Empty until build.ps1 runs TransformersRecomp --bake-shaders (nr_d3d.cpp).
+static const BakedShader kBakedShaders[] = {{0ull, nullptr, 0u}};
+")
+endif()
+
 if(NOT TF_BATCH_SOURCES OR NOT EXISTS "${TF_REGISTER_FUNCTIONS}")
     message(WARNING
         "No generated game code in ${TF_WORK_DIR}.
@@ -75,7 +85,8 @@ if(NOT TF_BATCH_SOURCES OR NOT EXISTS "${TF_REGISTER_FUNCTIONS}")
     add_library(tf_port_objects OBJECT EXCLUDE_FROM_ALL ${TF_PORT_CHECK_SOURCES})
     add_dependencies(tf_port_objects tf_version)
     target_include_directories(tf_port_objects PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/decomp" "${CMAKE_CURRENT_SOURCE_DIR}/native_render")
+        "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/decomp" "${CMAKE_CURRENT_SOURCE_DIR}/native_render"
+        "${CMAKE_CURRENT_BINARY_DIR}/baked")
     target_link_libraries(tf_port_objects PRIVATE ps2_runtime)
     if(PS2X_ENABLE_DEBUG_UI)
         target_link_libraries(tf_port_objects PRIVATE rlImGui imgui)
@@ -102,16 +113,6 @@ target_include_directories(TransformersRecomp PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/native_render"
     "${CMAKE_CURRENT_BINARY_DIR}/baked"
 )
-
-# The native renderer's shaders built in (nr_d3d.cpp, cache::loadBaked): build.ps1 runs the linked executable with
-# --bake-shaders to write this table, then links again if it changed. Until then (or with another build path) an
-# empty one: the shaders are compiled at run time and kept in the shader cache, as before.
-set(TF_BAKED_SHADERS "${CMAKE_CURRENT_BINARY_DIR}/baked/nr_shaders_baked.inc")
-if(NOT EXISTS "${TF_BAKED_SHADERS}")
-    file(WRITE "${TF_BAKED_SHADERS}" "// Empty until build.ps1 runs TransformersRecomp --bake-shaders (nr_d3d.cpp).
-static const BakedShader kBakedShaders[] = {{0ull, nullptr, 0u}};
-")
-endif()
 
 target_link_libraries(TransformersRecomp PRIVATE ps2_runtime)
 
