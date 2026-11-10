@@ -38,9 +38,10 @@ nothing to load). The HD texture pack's own measurement is in its section below.
 
 ## Results
 
-Averages of the three samples.
+CPU, GPU busy, power and RSS are averages of the three samples. Frames a second and PCSX2 speed are single readings,
+from one screenshot taken during the samples (PCSX2's OSD, the port's counter).
 
-| Configuration | Frames a second | PCSX2 speed | Render resolution | CPU % | GPU busy % | Power W | RSS MB |
+| Configuration | Frames a second (one reading) | PCSX2 speed (one reading) | Render resolution | CPU % | GPU busy % | Power W | RSS MB |
 |---|---|---|---|---|---|---|---|
 | PCSX2 1x | 29.98 | 100% | 512x448 | 149.6 | 24.3 | 6.1 | 834 |
 | PCSX2 2x | 29.97 | 100% | 1024x894 | 148.3 | 65.3 | 7.9 | 696 |
