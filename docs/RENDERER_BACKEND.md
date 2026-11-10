@@ -44,7 +44,7 @@ mechanical change) and to choose the backend at start.
 | `latestPicture(pixels, w, h, serial, has3D)` | window thread | The newest picture as CPU pixels. |
 | `setSharedPictures(on)`, `latestShared(picture, serial)`, `sharedHeld(index)` | window thread | The newest picture as a texture the window imports, and which one the window still holds. |
 | `waitPicture(serial, untilNs, lastNs)`, `pacingMode()` | window thread | The pacer: wait for the next picture by its due time. |
-| `setWindowLines`, `setAntiAliasing`, `setSupersampling`, `setSpeedupsForced` | any | Settings, used from the next frame. |
+| `setWindowSize`, `setAntiAliasing`, `setSupersampling`, `setSpeedupsForced` | any | Settings, used from the next frame. |
 | `largeImageCap`, `largeImageBudget`, `largeImageBytes`, `adapterMemoryMB`, `qualityPreset` | any | The HD textures' video-memory budget and the quality preset. |
 | `gpuPictureMs`, `gpuExtraMs`, `cpuPictureMs`, `replayWaitMs`, `slotWaitMs`, `pacerDelayMs` | render or window thread | Timing figures for the frame pacer and the stats lines. |
 
@@ -60,7 +60,7 @@ slots (`frameSlot()`: 0 or 1). A slot owns its command list, its part of each ri
 its read-backs. The frame builder calls, in this order:
 
 1. **`prepareFrame(width, height)`**, before anything is recorded. The device makes the picture's surfaces at the
-   window's size (again when the size changes), waits until the slot's previous frame (two frames back) has finished
+   picture's size (again when the size changes), waits until the slot's previous frame (two frames back) has finished
    on the GPU, and calls the frame-done callback for every slot that has finished. False: no picture; the frame is not
    drawn.
 2. **`beginFrame(tick)`**. The device takes the textures its uploader has finished, starts the slot's command list,

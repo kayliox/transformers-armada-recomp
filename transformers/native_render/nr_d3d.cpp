@@ -7077,9 +7077,10 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
 
     uint64_t largeImageBytes() { return g_largeBytes.load(std::memory_order_relaxed); }
 
-    void setWindowLines(int lines)
+    void setWindowSize(int width, int height)
     {
-        g_windowLines.store(lines, std::memory_order_relaxed);
+        g_windowWidth.store(width, std::memory_order_relaxed);
+        g_windowLines.store(height, std::memory_order_relaxed);
     }
 
     void setSpeedupsForced(int on)
@@ -7389,7 +7390,7 @@ namespace nr
             void sharedHeld(int index) override { d3d::sharedHeld(index); }
             bool waitPicture(uint64_t serial, int64_t untilNs, int64_t &lastNs) override { return d3d::waitPicture(serial, untilNs, lastNs); }
             int pacingMode() override { return d3d::pacingMode(); }
-            void setWindowLines(int lines) override { d3d::setWindowLines(lines); }
+            void setWindowSize(int width, int height) override { d3d::setWindowSize(width, height); }
             void setAntiAliasing(int mode) override { d3d::setAntiAliasing(mode); }
             void setSupersampling(bool on) override { d3d::setSupersampling(on); }
             void setSpeedupsForced(int on) override { d3d::setSpeedupsForced(on); }

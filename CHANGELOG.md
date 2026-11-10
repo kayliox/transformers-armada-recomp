@@ -40,6 +40,9 @@
   at 175 frames a second, the extra pictures never seen): less CPU, GPU and battery used.
 - The F1 menu no longer shows red stripes and broken text with Zink (Mesa's command reordering is turned off
   for the game; `ZINK_DEBUG` set by you still wins).
+- The native renderer no longer draws a larger picture than the screen shows on narrower screens. On a Steam Deck's
+  16:10 screen, the 16:9 picture was drawn at 1424x801 and shrunk to 1280x720; it is now drawn at 1280x720.
+  Less work for the graphics card, the same picture on screen.
 
 ## 0.4.6
 

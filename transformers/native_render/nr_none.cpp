@@ -25,7 +25,7 @@ namespace nr
 
 namespace nr::d3d
 {
-    void setWindowLines(int) {}
+    void setWindowSize(int, int) {}
     uint32_t largeImageCap() { return 0; }
     uint64_t largeImageBudget() { return 0; }
     uint64_t largeImageBytes() { return 0; }

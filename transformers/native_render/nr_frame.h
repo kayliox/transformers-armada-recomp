@@ -38,7 +38,8 @@ namespace nr::frame
     inline std::atomic<int> g_ssaa{-1};           // supersampling: -1 not read yet, then 0/1
     inline std::atomic<int> g_bloom{-1};          // (TODO 108) the modern bloom (TF_NATIVE_BLOOM): -1 not read yet, 0 the game's glow, 1 on
     inline std::atomic<int> g_speedupsForced{-1}; // (TF_NATIVE_SHOTAB: the speed-ups that keep the picture forced on or off)
-    inline std::atomic<int> g_windowLines{0};     // the window's height (setWindowLines); 0 = not known yet
+    inline std::atomic<int> g_windowLines{0};     // the window's height (setWindowSize); 0 = not known yet
+    inline std::atomic<int> g_windowWidth{0};     // the window's width (setWindowSize); 0 = not known yet
     inline uint32_t g_profWindow = 0;             // TF_NATIVE_PROFILE's windows so far (the "=alt" switches turn on it)
     // (TODO 94: the speed-ups that keep the picture, each TF_NATIVE_<name>=0 off, =alt by turns (a profile window
     // each), unset on; TF_NATIVE_SHOTAB's forcing over them.)

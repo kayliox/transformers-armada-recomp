@@ -259,7 +259,7 @@ namespace nr
             }
             uint32_t w = 0, h = 0;
             static bool has3D = false;
-            d3d::setWindowLines(GetRenderHeight()); // (the picture drawn at the window's own lines)
+            d3d::setWindowSize(GetRenderWidth(), GetRenderHeight()); // (the picture drawn at the size shown in the window)
             // The shared textures, on the first frame (the window's GL context is current here).
             static int share = 0;
             if (share == 0)

@@ -1775,24 +1775,30 @@ namespace nr::frame
             }
         }
         // The picture is the PC's, not the GS's: the field (512x224, shown 4:3) maps to all of it.
-        // As many lines as the window has (2026-10-28, item 64: a fixed 1080 was stretched to the
-        // 3440x1440 screen, x1.33 - the blur), as wide as the picture shows on the screen (the
-        // game's widescreen picture is anamorphic: a wider window gets a wider picture, not a
-        // stretch). TF_NATIVE_HEIGHT=<n> fixes the lines (above the window's = supersampling).
+        // As many lines as the picture shows in the window: the window's lines, or its width over the picture's shape
+        // in a narrower, letterboxed window (a 16:9 picture on the Steam Deck's 16:10 screen). The extra lines were
+        // drawn and then scaled away (the Deck: 1424x801 for 1280x720 shown). As wide as the picture shows on the
+        // screen (the game's widescreen picture is anamorphic). TF_NATIVE_HEIGHT=<n> fixes the lines (above the window's
+        // = supersampling).
         static const int linesFixed = [] {
             const char *v = std::getenv("TF_NATIVE_HEIGHT");
             return v && *v ? std::atoi(v) : 0;
         }();
-        // (the render scale: that share of the window's lines, the picture shown enlarged - setRenderScale; 100 unless set)
-        const int window = g_windowLines.load(std::memory_order_relaxed) * renderScale() / 100;
+        // (the render scale: that share of the window's size, the picture shown enlarged - setRenderScale; 100 unless set)
+        const int scale = renderScale();
+        const int window = g_windowLines.load(std::memory_order_relaxed) * scale / 100;
+        const int windowWidth = g_windowWidth.load(std::memory_order_relaxed) * scale / 100;
         // (TODO 255) A movie shown as a band of the picture's rows (ps2_host_display::setPictureBand): the picture as
         // many lines taller as the band is short of it, so the band itself still has the window's lines.
         float bandTop = 0.0f, bandBottom = 1.0f;
         ps2_host_display::pictureBand(bandTop, bandBottom);
         const float bandLines = linesFixed > 0 ? 1.0f : 1.0f / std::max(0.25f, bandBottom - bandTop);
-        const uint32_t linesWanted = static_cast<uint32_t>(
-            std::clamp(static_cast<int>(std::lround((linesFixed > 0 ? linesFixed : window > 0 ? window : 1080) * bandLines)), 240, 4320));
         const float shape = input.displayAspect > 0.5f ? input.displayAspect : 4.0f / 3.0f;
+        const float tall = (window > 0 ? window : 1080) * bandLines;
+        const float lines = linesFixed > 0 ? static_cast<float>(linesFixed) :
+            windowWidth > 0 ? std::min(tall, windowWidth / shape) : tall;
+        const uint32_t linesWanted = static_cast<uint32_t>(
+            std::clamp(static_cast<int>(std::lround(lines)), 240, 4320));
         const uint32_t height = linesWanted, width = (static_cast<uint32_t>(std::lround(linesWanted * shape)) + 7u) & ~7u;
         // The GS buffers' targets at a scale to match (the 3D field is copied into the picture:
         // drawn at the picture's own resolution, not enlarged).
