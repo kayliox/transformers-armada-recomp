@@ -20,6 +20,7 @@ namespace nr
     void setTextureSharpness(float) {}
     void preUpload(const std::shared_ptr<const Texture> &) {}
     bool rendererStarting() { return false; }
+    int bakeShaders(const char *) { return 1; } // (no native renderer: nothing to bake)
 }
 
 namespace nr::d3d

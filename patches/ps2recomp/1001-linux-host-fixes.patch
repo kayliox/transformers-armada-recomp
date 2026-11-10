@@ -907,6 +907,31 @@ index fe1bb57..c58a14b 100644
  {
      {
          std::lock_guard<std::mutex> lock(m_wakeMutex);
+diff --git a/ps2xRuntime/src/lib/ps2_host_present.cpp b/ps2xRuntime/src/lib/ps2_host_present.cpp
+index ca95f67..1e866ac 100644
+--- a/ps2xRuntime/src/lib/ps2_host_present.cpp
++++ b/ps2xRuntime/src/lib/ps2_host_present.cpp
+@@ -110,6 +110,20 @@ namespace ps2_host_present
+     {
+         if (!g_active)
+         {
++#if !defined(_WIN32)
++            // (Linux: GL's swap is the present - the VSync setting as its swap interval: Off 0, else 1. raylib's window
++            // flag sets it, on this, the window's thread.)
++            static int applied = -1;
++            const int wanted = sync() == 0 ? 0 : 1;
++            if (wanted != applied)
++            {
++                applied = wanted;
++                if (wanted)
++                    SetWindowState(FLAG_VSYNC_HINT);
++                else
++                    ClearWindowState(FLAG_VSYNC_HINT);
++            }
++#endif
+             EndDrawing();
+             return;
+         }
 diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
 index 6f5320b..fa25431 100644
 --- a/ps2xRuntime/src/lib/ps2_pad.cpp
