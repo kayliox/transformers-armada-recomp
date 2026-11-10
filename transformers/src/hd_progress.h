@@ -4,7 +4,8 @@
 // tools/make_hd_textures.ps1 (Windows) or tools/make_hd_textures.sh (Linux) makes the HD set and keeps
 // hd_textures/upscale_status.json up to date (its state - working, paused, upscaled, done - and how many
 // of how many are made). "done" follows colour matching and sharp fonts, not the renderer's BC7 cache.
-// Linux also repairs an older "upscaled" status when its colour ledger follows the upscale and sharp fonts are made.
+// Linux also repairs an older "upscaled" status when its colour ledger follows the upscale and sharp fonts are made,
+// and leaves the once-only image check (.images_checked_3) to make_hd_textures.sh: the game starts no maker there.
 // The game can be played meanwhile:
 //  - On Windows, while the game runs it holds hd_textures\.game_running (its process id inside; Windows deletes the
 //    file when the game ends, a crash too). The upscale waits while the file is there - the two share the

@@ -33,6 +33,7 @@
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_audio_stream.h"
 #include "runtime/ps2_settings.h"
+#include "runtime/ps2_thread_placement.h"
 
 #include <algorithm>
 #include <chrono>
@@ -97,6 +98,7 @@ namespace native_sound
         // at the output (runAhead).
         void mixLoop()
         {
+            ps2_thread_placement::place(ps2_thread_placement::Role::Helper); // (PS2X_THREAD_PLACEMENT)
             std::unique_lock<std::mutex> lock(g_mixMutex);
             for (;;)
             {

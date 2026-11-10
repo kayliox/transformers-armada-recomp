@@ -96,6 +96,7 @@ namespace photo_mode
         // The game's settings while photo mode is on (the game thread).
         float g_speedBefore = 1.0f;
         int g_hudBefore = -1; // the showHUD byte before (-1: not changed)
+        std::atomic<bool> g_hudToRestore{false};
 
         float loadFloat(const uint8_t *rdram, uint32_t a)
         {
@@ -376,6 +377,7 @@ namespace photo_mode
 
     bool active() { return g_on.load(std::memory_order_relaxed); }
 
+    bool takeHudRestore() { return g_hudToRestore.exchange(false); }
     bool hudHidden() { return g_on.load(std::memory_order_relaxed) && !g_hudOn.load(std::memory_order_relaxed); }
 
     void setHideCrosshair(bool hide) { g_hideCrosshair.store(hide); }
@@ -539,7 +541,8 @@ namespace photo_mode
     {
         g_inLevel.store(inLevel, std::memory_order_relaxed);
         // TF_PHOTO_AT=<n> (tests): photo mode on after n game frames in a level (TF_PHOTO_MODE's, later).
-        static const int photoAt = std::getenv("TF_PHOTO_AT") ? std::atoi(std::getenv("TF_PHOTO_AT")) : 0;
+        // (Not again in the process a settings restart starts.)
+        static const int photoAt = std::getenv("TF_PHOTO_AT") && !std::getenv("PS2X_RESTART_STATE") ? std::atoi(std::getenv("TF_PHOTO_AT")) : 0;
         static int levelFrames = 0;
         if (photoAt > 0 && inLevel && ++levelFrames == photoAt)
         {
@@ -548,6 +551,13 @@ namespace photo_mode
         }
         const bool want = g_want.load(std::memory_order_relaxed) && inLevel;
         const uint32_t hud = game_config::valueAddress("showHUD");
+        // TODO 269: that state also holds photo mode's HUD off: the setting and this HUD's flag on again.
+        if (tuning::takeFrozenState() && !want && !game_config::hudOff())
+        {
+            if (uint8_t *p = hud ? getMemPtr(rdram, hud) : nullptr)
+                *p = 1u;
+            g_hudToRestore.store(true);
+        }
         if (want != g_on.load(std::memory_order_relaxed))
         {
             // TF_PHOTO_LIVE=1 (tests, N8 item 4): the game left running - the free camera watches it move.

@@ -11,6 +11,7 @@
 #include "nr_shader.h"
 #include "nr_n5.h"
 #include "view_turn.h"
+#include "runtime/ps2_thread_placement.h"
 
 #include <algorithm>
 #include <array>
@@ -480,6 +481,11 @@ namespace nr
                 std::chrono::steady_clock::time_point probeUntil{}, nextProbe{};
                 uint64_t probesKept = 0, probesFailed = 0;
                 int refreshes = 1;         // (a fixed refresh: the refreshes a picture now)
+                // (TODO 266: the menus' pictures tried one refresh closer now and then - see render)
+                bool flatProbing = false;
+                int flatProbeRefreshes = 0, flatProven = 0; // (the count being tried; the fewest refreshes a try kept, 0: none)
+                double flatProbeWait = 0.0, flatProbeDelay = 0.0, flatBackoff = 4.0, flatWaitMark = 0.0;
+                std::chrono::steady_clock::time_point flatProbeUntil{}, flatNextProbe{}, flatWaitSince{};
                 // (the menus: the last frame of 2D alone - its 2D draws' meshes and states, in order)
                 struct Flat
                 {
@@ -1593,10 +1599,19 @@ namespace nr
                 // (TODO 88: the menus' 2D, the game's thread with next to nothing to do in them: 90% of the render thread's time
                 // for their pictures - at 60% the RX 5700 XT's 1-3 ms a picture kept them at every other refresh at 180 Hz)
                 const double cpuShare = flatBlend ? 0.9 : 0.6;
-                double needed = std::max(st.perPictureMs / cpuShare, d3d::gpuPictureMs() / 0.8) * 1.0e6;
+                // (TODO 266: the menus' 2D may take 95% of the graphics card's time a picture, not 80%: a card with next to
+                // nothing to do lowers its clock and its measured time grows - the GTX 1080's 5.75 ms a menu picture at 144
+                // Hz, 8x MSAA, was over 80% of a refresh (5.56) and halved the menus to 72 pictures. The try below covers
+                // the rest.)
+                // (TF_MENU_GPU_SHARE=<share> (tests): another share for the menus, to make the card's time hold them back)
+                static const double menuShare = std::getenv("TF_MENU_GPU_SHARE") ? std::clamp(std::atof(std::getenv("TF_MENU_GPU_SHARE")), 0.05, 1.0) : 0.95;
+                const double gpuShare = flatBlend ? menuShare : 0.8;
+                const double cpuNeeded = st.perPictureMs / cpuShare * 1.0e6;
+                double needed = std::max(st.perPictureMs / cpuShare, d3d::gpuPictureMs() / gpuShare) * 1.0e6;
+                double capNs = 0.0; // (the caps' part of `needed`: no try goes under it)
                 // (TODO 161: the frame rate cap is the pictures' - with the fixed logic rate - so no closer than it)
                 if (const int cap = tf::port::pictureCap(); cap > 0)
-                    needed = std::max(needed, 1.0e9 / static_cast<double>(cap));
+                    capNs = 1.0e9 / static_cast<double>(cap), needed = std::max(needed, capNs);
                 // (TODO 266: VSync off - the presents at once - the menus' pictures are not tied to the screen's refresh: as
                 // many as the render thread and the GPU make, up to the frame rate cap; on a 60 Hz screen they were 60 at most)
                 const bool unpaced = flatBlend && tf::port::vsyncOff();
@@ -1693,9 +1708,78 @@ namespace nr
                 double pictureNs = unpaced ? std::max({needed, static_cast<double>(span) / 16.0, 1.0e6}) : std::max(refresh, needed);
                 if (!f.variableRefresh && !unpaced)
                 {
-                    const int want = std::max(1, static_cast<int>(std::ceil(pictureNs / refresh - 0.02)));
+                    int want = std::max(1, static_cast<int>(std::ceil(pictureNs / refresh - 0.02)));
                     const auto now = std::chrono::steady_clock::now();
-                    if (want > st.refreshes || (replay && st.probeForced && want < st.refreshes))
+                    // (TODO 266) The menus held at every other refresh by the graphics card's measured time: that time is
+                    // taken at the lower picture rate, where the card clocks down, so it can stay over its share for good
+                    // (a friend's RX 5600 XT: menus at 30 on a 60 Hz screen). As the levels' pictures do (above), one
+                    // refresh fewer between pictures is tried for 2 s now and then: kept when the card kept up meanwhile -
+                    // the render thread waited under 100 ms in all for a frame slot and the pictures' delay to the screen
+                    // did not grow by over a picture's spacing and 2 ms - and given up at once otherwise; tried again
+                    // after 4 s when kept (one more step), after 8, 16 ... 64 s when not. What a try kept holds until the
+                    // card falls behind (frame-slot waits over 150 ms in 2 s). Never closer than the frame rate cap or the
+                    // render thread's own time allow. TF_MENU_PROBE=0: no tries.
+                    bool flatForced = false;
+                    if (flatBlend)
+                    {
+                        // (the waits: 5% of a try's 2 s, and 150 ms in 2 s for "fell behind" - the levels' 20 and 30 ms are at
+                        // the menus' own noise: measured 20 to 23 ms in 2 s on a GTX 1080 that needs 1 ms a menu picture; a card
+                        // that cannot keep a refresh waits for 15% of the time and more)
+                        constexpr double kFlatWaitMs = 100.0, kFlatBehindMs = 150.0;
+                        static const bool probeOff = std::getenv("TF_MENU_PROBE") && *std::getenv("TF_MENU_PROBE") == '0';
+                        const auto fits = [&](int refreshes)
+                        { return refreshes >= 1 && refresh * refreshes >= std::max(cpuNeeded, capNs) * 0.98; };
+                        if (now - st.flatWaitSince > std::chrono::seconds(2))
+                        {
+                            if (d3d::slotWaitMs() - st.flatWaitMark > kFlatBehindMs && st.flatProven > 0 && !st.flatProbing)
+                            {
+                                std::fprintf(stderr, "[tf] menus: the graphics card fell behind at a picture every %d refresh(es) - back to its measured time\n",
+                                             st.flatProven);
+                                st.flatProven = 0;
+                                st.flatBackoff = std::min(64.0, st.flatBackoff * 2.0);
+                                st.flatNextProbe = now + std::chrono::milliseconds(static_cast<int64_t>(st.flatBackoff * 1000.0));
+                            }
+                            st.flatWaitMark = d3d::slotWaitMs();
+                            st.flatWaitSince = now;
+                        }
+                        if (st.flatProbing)
+                        {
+                            const double waited = d3d::slotWaitMs() - st.flatProbeWait, later = d3d::pacerDelayMs() - st.flatProbeDelay;
+                            const double laterAllowed = refresh * st.flatProbeRefreshes / 1.0e6 + 2.0;
+                            if (waited > kFlatWaitMs || later > laterAllowed || now >= st.flatProbeUntil)
+                            {
+                                st.flatProbing = false;
+                                const bool kept = waited <= kFlatWaitMs && later <= laterAllowed;
+                                if (kept)
+                                    st.flatProven = st.flatProbeRefreshes;
+                                st.flatBackoff = kept ? 4.0 : std::min(64.0, st.flatBackoff * 2.0);
+                                st.flatNextProbe = now + std::chrono::milliseconds(static_cast<int64_t>(st.flatBackoff * 1000.0));
+                                static int told = 0;
+                                if (told < 20)
+                                {
+                                    ++told;
+                                    std::fprintf(stderr, "[tf] menus: a picture every %d refresh(es) tried - %s (the graphics card %.2f ms a picture; waited %.0f ms, delay %+.1f ms)\n",
+                                                 st.flatProbeRefreshes, kept ? "kept" : "given up", d3d::gpuPictureMs(), waited, later);
+                                }
+                            }
+                        }
+                        else if (!probeOff && want > 1 && st.refreshes > 1 && fits(std::min(want, st.refreshes) - 1) &&
+                                 (st.flatProven == 0 || st.flatProven > std::min(want, st.refreshes) - 1) &&
+                                 st.flatNextProbe.time_since_epoch().count() != 0 && now >= st.flatNextProbe)
+                        {
+                            st.flatProbing = true;
+                            st.flatProbeRefreshes = std::min(want, st.refreshes) - 1;
+                            st.flatProbeWait = d3d::slotWaitMs();
+                            st.flatProbeDelay = d3d::pacerDelayMs();
+                            st.flatProbeUntil = now + std::chrono::seconds(2);
+                        }
+                        if (st.flatNextProbe.time_since_epoch().count() == 0)
+                            st.flatNextProbe = now + std::chrono::seconds(4); // (not in the menus' first seconds)
+                        const int floor = st.flatProbing ? st.flatProbeRefreshes : st.flatProven;
+                        if (floor > 0 && fits(floor) && want > floor)
+                            want = floor, flatForced = true;
+                    }
+                    if (want > st.refreshes || ((flatForced || (replay && st.probeForced)) && want < st.refreshes))
                         st.refreshes = want, st.roomSince = now;
                     // (with one recording, a count the GPU was proven to keep up with is exact: no margin under it - with 15%
                     // the RX 5700 XT stayed at 90 pictures where it had kept up with 180, 2026-10-30)
@@ -1704,6 +1788,21 @@ namespace nr
                     else if (now - st.roomSince > std::chrono::seconds(2))
                         st.refreshes = want, st.roomSince = now;
                     pictureNs = refresh * st.refreshes;
+                    // (TODO 266: a friend's menus at 30 on a 60 Hz screen, not reproduced here. In every log, each time the
+                    // menus' pictures change how many refreshes apart they are, with what set it: his log then tells whether
+                    // his graphics card's or render thread's time a picture is what halves them. At most 20 lines a run.)
+                    if (flatBlend)
+                    {
+                        static int toldRefreshes = 0, lines = 0;
+                        if (st.refreshes != toldRefreshes && lines < 20)
+                        {
+                            ++lines;
+                            toldRefreshes = st.refreshes;
+                            std::fprintf(stderr, "[tf] menus: a picture every %d refresh(es) of %.2f ms (the render thread needs %.2f ms a picture, "
+                                         "the graphics card %.2f; a picture may take 90%% of the thread's time and %.0f%% of the card's)\n",
+                                         st.refreshes, refresh / 1.0e6, st.perPictureMs, d3d::gpuPictureMs(), gpuShare * 100.0);
+                        }
+                    }
                 }
                 pictureNs = std::min(pictureNs, static_cast<double>(span));
                 if (!(pictureNs > 0.0)) // (never a period of 0 or NaN: the loop below would not end)
@@ -2186,6 +2285,7 @@ namespace nr
 #if defined(_WIN32)
             SetThreadDescription(GetCurrentThread(), L"NativeRead");
 #endif
+            ps2_thread_placement::place(ps2_thread_placement::Role::RenderRead); // (PS2X_THREAD_PLACEMENT)
             for (;;)
             {
                 Job job;
@@ -2224,6 +2324,7 @@ namespace nr
             // (Named for debuggers and the profiler's TF_PROFILE_THREAD=NativeRender.)
             SetThreadDescription(GetCurrentThread(), L"NativeRender");
 #endif
+            ps2_thread_placement::place(ps2_thread_placement::Role::Render); // (PS2X_THREAD_PLACEMENT)
             static const uint64_t test = std::getenv("TF_DROP_TEST") ? std::strtoull(std::getenv("TF_DROP_TEST"), nullptr, 10) : 0u;
             uint64_t testCount = 0;
             int64_t lastShownDue = 0;

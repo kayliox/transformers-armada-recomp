@@ -153,6 +153,9 @@ namespace nr
     std::filesystem::path hdTextureFolder();
     // (F1, "Sharp text") Whether the sharp font atlases are there (crisp_fonts	ext_ps5 or the others).
     bool crispFontsFound();
+    // (TODO 259) Why the HD set is not used although it is there: its marker says it was set aside (made on a graphics
+    // card whose HD images come out broken). "" when it is not set aside. Reads the marker: not for every frame.
+    std::string hdSetAside();
     // The large images' loading since the last call (cache hits, PNGs decoded, compression time...): a profile line.
     std::string largeImageStats();
 

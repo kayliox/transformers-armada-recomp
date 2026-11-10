@@ -1,0 +1,59 @@
+Subject: [PATCH] ARM / non-Windows: the runtime compiles (two SSE includes, one string)
+
+Found by compiling every ps2xRuntime and ps2xIOP source for aarch64 with USE_SSE2NEON (the ARM build's settings):
+everything compiled but three GS files and the settings file.
+
+- gs_native_mesh.h and gs_frontend.cpp included <smmintrin.h> (and <xmmintrin.h>) directly, which ARM compilers do
+  not have: they now take sse2neon.h with USE_SSE2NEON, as ps2_memory.h, ps2_runtime.h and the others already do.
+  x86 builds include exactly what they did.
+- ps2_settings.cpp, outside Windows, built a std::string from a char * and a const char * (no such constructor:
+  a compile error on GCC and Clang alike, macOS included); now from the pointer and the length.
+
+No change on Windows.
+
+diff --git a/ps2xRuntime/include/runtime/gs/gs_native_mesh.h b/ps2xRuntime/include/runtime/gs/gs_native_mesh.h
+index ee7d839..2abc5a5 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_native_mesh.h
++++ b/ps2xRuntime/include/runtime/gs/gs_native_mesh.h
+@@ -4,7 +4,11 @@
+ #include "runtime/gs/gs_types.h"
+ #include <cstdint>
+ #include <cstring>
++#if defined(USE_SSE2NEON)
++#include "sse2neon.h" // (ARM)
++#else
+ #include <smmintrin.h>
++#endif
+ 
+ // A batch a game draws natively, sent over PATH1 in place of the packet its VU1 routine would
+ // send (the renderer of our own, stage 2: docs/RENDERER.md). It reaches the GS front end where
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 3d21f91..b6f34fe 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -13,8 +13,12 @@
+ #include <array>
+ #include <atomic>
+ #include <chrono>
++#if defined(USE_SSE2NEON)
++#include "sse2neon.h" // (ARM)
++#else
+ #include <xmmintrin.h>
+ #include <smmintrin.h>
++#endif
+ #include <algorithm>
+ #include <cstdlib>
+ #include <cmath>
+diff --git a/ps2xRuntime/src/lib/ps2_settings.cpp b/ps2xRuntime/src/lib/ps2_settings.cpp
+index 297aeaf..99fbcb6 100644
+--- a/ps2xRuntime/src/lib/ps2_settings.cpp
++++ b/ps2xRuntime/src/lib/ps2_settings.cpp
+@@ -107,7 +107,7 @@ namespace ps2_settings
+             for (char **p = environ; p && *p; ++p)
+             {
+                 if (const char *equals = std::strchr(*p, '='))
+-                    g_launch.insert(std::string(*p, equals));
++                    g_launch.insert(std::string(*p, static_cast<size_t>(equals - *p)));
+             }
+ #endif
+         }

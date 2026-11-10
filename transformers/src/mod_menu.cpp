@@ -1213,6 +1213,7 @@ namespace mod_menu
             Mods,
             Other,
             About,
+            Quit, // (TODO 277)
         };
         struct PageInfo
         {
@@ -1223,7 +1224,8 @@ namespace mod_menu
         // features, the unlocks and the cheats on one page under headings.)
         const PageInfo kPages[] = {{Page::Display, "Display"}, {Page::Graphics, "Graphics"}, {Page::Controls, "Controls"},
                                    {Page::Sound, "Sound"},     {Page::Gameplay, "Gameplay"}, {Page::Mods, "Mods & cheats"},
-                                   {Page::Saves, "Saves"},     {Page::Other, "Debug"},      {Page::About, "About"}};
+                                   {Page::Saves, "Saves"},     {Page::Other, "Debug"},      {Page::About, "About"},
+                                   {Page::Quit, "Quit game"}}; // (TODO 277: the last one, at the bottom of the list)
         int g_page = 0;
 
         using SettingRow = ps2_settings::detail::Row;
@@ -1401,6 +1403,8 @@ namespace mod_menu
             {"PS2X_GAMEPAD_BACKEND", "Controller support", "Others only leaves a Sony pad to Steam Input."},
             {"PS2X_STICK_RESPONSE", "Stick response", "Modern: a light touch walks, a third of the stick runs. Off: as before."},
             {"PS2X_STICK_VEHICLE_MODE", "Car steering", "Original: the car steers as before. Tuned: gentler near the centre."},
+            {"PS2X_STICK_LEFT_DEADZONE", "Left stick dead zone", "How far the left stick must move before the game sees it. Raise it if the robot walks or a menu scrolls on its own."},
+            {"PS2X_STICK_RIGHT_DEADZONE", "Right stick dead zone", "How far the right stick must move before the game sees it. Raise it if the view turns on its own."},
             {"PS2X_STICK_LEFT_LIFT", "Left stick lift", "How much a light touch of the left stick moves the robot."},
             {"PS2X_STICK_LEFT_SENSITIVITY", "Left stick sensitivity", "Higher: running starts earlier on the stick."},
             {"PS2X_STICK_RIGHT_LIFT", "Right stick lift", "Makes small camera moves respond."},
@@ -1410,6 +1414,7 @@ namespace mod_menu
             {"TF_NATIVE_SOUND", "Sound engine", "Native or the emulated PS2 sound chip."},
             {"TF_CFG_showHUD", "HUD", "Show the in-game HUD."},
             {"TF_START_SCREENS", "Start-up", "What shows when the game starts."},
+            {"PS2X_THREAD_PLACEMENT", "CPU thread placement", "Auto: the busiest threads each get a core, the ones that share work on cores that share a cache. Can steady the frame rate on 6+ core CPUs, Ryzen especially. Off: Windows decides. Takes a restart."},
         };
         const Words *wordsFor(const std::string &key)
         {
@@ -1705,6 +1710,7 @@ namespace mod_menu
             "TF_TERRAIN_DETAIL", "TF_FOREST_ADAPTIVE", "TF_FOREST_FULL_DETAIL", "TF_ENEMY_DETAIL", "TF_NATIVE_AA", "PS2X_GPU_AA", "PS2X_GPU_MSAA",
             "TF_NATIVE_SSAA", "TF_NATIVE_QUALITY", "TF_SHARP_TEXTURES", "PS2X_TEXTURE_PACK", "PS2X_GPU_ANISOTROPY", "TF_HIRES",
             "PS2X_MOUSE_SENSITIVITY", "TF_MENU_MOUSE", "PS2X_SONYPAD_RUMBLE", "PS2X_SONYPAD_LIGHTBAR", "TF_LIGHTBAR_ALERTS", "TF_ADAPTIVE_TRIGGERS", "TF_TRIGGER_STRENGTH", "TF_PAD_SPEAKER", "TF_PAD_SPEAKER_VOLUME", "TF_PAD_SPEAKER_DELAY", "PS2X_GAMEPAD_BACKEND",
+            "PS2X_STICK_LEFT_DEADZONE", "PS2X_STICK_RIGHT_DEADZONE",
             "PS2X_STICK_RESPONSE", "PS2X_STICK_VEHICLE_MODE", "PS2X_STICK_LEFT_LIFT", "PS2X_STICK_LEFT_SENSITIVITY",
             "PS2X_STICK_RIGHT_LIFT", "PS2X_STICK_VEHICLE_LIFT", "PS2X_STICK_VEHICLE_RESPONSE",
             "TF_CAR_KEYS", "PS2X_AUDIO", "PS2X_AUDIO_VOLUME", "TF_NATIVE_SOUND", "TF_CFG_showHUD", "TF_START_SCREENS",
@@ -1872,6 +1878,8 @@ namespace mod_menu
             keyRow("TF_PAD_SPEAKER");
             keyRow("TF_PAD_SPEAKER_VOLUME");
             keyRow("TF_PAD_SPEAKER_DELAY");
+            keyRow("PS2X_STICK_LEFT_DEADZONE");
+            keyRow("PS2X_STICK_RIGHT_DEADZONE");
             keyRow("PS2X_STICK_RESPONSE");
             keyRow("PS2X_STICK_VEHICLE_MODE");
             if (advanced("controls-pad"))
@@ -2003,6 +2011,49 @@ namespace mod_menu
 #endif
         }
 
+        // (TODO 277) Quit game: out of the game to Windows, asked twice (the page, then "Yes, quit"). The same clean stop
+        // as closing the window (PS2Runtime::requestStop: the main loop ends, the game's thread is joined, the files it
+        // has open are closed); the settings are written the moment they change, the memory card when the game saves.
+        // TF_QUIT_BUTTON_AT=<tick> (tests): "Yes, quit" pressed at that VBlank, as the button does it.
+        uint64_t g_quitAskedFrame = 0u, g_quitPageFrame = 0u;
+        void quitNow(PS2Runtime &runtime)
+        {
+            std::fprintf(stderr, "[mod menu] Quit game: the game is closed from the menu\n");
+            runtime.requestStop();
+        }
+        void pageQuit(PS2Runtime &runtime)
+        {
+            pageHeading("Quit game");
+            if (g_list)
+            {
+                listItem("Quit game (asks first)");
+                return;
+            }
+            // (asked again each time the page is opened: the question does not wait behind another page)
+            static uint64_t frame = 0u;
+            ++frame;
+            if (g_quitPageFrame + 1u != frame)
+                g_quitAskedFrame = 0u;
+            g_quitPageFrame = frame;
+            ImGui::TextWrapped("Close the game and go back to Windows.");
+            ImGui::TextWrapped("Your settings are kept. What you did since the game last saved is lost: save first if you need to.");
+            ImGui::Dummy(ImVec2(0.0f, menu_style::textSize() * 0.6f));
+            if (g_quitAskedFrame == 0u)
+            {
+                if (menu_style::button("Quit game", true))
+                    g_quitAskedFrame = frame;
+            }
+            else
+            {
+                ImGui::TextWrapped("Quit now?");
+                if (menu_style::button("Yes, quit", true) && frame > g_quitAskedFrame + 10u) // (not by the same press held on)
+                    quitNow(runtime);
+                ImGui::SameLine();
+                if (menu_style::button("No, keep playing"))
+                    g_quitAskedFrame = 0u;
+            }
+        }
+
         void drawPage(Page page, PS2Runtime &runtime)
         {
             switch (page)
@@ -2030,6 +2081,9 @@ namespace mod_menu
                 break;
             case Page::Other:
                 pageOther();
+                break;
+            case Page::Quit:
+                pageQuit(runtime);
                 break;
             case Page::About:
                 // The version, the update check and updating (TODO 104: updates.h).
@@ -2072,6 +2126,8 @@ namespace mod_menu
                 case Page::Mods: pageMods(); break;
                 case Page::Other: pageOther(); break;
                 case Page::About: keyRow("TF_UPDATE_CHECK"); settingRows(Page::About); break;
+                case Page::Quit: listItem("Quit game (asks first)"); break;
+                default: break;
                 }
                 g_list = nullptr;
                 std::fprintf(stderr, "[mod menu] tab \"%s\":%s\n", p.name, line.c_str());
@@ -2393,6 +2449,13 @@ namespace mod_menu
                 {
                     g_page = i;
                     g_navLevel = 0;
+                }
+                // (TODO 277: the list is one entry longer - on a small window its last entries are below the edge: the
+                // chosen one is brought into view when it changes, by the pad or a test's first page)
+                if (static int inView = -1; i == g_page && inView != g_page)
+                {
+                    inView = g_page;
+                    ImGui::SetScrollHereY(0.5f);
                 }
                 if (g_navPad && g_navLevel == 0 && i == g_page) // (the pad's place among the tabs)
                     ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), colour("blue"), 3.0f, 0, 2.0f);
@@ -2810,6 +2873,17 @@ namespace mod_menu
             {
                 opened = true;
                 g_open = true;
+            }
+        }
+        // TF_QUIT_BUTTON_AT=<vblank> (tests, TODO 277): the Quit game page's "Yes, quit" at that VBlank.
+        if (static const unsigned long long quitAt = std::getenv("TF_QUIT_BUTTON_AT") ? std::strtoull(std::getenv("TF_QUIT_BUTTON_AT"), nullptr, 10) : 0ull;
+            quitAt != 0ull)
+        {
+            static bool done = false;
+            if (!done && runtime.eeScheduler().currentVSyncTick() >= quitAt)
+            {
+                done = true;
+                quitNow(runtime);
             }
         }
         if (!g_open)

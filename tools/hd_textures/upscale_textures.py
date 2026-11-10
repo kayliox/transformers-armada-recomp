@@ -625,7 +625,10 @@ def parse_gpus(err):
 
 
 def probe_once(exe, jobs, workdir, model, tile, gpu):
-    """The probe textures upscaled once this way: (good, broken, made any output, upscaler log)."""
+    """The probe textures upscaled once this way: (good, broken, made any output, upscaler log, missing).
+    broken = images the upscaler wrote that fail the image checks. missing = images it did not write at all (it
+    crashed, ran out of video memory, was stopped): that says nothing about what the card's images look like
+    (TODO 282), so it is counted apart."""
     shutil.rmtree(workdir, ignore_errors=True)
     in_dir, out_dir = workdir / "in", workdir / "out"
     in_dir.mkdir(parents=True)
@@ -633,34 +636,57 @@ def probe_once(exe, jobs, workdir, model, tile, gpu):
     for j in jobs:
         stage_job(j, in_dir)
     _rc, err, _ = run_binary(exe, in_dir, out_dir, model, tile, gpu)
-    good = bad = 0
+    force = os.environ.get("TF_HD_PROBE_FORCE", "")  # (tests: "broken" / "missing" - every probe image comes out so)
+    good = bad = missing = 0
     made = False
     for j in jobs:
         p = out_dir / f"{j.sha1}.png"
-        if not p.is_file():
-            bad += 1
+        if not p.is_file() or force == "missing":
+            missing += 1
             continue
         made = True
-        with Image.open(p) as im:
-            img = im.convert("RGBA")
-        bad, good = (bad + 1, good) if judge_output(img, j.srcs[0].path)[2] else (bad, good + 1)
+        try:
+            with Image.open(p) as im:
+                img = im.convert("RGBA")
+        except Exception:  # noqa: BLE001  (half written: the upscaler ended while writing it)
+            missing += 1
+            continue
+        why = "forced by TF_HD_PROBE_FORCE" if force == "broken" else judge_output(img, j.srcs[0].path)[2]
+        if why:
+            bad += 1
+            print(f"    {j.srcs[0].relpath}: {why}", flush=True)
+        else:
+            good += 1
     shutil.rmtree(workdir, ignore_errors=True)
-    return good, bad, made, err
+    return good, bad, made, err, missing
 
 
 def probe_card(exe, jobs, workdir, tile, gpu, skip=()):
     """(setup, card names, made any output): setup = None (the probe images are fine as the run is set, or there are
-    none to try), a dict {model, tile, gpu, what} (a safer way that gives good images), or False (no way does)."""
+    none to try), a dict {model, tile, gpu, what} (a safer way that gives good images), False (every way wrote
+    images that fail the checks), or UNKNOWN (TODO 282: no way gave good images, but at least one of them did not
+    write its images at all - the upscaler crashed or had no video memory - so the card is not known to be bad)."""
     probes = pick_probe_jobs(jobs)
     if not probes:
         return None, {}, False
     model = probes[0].model
-    good, bad, made, err = probe_once(exe, probes, workdir, model, tile, gpu)
+
+    def fine(bad):
+        """A way's images are good: fewer than half of the test images broken. (TODO 282: one broken of four says
+        that image is a hard one - each image is checked again when it is made - not that the card is bad.)"""
+        return 2 * bad < len(probes)
+
+    good, bad, made, err, missing = probe_once(exe, probes, workdir, model, tile, gpu)
     gpus = parse_gpus(err)
-    if bad == 0 and "plain" not in skip:
+    if fine(bad) and missing == 0 and "plain" not in skip:
         return None, gpus, made
-    print(f"note: the upscaler's images on this graphics card ({gpus.get(gpu or 0, 'unknown')}) come out broken "
-          f"({bad} of {len(probes)} tried): trying safer ways", flush=True)
+    unknown = fine(bad)  # (a way whose images are not broken, yet it did not write them all)
+    print(f"note: the upscaler's test images on this graphics card ({gpus.get(gpu or 0, 'unknown')}): "
+          f"{bad} broken, {missing} not written, of {len(probes)} tried: trying safer ways", flush=True)
+    if missing:
+        tail = [ln.strip() for ln in err.splitlines() if ln.strip() and "%" not in ln][-4:]
+        for ln in tail:
+            print(f"    upscaler: {ln[:200]}", flush=True)
     ways = [{"model": model, "tile": 32, "gpu": gpu, "what": "tile 32"}]
     for g, name in sorted(gpus.items()):
         if g != (gpu or 0):
@@ -671,17 +697,130 @@ def probe_card(exe, jobs, workdir, tile, gpu, skip=()):
     for w in ways:
         if w["what"] in skip:
             continue
-        good, bad, m, _ = probe_once(exe, probes, workdir, w["model"], w["tile"], w["gpu"])
+        good, bad, m, _, missing = probe_once(exe, probes, workdir, w["model"], w["tile"], w["gpu"])
         made = made or m
-        print(f"  {w['what']}: {good} good, {bad} broken", flush=True)
-        if bad == 0:
+        print(f"  {w['what']}: {good} good, {bad} broken, {missing} not written", flush=True)
+        if fine(bad) and missing == 0:
             print(f"note: the rest is made with {w['what']}", flush=True)
             return w, gpus, made
+        unknown = unknown or fine(bad)
+    if unknown:
+        print("note: the upscaler did not write its test images in at least one way (it crashed or ran out of video "
+              "memory): this says nothing about the card's images. Nothing is decided from it.", flush=True)
+        return UNKNOWN, gpus, made
     return False, gpus, made
+
+
+UNKNOWN = "unknown"  # (probe_card: no verdict)
 
 
 class BadColours(Exception):
     pass
+
+
+# ---- Which graphics card made the set (TODO 259) ----
+# A player's set held 1,659 images made on a GTX 1660 SUPER before the maker tried the card first; later the card
+# test failed ("broken images in every way"), nothing more was made, and the old images stayed in use: wrong pictures
+# on floors and riverbeds. The checks catch most broken images, not all. So the set says which card made it:
+# upscaled/.made_on.json = {"cards": [{"name", "driver", "result": "good" | "broken", "when"}], "set_aside": bool,
+# "why": text}. The file is inside the set's folder, so it goes with a set copied to another PC.
+#  - a card that passes the test (or a safer way on it does) is written down as good;
+#  - a card that fails is written down as broken. If the set has images and no card is written down as good, the
+#    set's OWN images decide (TODO 282: a player's finished, good set of 1,911 images was set aside on an RX 5600 XT
+#    by four small test images alone): every image is checked (check_set). Only when many of them are broken
+#    (ASIDE_SHARE of the set, at least ASIDE_MIN) is the set set aside ("set_aside": true): the game draws its own
+#    textures and says why (F1). Nothing is deleted. Otherwise the set stays in use, the few broken ones removed.
+#  - a set with a good card written down stays in use on a PC whose own card fails (made on a good card, or copied);
+#  - a set aside set comes back when a later run's card test passes (a new driver): every image is checked again
+#    first (check_set), the broken ones are made again.
+# A finished set with no marker gets one on the next run: a few textures are tried on the card for it.
+MARKER_NAME = ".made_on.json"
+ASIDE_SHARE = 0.05  # (of the set's checked images broken: the whole set is not trusted)
+ASIDE_MIN = 25
+
+
+def load_marker(out_root):
+    try:
+        m = json.loads((out_root / MARKER_NAME).read_text(encoding="utf-8"))
+        if isinstance(m, dict) and isinstance(m.get("cards", []), list):
+            m.setdefault("cards", [])
+            return m
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def save_marker(out_root, marker):
+    out_root.mkdir(parents=True, exist_ok=True)
+    tmp = out_root / (MARKER_NAME + ".tmp")
+    tmp.write_text(json.dumps(marker, indent=1), encoding="utf-8")
+    os.replace(tmp, out_root / MARKER_NAME)
+
+
+def card_driver(name):
+    """The graphics driver's version for that card, as Windows has it ("" when it cannot be told)."""
+    if os.name != "nt" or not name:
+        return ""
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command",
+                            "Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name + '|' + $_.DriverVersion }"],
+                           capture_output=True, text=True, timeout=20, creationflags=0x08000000)
+        best = ""
+        for ln in r.stdout.splitlines():
+            n, _, v = ln.partition("|")
+            n, v = n.strip(), v.strip()
+            if n and v and (n.lower() in name.lower() or name.lower() in n.lower()):
+                return v
+            best = best or v
+        return best if len(r.stdout.strip().splitlines()) == 1 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def set_is_sound(checked, broken):
+    """Whether a set's own images say it can be trusted: few of them broken."""
+    return broken < max(ASIDE_MIN, ASIDE_SHARE * checked)
+
+
+def marker_decision(marker, card_good, has_images, set_sound=True):
+    """What the card test's result means for the set: (the marker's "set_aside" from now on, whether a set that was
+    set aside is to be checked again and taken back). set_sound: what the set's own images say (set_is_sound), asked
+    for only when the card failed."""
+    was_aside = bool(marker and marker.get("set_aside"))
+    any_good = bool(marker) and any(c.get("result") == "good" for c in marker.get("cards", []))
+    if card_good:
+        return False, was_aside
+    return (has_images and not any_good and not set_sound), False
+
+
+def note_card(out_root, name, good, has_images, driver=None, set_sound=True, counts=None, write_card=True):
+    """The card test's result written into the set's marker. Returns (set aside now, to be checked again).
+    write_card False: the card is not written down (no verdict on it), only what the set's own images said."""
+    marker = load_marker(out_root)
+    aside, recheck = marker_decision(marker, good, has_images, set_sound)
+    marker = marker or {"cards": []}
+    name = name or "unknown"
+    if write_card:
+        driver = card_driver(name) if driver is None else driver
+        entry = {"name": name, "driver": driver, "result": "good" if good else "broken",
+                 "when": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        marker["cards"] = [c for c in marker["cards"] if not (c.get("name") == name and c.get("driver") == driver)] + [entry]
+    marker["set_aside"] = aside
+    if counts:
+        marker["checked"] = {"images": counts[0], "broken": counts[1],
+                             "when": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    if aside:
+        marker["why"] = (f"{counts[1]} of its {counts[0]} images are broken, and this graphics card's HD images come "
+                         f"out broken ({name})" if counts else
+                         f"made on a graphics card whose HD images come out broken ({name})")
+    else:
+        marker.pop("why", None)
+    save_marker(out_root, marker)
+    return aside, recheck
+
+
+def set_has_images(out_root):
+    return any(out_root.rglob("*.png")) if out_root.is_dir() else False
 
 
 def judge_output(out_rgba, src_path):
@@ -722,7 +861,80 @@ def judge_output(out_rgba, src_path):
         chroma_off, chroma_allowed = _chroma_off(small, src, mask)
         if chroma_off > chroma_allowed:
             why = f"colours shifted (red and blue against green off by {chroma_off:.1f}, at most {chroma_allowed:.1f})"
+        else:
+            # (TODO 259) Another picture altogether (a Deep Amazon riverbed that came out as a sci-fi floor): see _other_picture.
+            why = _other_picture(small, src, mask)
     return d, d_swapped, why
+
+
+PART_BLOCK = 16  # (texels of the source: a part of the image is judged in blocks of this size)
+
+
+def _other_picture(small, src, mask):
+    """Why the image is another picture than the source ("" when it is not): box-averaged down, a right upscale follows the
+    source texel by texel (brightness correlation: median 0.99 over a whole set). Low correlation with a structure of its
+    own means another picture; one that only smoothed a grainy texture away has little variation left and is right. A flat
+    source with a picture on it likewise. The same rule as the renderer's (nr_hires.cpp looksLikeGame).
+
+    And a part of it: the upscaler works in tiles, and a tile that comes out as something else (another image's, junk)
+    leaves the rest right, so the whole image still correlates. In blocks of 16 x 16 source texels (all of them drawn,
+    the source varied there by 8 or more): a block whose image has a structure of its own (variation at least half the
+    source's, and 4) that does not follow the source (correlation under 0.2). Two such blocks: a part is another picture.
+    Over a whole good set (1,911 images) and the raw upscales kept from before the colour match: none flagged. One
+    source tile (32 or 64 texels) replaced by another image's: 56 in 100 caught with the rules above (20 without)."""
+    a = small.convert("RGB").getdata()
+    b = src.convert("RGB").getdata()
+    m = mask.getdata() if mask is not None else None
+    w, h = src.size
+    B = PART_BLOCK
+    bw, bh = w // B, h // B
+    blocks = [[0, 0.0, 0.0, 0.0, 0.0, 0.0] for _ in range(bw * bh)] if (w >= 2 * B or h >= 2 * B) else None
+    n = 0
+    gl = ll = gl2 = ll2 = glll = 0.0
+    for i, (lc, gc) in enumerate(zip(a, b)):
+        if m is not None and m[i] == 0:
+            continue
+        gy = 0.299 * gc[0] + 0.587 * gc[1] + 0.114 * gc[2]
+        ly = 0.299 * lc[0] + 0.587 * lc[1] + 0.114 * lc[2]
+        gl += gy
+        ll += ly
+        gl2 += gy * gy
+        ll2 += ly * ly
+        glll += gy * ly
+        n += 1
+        if blocks is not None:
+            y, x = divmod(i, w)
+            by, bx = y // B, x // B
+            if by < bh and bx < bw:
+                k = blocks[by * bw + bx]
+                k[0] += 1
+                k[1] += gy
+                k[2] += ly
+                k[3] += gy * gy
+                k[4] += ly * ly
+                k[5] += gy * ly
+    if n < 16:
+        return ""
+    game_var = max(0.0, gl2 / n - (gl / n) ** 2) ** 0.5
+    large_var = max(0.0, ll2 / n - (ll / n) ** 2) ** 0.5
+    corr = (glll / n - (gl / n) * (ll / n)) / (game_var * large_var) if game_var > 0.0 and large_var > 0.0 else 0.0
+    if game_var >= 5.0:
+        other = corr < 0.3 and large_var >= 4.0 and large_var >= 0.25 * game_var
+    else:
+        other = large_var > game_var + 20.0
+    if other:
+        return f"another picture (brightness correlation {corr:.2f}, variation {large_var:.1f} against {game_var:.1f})"
+    bad = 0
+    for cnt, sg, sl, sg2, sl2, sgl in blocks or ():
+        if cnt != B * B:
+            continue
+        gv = max(0.0, sg2 / cnt - (sg / cnt) ** 2) ** 0.5
+        lv = max(0.0, sl2 / cnt - (sl / cnt) ** 2) ** 0.5
+        if gv < 8.0 or lv < 4.0 or lv < 0.5 * gv:
+            continue
+        if (sgl / cnt - (sg / cnt) * (sl / cnt)) / (gv * lv) < 0.2:
+            bad += 1
+    return f"a part of it is another picture ({bad} blocks of {B} x {B} texels do not follow the game's)" if bad >= 2 else ""
 
 
 def _chroma_off(small, src, mask):
@@ -861,7 +1073,7 @@ def _judge_file(args):
         return rel, None, None, str(e)
 
 
-def check_set(src_root, out_root, backup_root, status_path=None, lock=None):
+def check_set(src_root, out_root, backup_root, status_path=None, lock=None, counts=None):
     """(TODO 241) An existing set checked as the maker now checks each image: red and blue exchanged back in place
     (its colour-match original too, its ledger entry dropped so match_colour matches it again); a broken image (black,
     flat, junk) removed with its manifest record, so the next run makes it again. Returns (fixed, removed)."""
@@ -938,6 +1150,8 @@ def check_set(src_root, out_root, backup_root, status_path=None, lock=None):
     if (fixed or removed) and ledger_path.exists():
         ledger_path.write_text(json.dumps(ledger, indent=0, sort_keys=True), encoding="utf-8")
     print(f"check: {len(work)} images checked, {fixed} with red and blue exchanged back, {removed} broken (made again)")
+    if counts is not None:
+        counts[:] = [len(work), removed]
     return fixed, removed
 
 
@@ -1179,6 +1393,62 @@ def main():
     probed = [False]
     card_broken = [False]
     batch_bad = [False]
+    had_images = set_has_images(args.out)
+
+    def card_passed(name):
+        """(TODO 259) The card makes good images: written down; a set that was set aside is checked again and taken back."""
+        _aside, recheck = note_card(args.out, name, True, had_images)
+        if recheck:
+            print("note: this graphics card's images are good now. The HD textures that were set aside are checked "
+                  "again and used again; the broken ones are made again.", flush=True)
+            check_set(args.src, args.out, backup_root, status_path, lock)
+
+    def card_failed(name, verdict=True):
+        """(TODO 259, 282) The card's test images are broken (verdict False: the test gave no verdict, and the set is
+        set aside already). Written down; then the set's own images decide: a set no good card is known to have
+        made is checked image by image, and set aside only when many of them are broken."""
+        marker = load_marker(args.out)
+        any_good = bool(marker) and any(c.get("result") == "good" for c in marker.get("cards", []))
+        counts = None
+        if had_images and not any_good:
+            print("note: the HD textures already here are checked one by one, to see whether they can be trusted.", flush=True)
+            counts = []
+            check_set(args.src, args.out, backup_root, status_path, lock, counts=counts)
+        sound = set_is_sound(*counts) if counts else True
+        was_aside = bool(marker and marker.get("set_aside"))
+        aside, _ = note_card(args.out, name, False, had_images, set_sound=sound, counts=counts, write_card=verdict)
+        if aside:
+            print(f"note: {counts[1]} of the {counts[0]} HD textures already here are broken, and this graphics card's "
+                  f"({name or 'unknown'}) test images come out broken too. The set is set aside: the "
+                  f"game draws its own textures. Nothing is deleted. After a graphics driver update, F1 > Graphics > "
+                  f"Check HD textures tries the card again and takes them back if it is good.", flush=True)
+        elif counts:
+            print(f"note: the HD textures already here are good ({counts[0]} checked, {counts[1]} broken and removed): "
+                  f"they stay in use" + (", and are used again from the next start of the game." if was_aside else "."), flush=True)
+
+    # (TODO 259) A set with no marker and nothing left to make: a few textures tried on the card, once, so the set
+    # says which card it trusts. (TODO 282) A set that is set aside: tried again at every run, with or without
+    # textures left to make, and judged by its own images when the card's test is not good.
+    marker0 = load_marker(args.out)
+    if (had_images and args.exe.is_file()
+            and ((marker0 is None and not any(j.backend == "ncnn" for j in todo)) or (marker0 and marker0.get("set_aside")))):
+        ncnn_jobs = [j for j in jobs if j.backend == "ncnn"]
+        ncnn_jobs = [j for j in ncnn_jobs if id(j) not in {id(t) for t in todo}] or ncnn_jobs  # (not the ones left to make)
+        if ncnn_jobs:
+            got, gpus, made_any = probe_card(args.exe, ncnn_jobs, args.work / "probe", args.tile, args.gpu)
+            name = gpus.get(args.gpu or 0, next(iter(gpus.values()))) if gpus else ""
+            was_aside = bool(load_marker(args.out) and load_marker(args.out).get("set_aside"))
+            if made_any and got is not False and got != UNKNOWN:
+                card_passed(name)
+            elif made_any and got is False:
+                card_broken[0] = True
+                gpu_name[0] = name
+                card_failed(name)
+            elif was_aside:
+                # (TODO 282: no verdict on the card, and the set is set aside - by 0.4.7's test, which the four test
+                # images alone decided: the set's own images decide now)
+                card_failed(name, verdict=False)
+
     with open(args.out / MANIFEST_NAME, "a", encoding="utf-8") as mf:
 
         redo = []
@@ -1284,15 +1554,29 @@ def main():
                 probed[0] = True
                 batch_bad[0] = False
                 left = [j for b in batches[bi:] for j in b]
-                got, gpus, made_any = probe_card(args.exe, left, args.work / "probe", args.tile, args.gpu,
+                # (TODO 282) The card is tried with textures whose images were made and passed their checks before,
+                # when there are any - not with the ones left to make: on a finished set those are the few that
+                # the check just took out (the hard ones, broken in every way on every card), and 0.4.7 tried the
+                # card with exactly those: "1 of 4 broken" in every way, on good cards, and the whole set set aside.
+                left_ids = {id(j) for j in todo}
+                tried_with = [j for j in jobs if j.backend == "ncnn" and id(j) not in left_ids] or left
+                got, gpus, made_any = probe_card(args.exe, tried_with, args.work / "probe", args.tile, args.gpu,
                                                  skip=({"plain"} | tried) if again else ())
                 if gpus and not gpu_name[0]:
                     gpu_name[0] = gpus.get(args.gpu or 0, next(iter(gpus.values())))
-                if got:
+                if isinstance(got, dict):
                     setup[0] = got
                     tried.add(got["what"])
+                if got == UNKNOWN:
+                    # (no verdict: the run goes on as it is set, each image is checked as it is made; a set that
+                    # 0.4.7's test set aside is judged by its own images)
+                    if load_marker(args.out) and load_marker(args.out).get("set_aside"):
+                        card_failed(gpu_name[0], verdict=False)
+                elif got is not False and made_any:
+                    card_passed(gpu_name[0])
                 elif got is False and made_any:
                     card_broken[0] = True
+                    card_failed(gpu_name[0])
                     print(f"note: this graphics card ({gpu_name[0] or 'unknown'}) gives broken images in every way "
                           f"the upscaler has: no HD textures are made on it (the game's own are drawn). A newer "
                           f"graphics driver may fix it: then F1 > Graphics > Check HD textures tries "
@@ -1410,7 +1694,7 @@ def main():
 
     if card_broken[0]:
         write_status(status_path, state="card_broken", done=done_before + done, total=total, quality=args.quality,
-                     gpu=gpu_name[0])
+                     gpu=gpu_name[0], set_aside=1 if (load_marker(args.out) or {}).get("set_aside") else 0)
         print(f"upscaled {done}/{len(todo)} uniques: this graphics card gives broken images "
               f"({gpu_name[0] or 'unknown'})")
         sys.exit(CARD_BROKEN_EXIT)

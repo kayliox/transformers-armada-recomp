@@ -21,13 +21,13 @@ int main() {
 #if defined(__linux__)
     for(int sign:{-1,1}) {
         float x=0,y=sign*.092f,rx=.12f,ry=-.17f;
-        map(x,y,rx,ry,c,0,.2f,false,true);
+        map(x,y,rx,ry,c,0,.2f,false,false);
         check(x==0&&y==sign*.092f&&rx==.12f&&ry==-.17f&&axis(axisByte(y))==0,
               "menu keeps small resting drift below the guest deadzone");
         check(move(0,sign*.092f,c)==0,"gameplay ignores a 9% resting drift (Linux dead zone)");
         check(move(0,sign*.13f,c)>.5f,"gameplay walks just outside the Linux dead zone");
     }
-    c.inner=.05f; // (the checks below pin the Windows response)
+    c.leftDeadzone=c.rightDeadzone=.05f; // (the checks below pin the Windows response)
 #endif
     for(int i=0;i<3600;++i) {
         const float a=i*3.14159265358979323846f/1800.f;
@@ -84,7 +84,7 @@ int main() {
     for(int i=-100;i<=100;++i) {
         float x=i/100.f,y=.37f,rx=.2f,ry=-.1f;
         float a=x,b=y,d=rx,e=ry;
-        map(a,b,d,e,c,0,.2f);radial(x,y,c.leftLift,c.sensitivity,1.3f);radial(rx,ry,c.rightLift,1);
+        map(a,b,d,e,c,0,.2f);radial(x,y,c.leftLift,c.sensitivity,1.3f,c.leftDeadzone);radial(rx,ry,c.rightLift,1,1,c.rightDeadzone);
         check(a==x&&b==y&&d==rx&&e==ry,"robot endpoint exact");
         x=i/100.f;y=.37f;rx=.2f;ry=-.1f;
         Config tuned=c;tuned.vehicleOriginal=false;
@@ -143,6 +143,33 @@ int main() {
     check(blend(0,2,.2f)==1&&blend(1,3,.2f)==0,"transform 0.2 seconds endpoints");
     for(float r:{.051f,.07f,.1f,.25f,1.f}) {
         float v=vehicleAxis(r,c,.2f);std::printf("tuned car r=%.3f byte=%u guest=%.6f\n",r,axisByte(v),axis(axisByte(v)));
+    }
+    // (TODO 274) Dead zone settings, and a menu (play = false) getting the stick itself.
+    for(int i=0;i<360;++i) {
+        const float a=i*3.14159265358979323846f/180.f;
+        for(float r:{.06f,.12f,.19f}) {
+            float x=std::cos(a)*r,y=std::sin(a)*r,rx=y,ry=x;const float ox=x,oy=y;
+            map(x,y,rx,ry,c,0,.2f,false,false);
+            check(x==ox&&y==oy&&rx==oy&&ry==ox,"a menu gets the stick as the pad gives it (no lift)");
+            check(axis(axisByte(x))==0&&axis(axisByte(y))==0,"a resting stick under a fifth moves no menu");
+        }
+        Config wide=c;wide.leftDeadzone=.15f;wide.rightDeadzone=.25f;
+        float x=std::cos(a)*.14f,y=std::sin(a)*.14f,rx=std::cos(a)*.24f,ry=std::sin(a)*.24f;
+        map(x,y,rx,ry,wide,0,.2f);
+        check(x==0&&y==0&&rx==0&&ry==0,"inside a wider dead zone: nothing, in play");
+        x=std::cos(a)*.16f;y=std::sin(a)*.16f;rx=std::cos(a)*.26f;ry=std::sin(a)*.26f;
+        map(x,y,rx,ry,wide,0,.2f);
+        check(std::hypot(x,y)>.6f&&std::hypot(rx,ry)>.19f,"just outside a wider dead zone: the lift, in play");
+        check(move(std::cos(a),std::sin(a),wide)>.85f,"full tilt still runs with a wider dead zone");
+        for(int kind=0;kind<2;++kind)for(float w:{0.f,1.f}) {
+            x=std::cos(a)*.14f;y=std::sin(a)*.14f;rx=std::cos(a)*.24f;ry=std::sin(a)*.24f;
+            Config cfg=wide;cfg.enabled=kind==0; // (kind 0: the response on, in a menu; 1: the response off, in play)
+            map(x,y,rx,ry,cfg,w,.2f,false,kind==1);
+            check(x==0&&y==0&&rx==0&&ry==0,"a wider dead zone cuts in a menu and with the response off");
+        }
+        x=std::cos(a)*.14f;y=std::sin(a)*.14f;rx=std::cos(a)*.24f;ry=std::sin(a)*.24f;
+        map(x,y,rx,ry,wide,1,.2f);
+        check(x==0&&y==0&&rx==0&&ry==0,"a wider dead zone cuts the car's original axes");
     }
     std::printf("CHECKS %d FAILURES %d\n",checks,failures);return failures?1:0;
 }

@@ -26,6 +26,7 @@ namespace photo_mode
     bool active();
     // Photo mode on with its HUD hidden (game_config's HUD switch hides the game's HUD while this is true).
     bool hudHidden();
+    bool takeHudRestore(); // once, after a state saved in photo mode: taHUD's flag on again (TODO 269)
     // For the overlays (distance_meter's text): where the crosshair model was put this moment (world),
     // and a world point in the window's pixels as the game's camera shows it (pictureAspect: the
     // picture's shape in the window, ps2_host_display::displayAspect). False when there is none.

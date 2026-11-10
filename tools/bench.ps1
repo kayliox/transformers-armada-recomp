@@ -94,6 +94,9 @@ try {
     $vb = $rates | Measure-Object VBlanks -Average -Minimum
     "{0}: {1:F1} fps average ({2:F1}-{3:F1}), {4:F1} VBlanks/s average, lowest {5:F1}; {6} reports, {7:F0} s" -f `
         $Name, $fps.Average, $fps.Minimum, $fps.Maximum, $vb.Average, $vb.Minimum, $rates.Count, $watch.Elapsed.TotalSeconds
+    # The 1% low: the last report's, which covers the frames of the last 30 s (the whole run when it is shorter).
+    $low = Get-Content "runs\$Name.err" | Select-String "^\[tf\] fps .* 1% low ([\d.]+)" | Select-Object -Last 1
+    if ($low) { "{0}: {1:F1} fps 1% low" -f $Name, [double]$low.Matches[0].Groups[1].Value }
     if ($Profile -and (Test-Path "runs\profile.txt")) {
         Copy-Item "runs\profile.txt" "runs\profile_$Name.txt" -Force
         "profile: runs\profile_$Name.txt"

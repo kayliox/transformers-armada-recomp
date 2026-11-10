@@ -28,6 +28,7 @@ namespace nr
 {
     std::filesystem::path hdTextureFolder(); // (nr_hires.cpp)
     bool crispFontsFound();                  // (nr_hires.cpp)
+    std::string hdSetAside();                // (nr_hires.cpp, TODO 259)
 }
 
 namespace hd_progress
@@ -424,10 +425,16 @@ namespace hd_progress
         }
         setLine(s);
         // (TODO 242) A finished set made before the maker checked its images (black ones from a GTX 16-series card):
-        // checked once, in the window that carries on - the maker's own .images_checked_2 says it was.
+        // checked once, in the window that carries on - the maker's own .images_checked_3 says it was.
+#if defined(_WIN32)
         std::error_code ec;
         const bool unchecked = s.state == "done" && fs::exists(g_dir / "upscaled" / "upscale_manifest.jsonl", ec) &&
-                               !fs::exists(g_dir / ".images_checked_2", ec);
+                               !fs::exists(g_dir / ".images_checked_3", ec);
+#else
+        // (no window carries on here to check it: make_hd_textures.sh checks a set once when it runs. Watched, the
+        // finished set only read as news: "HD textures ready, restart" at every start)
+        const bool unchecked = false;
+#endif
         if (finished(s) && !unchecked)
             return; // (a finished set: nothing to do)
         std::fprintf(stderr, unchecked ? "[hd textures] checking the set's images once (%lld of %lld, %s)\n"
@@ -509,6 +516,19 @@ namespace hd_progress
 
     std::string line()
     {
+        // (TODO 259) A set that was set aside: said before everything else (asked every 2 s, the marker is a file).
+        {
+            static std::chrono::steady_clock::time_point at{};
+            static bool aside = false;
+            const auto now = std::chrono::steady_clock::now();
+            if (at == std::chrono::steady_clock::time_point{} || now - at > std::chrono::seconds(2))
+            {
+                at = now;
+                aside = !nr::hdSetAside().empty();
+            }
+            if (aside)
+                return "HD TEXTURES: NOT USED. THIS GRAPHICS CARD MAKES BROKEN HD IMAGES. AFTER A DRIVER UPDATE: CHECK HD TEXTURES";
+        }
         if (g_ready)
             return "HD TEXTURES READY: RESTART TO USE THEM";
         std::lock_guard<std::mutex> lock(g_mutex);
