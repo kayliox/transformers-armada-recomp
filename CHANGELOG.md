@@ -45,6 +45,8 @@
   Less work for the graphics card, the same picture on screen.
 - The game window no longer uploads an unused placeholder picture on every frame while the native renderer is on.
   On Linux and Steam Deck it did this 60–90 times a second, so this saves a little CPU work.
+- Linux and Steam Deck: "Finishing HD textures" no longer stays on screen after the HD set is finished, including
+  sets made before this fix.
 
 ## 0.4.6
 

@@ -108,4 +108,20 @@ else
 fi
 "$python" "$py/match_colour.py" --upscaled "$out/upscaled" --native "$converted"
 crisp_fonts
+# The upscaler stops at "upscaled"; only the whole pipeline can mark the set done.
+"$python" - "$out/upscale_status.json" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+path = Path(sys.argv[1])
+status = json.loads(path.read_text(encoding="utf-8"))
+status["state"] = "done"
+status["updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+tmp = path.with_name(path.name + ".tmp")
+tmp.write_text(json.dumps(status, indent=1), encoding="utf-8")
+os.replace(tmp, path)
+PY
 printf '\nDone. HD textures and fonts are in %s.\n' "$out"

@@ -95,6 +95,48 @@ namespace hd_progress
             return text.substr(at, end - at);
         }
 
+#if defined(__linux__)
+        // Older Linux makers finished the colours and fonts but left the status at "upscaled".
+        void finishLegacySet(const fs::path &file, Status &s, std::string &text)
+        {
+            if (s.state != "upscaled" || s.total <= 0 || s.done != s.total)
+                return;
+            const fs::path dir = file.parent_path();
+            std::error_code ec;
+            const auto upscaledAt = fs::last_write_time(file, ec);
+            if (ec)
+                return;
+            if (fs::file_size(dir / "upscaled_precolour" / "colour_gains.json", ec) == 0 || ec)
+                return;
+            const auto coloursAt = fs::last_write_time(dir / "upscaled_precolour" / "colour_gains.json", ec);
+            if (ec || coloursAt < upscaledAt)
+                return;
+            // Sharp fonts may already have been installed before the upscale.
+            if (fs::file_size(dir / "crisp_fonts" / "manifest.json", ec) == 0 || ec)
+                return;
+            // The colour ledger ends the offline match; the renderer's BC7 cache is not a finishing step.
+            const size_t at = text.find("\"upscaled\"", text.find("\"state\""));
+            if (at == std::string::npos)
+                return;
+            text.replace(at, sizeof("\"upscaled\"") - 1, "\"done\"");
+            fs::path tmp = file;
+            tmp += ".finished.tmp";
+            std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+            out << text;
+            out.close();
+            if (out)
+                fs::rename(tmp, file, ec);
+            if (!out || ec)
+            {
+                fs::remove(tmp, ec);
+                std::fprintf(stderr, "[hd textures] could not mark the finished Linux set done\n");
+                return;
+            }
+            s.state = "done";
+            std::fprintf(stderr, "[hd textures] the older Linux set's colours and fonts were already finished: marked done\n");
+        }
+#endif
+
         Status readStatus(const fs::path &file)
         {
             Status s;
@@ -103,11 +145,15 @@ namespace hd_progress
                 return s;
             std::stringstream ss;
             ss << in.rdbuf();
-            const std::string text = ss.str();
+            std::string text = ss.str();
             s.state = field(text, "state");
             s.done = std::atoll(field(text, "done").c_str());
             s.total = std::atoll(field(text, "total").c_str());
             s.ok = !s.state.empty();
+#if defined(__linux__)
+            in.close();
+            finishLegacySet(file, s, text);
+#endif
             return s;
         }
 

@@ -1,14 +1,16 @@
 #pragma once
 // The HD textures while they are still being made (TODO 219).
 //
-// tools\make_hd_textures.ps1 makes the HD set in batches, the textures seen first first, and keeps
-// hd_textures\upscale_status.json up to date (its state - working, paused, upscaled, done - and how many
-// of how many are made). The game can be played meanwhile:
-//  - While the game runs it holds hd_textures\.game_running (its process id inside; Windows deletes the
+// tools/make_hd_textures.ps1 (Windows) or tools/make_hd_textures.sh (Linux) makes the HD set and keeps
+// hd_textures/upscale_status.json up to date (its state - working, paused, upscaled, done - and how many
+// of how many are made). "done" follows colour matching and sharp fonts, not the renderer's BC7 cache.
+// Linux also repairs an older "upscaled" status when its colour ledger follows the upscale and sharp fonts are made.
+// The game can be played meanwhile:
+//  - On Windows, while the game runs it holds hd_textures\.game_running (its process id inside; Windows deletes the
 //    file when the game ends, a crash too). The upscale waits while the file is there - the two share the
 //    graphics card - unless hd_options.json says "while_playing": true (the setup's "Keep making HD textures
 //    while I play"): then it carries on at the graphics card's lowest priority.
-//  - A set left unfinished (the setup closed, the game started from Play.bat, its exe or Steam): at the start
+//  - On Windows, a set left unfinished (the setup closed, the game started from Play.bat, its exe or Steam): at the start
 //    the game opens a small minimized window that carries on with it (make_hd_textures.ps1 -Resume -GamePid) -
 //    unless one is making them already (hd_textures\.upscaling holds its process id). (TODO 267, the user's choice)
 //    It makes them only while the game is open, beside it at the graphics card's lowest priority (never waiting
