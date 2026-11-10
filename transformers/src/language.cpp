@@ -305,7 +305,9 @@ namespace language
         s.label = "Language";
         s.order = 1;
         s.help = "The game's text and voices. Auto follows Windows' display language (English if it is none of the "
-                 "five). Changes at once: the text on the next screen, the voices from the next line.";
+                 "five). Changes at once: the voices from the next line, the button bars now, most text on the next "
+                 "screen. The HQ's titles under its icons change only when the HQ is loaded again: for everything in "
+                 "one language, start the game again after a change.";
         s.choices = {{"auto", "Auto"}, {"en", "English"}, {"fr", "Fran\xC3\xA7" "ais"}, {"de", "Deutsch"},
                      {"es", "Espa\xC3\xB1ol"}, {"it", "Italiano"}};
         s.defaultValue = "auto";

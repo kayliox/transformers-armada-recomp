@@ -22,6 +22,7 @@ Something not working? See [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 - **Your own disc image of Transformers (USA)**, `SLUS-20668`, as an `.iso` file.
   You can make one from your own disc with a DVD drive and a tool such as ImgBurn.
   The European release, `SLES-52388`, works too, experimentally (see [The European disc](#the-european-disc)).
+  **Other languages need the European disc**: the USA disc has English only.
   The Japanese release does not work yet.
 
 The setup installs the rest: Git, Python and the Visual Studio C++ build tools. Windows may ask for permission.
@@ -247,8 +248,16 @@ Never share or upload these: they contain game data.
 Support for the European release (`SLES-52388`) is experimental: it plays, but it is played less than the USA disc.
 Please report what does not work.
 
-- **Language**: English, French, German, Spanish or Italian, text and voices: **F1 > Gameplay > Language**. Auto
-  follows your Windows language. It changes at once, also in a game you continue.
+- **Language (European disc only)**: English, French, German, Spanish or Italian, text and voices:
+  **F1 > Gameplay > Language**. Auto follows your Windows language. The USA disc has English only, and has no such
+  setting.
+
+  > **Changing the language while you play:** the voices and the button bar at the bottom of the screen change at
+  > once. Most menu text changes when its screen is shown again. **The HQ's titles under its big icons (Autobots,
+  > Options, Quit...) keep the old language until the HQ is loaded again** (after a mission), and so does the bar
+  > on **Extras > Movies**. The original game had no language menu: it chose its language once, at start-up.
+  > **For everything in one language, set it before you start, or close the game and start it again after
+  > changing it.**
 - **50 Hz or 60 Hz**: the game runs at the same speed in both, so by default it does not ask and starts in 50 Hz.
   To get the choice back, set **F1 > Gameplay > When the game starts** to **Everything**.
 - **Saves**: the European disc keeps its saves in its own folder on the memory card (`BESLES-52388 TRANSFM`).
