@@ -1367,10 +1367,29 @@ float4 smaaBlendPs(SmaaBlendOut i) : SV_Target
             UINT64 slotFence[kFrames] = {};
             std::vector<ID3D12Resource *> slotReleases[kFrames];
             std::vector<UINT> slotFreeSlots[kFrames];
-            ID3D12Resource *slotReadback[kFrames] = {};
-            D3D12_PLACED_SUBRESOURCE_FOOTPRINT slotFootprint[kFrames] = {};
-            UINT slotReadbackW[kFrames] = {}, slotReadbackH[kFrames] = {};
-            bool slotPublish[kFrames] = {};
+            // (N9: the CPU hand-over) The pictures' readbacks, apart from the frame slots: a picture the window
+            // still reads (or whose copy the GPU still makes) is not written into, so a slot coming round again
+            // costs no picture. They are also the window's queue: each published picture keeps its readback until
+            // the window takes it (oldest first - a newer publication never replaces one waiting), so a present
+            // delayed by a refresh costs no picture. Four: the frames in flight fill at most one (the frame before
+            // this one - the one before that is finished by beginSlot), and two presents' worth of pictures fit
+            // beside it even when the window misses a refresh.
+            static constexpr int kHandovers = 4;
+            struct Handover
+            {
+                ID3D12Resource *resource = nullptr; // (readback: mapped once, read by the window where the GPU wrote it)
+                void *mapped = nullptr;
+                D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+                UINT w = 0, h = 0;
+                std::atomic<bool> held{false}; // (published and not given back: the window may read it - pictureShown)
+                bool filled = false;           // (its copy recorded, not published yet - render thread)
+                bool taken = false;            // (the window took it: its ack is coming - with g_published.mutex)
+                uint64_t serial = 0;           // (the publication it carries: oldest first - with g_published.mutex)
+                d3d::SharedPicture meta;       // (its tick, moment, ready time, turn and size - with g_published.mutex)
+            };
+            Handover handovers[kHandovers];
+            int handoverNext = 0;
+            int slotHandover[kFrames] = {-1, -1}; // (the readback the frame's picture is copied into)
             bool slotHas3D[kFrames] = {};
             uint64_t slotTick[kFrames] = {}; // (N9) the frame's VBlank and its moment (Frame::tick, dueNs), for the hand-over
             int64_t slotDueNs[kFrames] = {};
@@ -1439,11 +1458,12 @@ float4 smaaBlendPs(SmaaBlendOut i) : SV_Target
             ID3D12PipelineState *probePipeline = nullptr;
         } g;
 
-        // The latest picture, handed to the window's thread (nr_present.cpp).
+        // The latest picture, handed to the window's thread (nr_present.cpp). The CPU hand-over's pictures are in
+        // State::handovers (published ones stay there, oldest first, until the window takes them); this is only the
+        // serial and the moment of the newest, for the pacer's wait and its 100 ms rule.
         struct Published
         {
             std::mutex mutex;
-            std::vector<uint32_t> pixels;
             uint32_t width = 0, height = 0;
             uint64_t serial = 0;
             bool has3D = false;
@@ -1452,6 +1472,7 @@ float4 smaaBlendPs(SmaaBlendOut i) : SV_Target
             int64_t lastNs = 0;          // when the newest was
             uint32_t pending = 0u;       // (N9) shared textures given to the pacer, not handed over yet (pickShared leaves them)
         } g_published;
+        uint64_t g_handoverSkips = 0; // (N9: CPU pictures not read back - every readback the window's; a profile window)
         std::atomic<int> g_shareOn{0};    // the window: 0 not asked yet, 1 reads shared textures, -1 cannot
         std::atomic<int> g_sharedHeld{-1}; // the shared texture the window shows
         // (TODO 98) ... and the two it showed before it: the window's GL may still read them after it has moved on (its
@@ -3915,14 +3936,11 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
             }
         }
 
-        // A slot's readback of the picture, made (again) for the picture's size.
-        bool slotReadbackFor(UINT slot)
+        // (N9: the CPU hand-over) A readback the picture can be copied into and the window can upload from - mapped
+        // once, so the window reads the pixels where the GPU wrote them (no copy of the picture on the render side).
+        bool handoverMake(int i)
         {
-            if (g.slotReadback[slot] && g.slotReadbackW[slot] == g.width && g.slotReadbackH[slot] == g.height)
-                return true;
-            if (g.slotReadback[slot])
-                g.uploads.push_back(g.slotReadback[slot]); // (released once its last use is done)
-            g.slotReadback[slot] = nullptr;
+            State::Handover &ho = g.handovers[i];
             D3D12_RESOURCE_DESC td{};
             td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
             td.Width = g.width;
@@ -3932,15 +3950,71 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
             td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
             td.SampleDesc.Count = 1;
             UINT64 total = 0;
-            g.device->GetCopyableFootprints(&td, 0, 1, 0, &g.slotFootprint[slot], nullptr, nullptr, &total);
+            g.device->GetCopyableFootprints(&td, 0, 1, 0, &ho.fp, nullptr, nullptr, &total);
             const D3D12_HEAP_PROPERTIES back = heap(D3D12_HEAP_TYPE_READBACK);
             const D3D12_RESOURCE_DESC rb = bufferDesc(total);
             if (FAILED(g.device->CreateCommittedResource(&back, D3D12_HEAP_FLAG_NONE, &rb, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                         IID_PPV_ARGS(&g.slotReadback[slot]))))
+                                                         IID_PPV_ARGS(&ho.resource))))
                 return false;
-            g.slotReadbackW[slot] = g.width;
-            g.slotReadbackH[slot] = g.height;
+            void *p = nullptr;
+            if (FAILED(ho.resource->Map(0, nullptr, &p)))
+            {
+                release(ho.resource);
+                return false;
+            }
+            ho.mapped = p;
+            ho.w = g.width;
+            ho.h = g.height;
             return true;
+        }
+
+        // A readback made for the picture's size and marked as this frame's copy (render thread).
+        int handoverUse(int i)
+        {
+            State::Handover &ho = g.handovers[i];
+            if (ho.resource && (ho.w != g.width || ho.h != g.height))
+            {
+                // (the picture's size changed: freed here only once the window has let go of it)
+                ho.resource->Unmap(0, nullptr);
+                g.uploads.push_back(ho.resource); // (released once its last use is done)
+                ho.resource = nullptr;
+                ho.mapped = nullptr;
+            }
+            if (!ho.resource && !handoverMake(i))
+                return -1;
+            g.handoverNext = (i + 1) % State::kHandovers;
+            ho.filled = true;
+            return i;
+        }
+
+        // A readback for this frame's picture: a free one, else the oldest picture the window has not taken (the
+        // window is a whole ring behind - that one is let go of unseen, the newest picture here kept).
+        int handoverFor()
+        {
+            for (int k = 0; k < State::kHandovers; ++k)
+            {
+                const int i = (g.handoverNext + k) % State::kHandovers;
+                if (g.handovers[i].filled || g.handovers[i].held.load(std::memory_order_acquire))
+                    continue;
+                if (const int picked = handoverUse(i); picked >= 0)
+                    return picked;
+            }
+            int oldest = -1;
+            {
+                std::lock_guard<std::mutex> lock(g_published.mutex);
+                for (int i = 0; i < State::kHandovers; ++i)
+                {
+                    const State::Handover &ho = g.handovers[i];
+                    if (ho.filled || ho.taken || !ho.held.load(std::memory_order_relaxed))
+                        continue;
+                    if (oldest < 0 || ho.serial < g.handovers[oldest].serial)
+                        oldest = i;
+                }
+                if (oldest < 0)
+                    return -1; // (every readback is the window's - this picture is not read back: counted at the call)
+                g.handovers[oldest].held.store(false, std::memory_order_release); // (never to be shown: let go)
+            }
+            return handoverUse(oldest);
         }
 
         // A shared texture of the picture's size (made again when it changes: a new generation, which
@@ -4458,46 +4532,43 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
             }
             g.slotShared[slot] = -1;
             g.slotPaced[slot] = false;
-            if (g.slotPublish[slot] && g.slotReadback[slot])
+            if (const int readback = g.slotHandover[slot]; readback >= 0)
             {
-                const UINT w = g.slotReadbackW[slot], h = g.slotReadbackH[slot];
-                const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &fp = g.slotFootprint[slot];
-                void *p = nullptr;
-                const D3D12_RANGE all{0, static_cast<SIZE_T>(fp.Offset + static_cast<UINT64>(fp.Footprint.RowPitch) * (h - 1u) + w * 4u)}; // (the last row unpadded)
-                const HRESULT mapped = g.slotReadback[slot]->Map(0, &all, &p);
+                g.slotHandover[slot] = -1;
+                State::Handover &ho = g.handovers[readback];
+                ho.filled = false;
+                const int64_t readyNs =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
                 static int told = 3;
                 if (told > 0)
                 {
                     --told;
-                    std::fprintf(stderr, "[native render] picture %ux%u handed over from slot %u (map %08lx)\n", w, h, slot,
-                                 static_cast<unsigned long>(mapped));
+                    std::fprintf(stderr, "[native render] picture %ux%u handed over (readback %d)\n", ho.w, ho.h, readback);
                 }
-                if (SUCCEEDED(mapped))
                 {
-                    // Copied out (the readback is the next frame's) into a buffer of the game's side,
-                    // then swapped in under the lock: no copy is made while it is held.
-                    static std::vector<uint32_t> back;
-                    back.resize(static_cast<size_t>(w) * h);
-                    const uint8_t *src = static_cast<const uint8_t *>(p) + fp.Offset;
-                    if (fp.Footprint.RowPitch == w * 4u) // (rows without padding - 1280 wide, say: one copy)
-                        std::memcpy(back.data(), src, static_cast<size_t>(w) * h * 4u);
-                    else
-                        for (UINT y = 0; y < h; ++y)
-                            std::memcpy(back.data() + static_cast<size_t>(y) * w, src + static_cast<size_t>(y) * fp.Footprint.RowPitch, w * 4u);
-                    {
-                        std::lock_guard<std::mutex> lock(g_published.mutex);
-                        g_published.pixels.swap(back);
-                        g_published.shared.index = -1;
-                        g_published.has3D = g.slotHas3D[slot];
-                        g_published.width = w;
-                        g_published.height = h;
-                        ++g_published.serial;
-                    }
-                    const D3D12_RANGE written{0, 0};
-                    g.slotReadback[slot]->Unmap(0, &written);
+                    std::lock_guard<std::mutex> lock(g_published.mutex);
+                    // (it joins the queue at its newest end: earlier pictures keep their readbacks until the window
+                    //  takes them - a newer publication never replaces one that is waiting, so a present delayed by
+                    //  a refresh costs no picture)
+                    ho.meta = d3d::SharedPicture{};
+                    ho.meta.width = ho.w;
+                    ho.meta.height = ho.h;
+                    ho.meta.has3D = g.slotHas3D[slot];
+                    ho.meta.tick = g.slotTick[slot];
+                    ho.meta.dueNs = g.slotDueNs[slot];
+                    ho.meta.readyNs = readyNs;
+                    ho.meta.turnId = g.slotFence[slot];
+                    ho.serial = ++g_published.serial;
+                    ho.taken = false;
+                    ho.held.store(true, std::memory_order_release); // (from here the window may take and read it)
+                    g_published.shared.index = -1; // (no shared texture: latestShared must not hand this one out)
+                    g_published.has3D = g.slotHas3D[slot];
+                    g_published.width = ho.w;
+                    g_published.height = ho.h;
+                    g_published.lastNs = readyNs;
+                    g_published.cv.notify_all();
                 }
             }
-            g.slotPublish[slot] = false;
             stream::finish(slot);
             // (Many at once - a level's or the HQ's textures let go of when it ends, a thousand and more -
             // released on a thread of their own: each Release of a texture costs the driver a fraction
@@ -6104,19 +6175,26 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                         g.slotTick[g.slot] = in.tick;
                         g.slotDueNs[g.slot] = pic.dueNs;
                     }
-                    else if (last && g.live && g_shareOn.load() != 1 && !in.dropped && slotReadbackFor(g.slot))
+                    else if (last && g.live && g_shareOn.load() != 1 && !in.dropped)
                     {
-                        barrier(tail, g.colour, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
-                        D3D12_TEXTURE_COPY_LOCATION dst{}, src{};
-                        dst.pResource = g.slotReadback[g.slot];
-                        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-                        dst.PlacedFootprint = g.slotFootprint[g.slot];
-                        src.pResource = g.colour;
-                        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                        tail->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-                        barrier(tail, g.colour, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
-                        g.slotPublish[g.slot] = true;
-                        g.slotHas3D[g.slot] = in.has3D || in.shown2D; // (a menu shown natively: TODO 88)
+                        const int handover = handoverFor();
+                        g_handoverSkips += handover < 0 ? 1u : 0u; // (told in the profile window: pictures not read back)
+                        if (handover >= 0)
+                        {
+                            barrier(tail, g.colour, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                            D3D12_TEXTURE_COPY_LOCATION dst{}, src{};
+                            dst.pResource = g.handovers[handover].resource;
+                            dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                            dst.PlacedFootprint = g.handovers[handover].fp;
+                            src.pResource = g.colour;
+                            src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                            tail->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                            barrier(tail, g.colour, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                            g.slotHandover[g.slot] = handover;
+                            g.slotHas3D[g.slot] = in.has3D || in.shown2D; // (a menu shown natively: TODO 88)
+                            g.slotTick[g.slot] = in.tick;
+                            g.slotDueNs[g.slot] = pic.dueNs;
+                        }
                     }
                     if (last && !in.dropped && stream::wanted(in.tick) && stream::readbackFor(g.slot))
                     {
@@ -6856,11 +6934,12 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                              static_cast<unsigned long long>(largeImageBudget() == UINT64_MAX ? 0u : largeImageBudget() >> 20), largeImageCap(),
                              largeImageStats().c_str());
             }
-            std::fprintf(stderr, "[native render] profile: texture pool %zu heaps, %llu MB used, %llu placed, %llu not (committed); staging ring %llu uses, %llu overflows\n",
+            std::fprintf(stderr, "[native render] profile: texture pool %zu heaps, %llu MB used, %llu placed, %llu not (committed); staging ring %llu uses, %llu overflows; %llu pictures not read back (no readback free)\n",
                          pool::heaps.size(), static_cast<unsigned long long>(pool::usedBytes() >> 20), static_cast<unsigned long long>(pool::made),
                          static_cast<unsigned long long>(pool::fallbacks), static_cast<unsigned long long>(g_texRingUses),
-                         static_cast<unsigned long long>(g_texRingOverflows));
+                         static_cast<unsigned long long>(g_texRingOverflows), static_cast<unsigned long long>(g_handoverSkips));
             pool::made = pool::fallbacks = g_texRingUses = g_texRingOverflows = 0;
+            g_handoverSkips = 0;
         }
 
         // SMAA's two lookup textures copied into video memory, recorded into the frame's list once (both staging
@@ -7103,17 +7182,37 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
         g_aa.store(std::clamp(mode, 0, 2), std::memory_order_relaxed);
     }
 
-    bool latestPicture(std::vector<uint32_t> &pixels, uint32_t &width, uint32_t &height, uint64_t &serial, bool &has3D)
+    bool latestPicture(const uint8_t *&pixels, uint32_t &rowPitch, int &index, uint64_t &serial, d3d::SharedPicture &meta)
     {
         std::lock_guard<std::mutex> lock(g_published.mutex);
-        if (g_published.serial == serial || g_published.pixels.empty())
+        // (The oldest published picture the window has not taken - not the newest: one that arrived while the
+        // window was presenting waits its turn instead of being replaced, and each is shown exactly once.)
+        int oldest = -1;
+        for (int i = 0; i < State::kHandovers; ++i)
+        {
+            const State::Handover &ho = g.handovers[i];
+            if (ho.taken || ho.serial <= serial || !ho.held.load(std::memory_order_relaxed))
+                continue;
+            if (oldest < 0 || ho.serial < g.handovers[oldest].serial)
+                oldest = i;
+        }
+        if (oldest < 0)
             return false;
-        pixels.swap(g_published.pixels); // (swapped, not copied: the game's side refills the other)
-        has3D = g_published.has3D;
-        width = g_published.width;
-        height = g_published.height;
-        serial = g_published.serial;
+        State::Handover &ho = g.handovers[oldest];
+        pixels = static_cast<const uint8_t *>(ho.mapped) + ho.fp.Offset;
+        rowPitch = ho.fp.Footprint.RowPitch;
+        index = oldest;
+        meta = ho.meta;
+        serial = ho.serial;
+        ho.taken = true; // (pictureShown's ack is coming: the readback is not freed or drawn into under it)
         return true;
+    }
+
+    void pictureShown(int index)
+    {
+        if (index < 0 || index >= State::kHandovers)
+            return;
+        g.handovers[index].held.store(false, std::memory_order_release);
     }
 
     void setSharedPictures(bool on)
@@ -7386,10 +7485,11 @@ namespace nr
             double waitForFrameSlot() override { return d3d::waitForFrameSlot(); }
             void render(const Frame &frame, const std::string &shotPath) override { d3d::render(frame, shotPath); }
             void preUpload(const std::shared_ptr<const Texture> &texture) override { d3d::preUploadImpl(texture); }
-            bool latestPicture(std::vector<uint32_t> &pixels, uint32_t &width, uint32_t &height, uint64_t &serial, bool &has3D) override
+            bool latestPicture(const uint8_t *&pixels, uint32_t &rowPitch, int &index, uint64_t &serial, d3d::SharedPicture &meta) override
             {
-                return d3d::latestPicture(pixels, width, height, serial, has3D);
+                return d3d::latestPicture(pixels, rowPitch, index, serial, meta);
             }
+            void pictureShown(int index) override { d3d::pictureShown(index); }
             void setSharedPictures(bool on) override { d3d::setSharedPictures(on); }
             bool latestShared(d3d::SharedPicture &out, uint64_t &serial) override { return d3d::latestShared(out, serial); }
             void sharedHeld(int index) override { d3d::sharedHeld(index); }
