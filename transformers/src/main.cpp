@@ -15,6 +15,7 @@
 
 #include "port_ext.h"
 #include "hd_movies.h"
+#include "graphics_driver.h"
 #include "hd_progress.h"
 #include "mod_menu.h"
 #include "nr_backend.h"
@@ -291,6 +292,14 @@ namespace
 #endif
 }
 
+#if defined(_WIN32)
+// (User decision 2026-11-11, low-end HD) A laptop with built-in graphics AND an NVIDIA or AMD card: these two exports ask
+// the drivers for the card, so the game draws on it (DXGI's first adapter becomes it) instead of the built-in one -
+// and the low-end rule (graphics_driver.h) judges the card the game actually uses.
+extern "C" __declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
+extern "C" __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+#endif
+
 int main(int argc, char *argv[])
 {
 #if defined(__linux__)
@@ -359,6 +368,9 @@ int main(int argc, char *argv[])
     if (std::getenv("GAMESCOPE_WAYLAND_DISPLAY"))
         setenv("PS2X_FULLSCREEN", "1", 0);
 #endif
+    // (TODO 290) The graphics card and its driver in the log, and a warning when the driver is known to be too old.
+    graphics_driver::logOnce();
+    graphics_driver::showOnce();
     // (TODO 163) The renderer the settings choose by default: the native one (N1, the port's own - Emulated stays a
     // choice). Set before anything reads TF_RENDERER (the scale below, the native renderer's install, VU1's); a
     // settings.ini line or a variable already set wins.
@@ -408,6 +420,17 @@ int main(int argc, char *argv[])
         const char *renderer = std::getenv("TF_RENDERER");
         const char *scale = std::getenv("PS2X_GPU_SCALE");
         const char *keep = std::getenv("TF_NATIVE_GS_SCALE");
+        // (F1's Resolution row: with the native renderer the game is drawn at the screen's size, and this setting only
+        // sets the menus and movies - its Auto must not read as the picture's size, "Auto (2560 x 1344)" on a
+        // 3440x1440 screen confused a player, 2026-11-11.)
+        if (renderer && std::string(renderer) == "native" && !std::getenv("PS2X_GPU_SCALE_AUTO_LABEL"))
+        {
+#if defined(_WIN32)
+            _putenv_s("PS2X_GPU_SCALE_AUTO_LABEL", "Auto (the screen's size)");
+#else
+            setenv("PS2X_GPU_SCALE_AUTO_LABEL", "Auto (the screen's size)", 1);
+#endif
+        }
         if (renderer && std::string(renderer) == "native" && !std::getenv("TF_NATIVE_RENDER") && scale && *scale &&
             std::atoi(scale) > 4 && !(keep && std::string(keep) == "keep"))
         {

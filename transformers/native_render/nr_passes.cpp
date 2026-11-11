@@ -338,6 +338,16 @@ namespace nr
                 for (int q = 0; q < 3; ++q)
                     copy(p.p[12 + q], b[q]);
                 break;
+            case Routine::ElectricShock:
+                // (TODO 290) taShader_ElectricShock (image 83f1's 0x1ac0): each vertex pushed out by q0.z along its
+                // direction from q2 (the creature's centre), ST that direction's y, z plus q0.xy, the colour q1 as
+                // integers (FTOI0). The game moves q0.xy and draws q1's brightness anew every frame of the effect.
+                p.mode[0] = 21.0f;
+                p.mode[2] = 6.0f;
+                copy(p.p[0], b[1]);
+                copy(p.p[1], b[0]);
+                copy(p.p[2], b[2]);
+                break;
             case Routine::Sprites:
                 p.mode[3] = 1.0f;
                 copy(p.p[18], b[10]);

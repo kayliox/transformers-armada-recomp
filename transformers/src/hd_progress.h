@@ -29,6 +29,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace hd_progress
 {
@@ -49,12 +50,40 @@ namespace hd_progress
     // install's hd_textures\upscaled, or TF_HIRES_DIR) opened in Explorer. Returns a line to show under the button:
     // "" when it opened; "No texture pack yet" (its parent opened when that exists) when the folder is not there.
     std::string openTextureFolder();
-    // F1 > Graphics, "Make HD textures" / "Check HD textures" (makeLabel: Check once a set is done): starts the same
+    // F1 > Graphics, "Make HD textures" (makeHdTextures; makeLabel: "Verify HD textures" once a set is done): starts the same
     // small window the game starts for an unfinished set (make_hd_textures.ps1 -Resume: the whole step - the disc's
     // archives, the conversion, the fonts, the upscale - each part skipped when done), waiting while the game runs
     // unless "Keep making HD textures while I play" is on; the F1 line follows it. Returns a line for the menu.
+    // (TODO 281) "Verify HD textures" once a set is done: "Make HD textures" again when the card made it broken or the
+    // set is set aside (it tries the card again); "Verifying HD textures" while a verify runs.
     std::string makeLabel();
     std::string makeHdTextures();
+
+    // (TODO 281) Before a first make (no set, none begun): F1 shows what it costs and asks - "Make HD textures?" with
+    // Start (makeHdTextures) and Not now.
+    bool needsMakeCard();
+    struct MakeCost
+    {
+        double needGb = 0.0, freeGb = -1.0; // (free space on the game folder's drive; -1 unknown)
+        int minutesLo = 0, minutesHi = 0;   // (a whole set's time beside the game, for this kind of card)
+        std::string card;
+    };
+    MakeCost makeCost();
+    // "Verify HD textures" checks images without changing them; writes verify_report.json/.txt and its cache.
+    // Windows launches make_hd_textures.ps1 -Verify/-Remake; Linux returns .sh --verify/--remake for manual use.
+    // Remake clears the report's missing/broken entries, then makes those images again.
+    struct VerifyState
+    {
+        std::string state;            // "" none, "running", "done", "remaking", "stopped"
+        long long done = 0, total = 0; // (running)
+        int remake = 0;                // (done: images to make again)
+        bool intact = false;
+        std::string finished;          // (UTC, ISO)
+        std::vector<std::string> lines; // (done: the report in plain words)
+    };
+    VerifyState verifyState();
+    std::string verifyHdTextures();
+    std::string remakeBroken();
     // F1 > Display, "Sharp text": whether its fonts were made (hd_textures\crisp_fonts). Checked at most every 2 s.
     bool crispFontsFound();
 }

@@ -1,0 +1,20 @@
+Subject: [PATCH] Runtime: a game can name what the Resolution row's Auto means (PS2X_GPU_SCALE_AUTO_LABEL)
+
+With a renderer of its own that draws at the screen's size, "Auto (2560 x 1344)" (the emulated picture's size) misled.
+
+--- a/ps2xRuntime/src/lib/ps2_settings_panel.cpp
++++ b/ps2xRuntime/src/lib/ps2_settings_panel.cpp
+@@ -992,6 +992,13 @@
+             std::vector<Choice> list = choices();
+             int x = 0, y = 0;
+             ps2_gpu::scale(x, y);
++            // (A game whose own renderer draws the picture at the screen's size can name what Auto means there:
++            // PS2X_GPU_SCALE_AUTO_LABEL. Otherwise Auto shows the emulated picture's size it chose.)
++            if (const char *own = std::getenv("PS2X_GPU_SCALE_AUTO_LABEL"); own && *own)
++            {
++                list.front().label = own;
++                return list;
++            }
+             if (autoAtStart && x > 0 && y > 0 && ps2_gpu::requested())
+             {
+                 char label[64];

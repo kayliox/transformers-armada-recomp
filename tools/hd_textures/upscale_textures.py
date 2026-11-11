@@ -424,6 +424,94 @@ def gpu_priority_idle(proc):
         pass
 
 
+# ---- Graphics driver resets (TODO 289) ----
+# Windows resets a graphics driver whose card has one job running longer than about 2 seconds (TDR): the screen
+# goes black for seconds and the System log gets event 4101 ("Display driver ... stopped responding and has
+# successfully recovered"). The upscaler's job is one piece (tile) of an image; on a slower card the default pieces
+# (about 200 pixels) can take that long. Smaller pieces: shorter jobs, the same images (each piece is padded).
+TILE_NAME = ".tile.json"
+TILE_STEPS = (64, 32)
+
+
+def load_tile(path):
+    try:
+        t = int(json.loads(path.read_text(encoding="utf-8")).get("tile", 0))
+        return t if t in TILE_STEPS else 0
+    except (OSError, ValueError, AttributeError):
+        return 0
+
+
+def save_tile(path, tile, why):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"tile": tile, "why": why, "when": time.strftime("%Y-%m-%dT%H:%M:%S")}),
+                        encoding="utf-8")
+    except OSError:
+        pass
+
+
+def driver_resets_since(t0):
+    """How many graphics driver resets Windows logged since t0 (time.time()); 0 where it cannot be told.
+    (Test: TF_HD_FAKE_RESET=n - the n-th question answers one reset.)"""
+    fake = os.environ.get("TF_HD_FAKE_RESET", "")
+    if fake.isdigit():
+        driver_resets_since.asked = getattr(driver_resets_since, "asked", 0) + 1
+        if driver_resets_since.asked == int(fake):
+            return 1
+    if os.name != "nt":
+        return 0
+    since = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(max(0.0, t0)))
+    query = f"*[System[(EventID=4101) and TimeCreated[@SystemTime>='{since}']]]"
+    try:
+        r = subprocess.run(["wevtutil", "qe", "System", "/q:" + query, "/c:20", "/f:text"],
+                           capture_output=True, text=True, timeout=15, creationflags=0x08000000)
+        return r.stdout.count("Event[") if r.returncode == 0 else 0
+    except (OSError, subprocess.SubprocessError):
+        return 0
+
+
+def device_lost(err):
+    """The upscaler's own log says its graphics card was lost (Vulkan's -4: VK_ERROR_DEVICE_LOST)."""
+    e = (err or "").lower()
+    return "device lost" in e or "device_lost" in e or "failed -4" in e
+
+
+def reset_left_last_run(status_path):
+    """The last run did not finish (its status still says it was working) and a driver reset was logged after its
+    last word: most likely what ended it."""
+    try:
+        st = json.loads(status_path.read_text(encoding="utf-8"))
+        if st.get("state") not in ("working", "checking", "paused"):
+            return False
+        return driver_resets_since(status_path.stat().st_mtime - 60.0) > 0
+    except (OSError, ValueError):
+        return False
+
+
+def card_names():
+    """The graphics cards' names, as Windows has them ("" when it cannot be told)."""
+    if os.name != "nt":
+        return ""
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command",
+                            "(Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }) -join '; '"],
+                           capture_output=True, text=True, timeout=20, creationflags=0x08000000)
+        return r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def resets_prone(names):
+    """Cards whose upscales with the default pieces can run over Windows' 2 seconds: NVIDIA's before the RTX ones
+    (GTX 16, 10 and older: the GTX 1660 SUPER of TODO 289) and Intel's built-in ones. Only the first card the upscaler
+    uses counts, but which one that is is not known here: any of them in the list is enough (smaller pieces only
+    cost some speed). Intel's only when there is no other card (a laptop's RTX does the work, not its Intel)."""
+    cards = [n.strip() for n in (names or "").split(";") if n.strip()]
+    if any(re.search(r"GeForce (GTX|GT|MX) ?\d|Quadro [KMP]\d", n) for n in cards):
+        return True
+    return bool(cards) and all(re.search(r"Intel\(R\) (UHD|HD|Iris)", n) for n in cards)
+
+
 # ---- Working beside the game (make_hd_textures.ps1 / the setup) ----
 # The game holds <hd_textures>/.game_running (its process id inside) while it runs; Windows deletes the file
 # when the game ends, a crash too. While it is there the upscale waits (the two share the graphics card),
@@ -572,7 +660,7 @@ def run_onnx_dir(session, scale, in_dir, out_dir, tile, pad):
 # come out broken, the safer ways are tried on them, in order: a small tile (32), each other graphics card the
 # upscaler sees (a processor's built-in one), the lighter network with a small tile. The first that gives good
 # images makes the whole run. When none does, nothing is made on this card (exit 3, the status says so) and the
-# game's own textures are drawn; every later run (F1 > Check HD textures, an update) tries the card again, so a
+# game's own textures are drawn; every later run (F1 > Make HD textures, an update) tries the card again, so a
 # new graphics driver can fix it. A batch that still comes out mostly broken tries the card again the same way.
 # A single broken image is made again: a small tile, then the lighter network; failing both, it gets no HD image.
 COLOUR_BAD = 20.0
@@ -1155,6 +1243,218 @@ def check_set(src_root, out_root, backup_root, status_path=None, lock=None, coun
     return fixed, removed
 
 
+# ---- Verify HD textures (TODO 281) ----
+# F1 > Graphics > "Verify HD textures": the whole set checked and reported, nothing changed. Written to
+# hd_textures/verify_report.json (the game reads it; "state": "running" with done / total while it works):
+#  - how many images there should be (the unique textures of the disc, and the files they are written to),
+#  - how many are there, and how many passed every check: readable, the size and alpha the maker made, the colour and
+#    structure checks (judge_output: dark, flat, colours shifted, another picture - the 259 rules - and red and blue
+#    exchanged), and the set's made-on-card record (.made_on.json: a card written down as good, the set not set aside),
+#  - by name, the ones missing (not made yet), broken (and why), and not made (the card could not: the game's own).
+# Every image passed is written down with its file's size and sha1 (upscaled/.verified.json): a later verify reads the
+# bytes of each file (seconds) and decodes and judges again only those that changed - so a set can be called intact
+# without looking at every picture again. "Remake N broken images" (--forget-broken): the missing and broken ones of the
+# last report removed with their manifest records, so that the maker's next run makes only those.
+VERIFY_REPORT = "verify_report.json"
+VERIFIED_NAME = ".verified.json"
+
+
+def _write_json(path, data):
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    for attempt in range(20):  # (the game reading it a moment)
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(0.1)
+
+
+def _verify_file(args):
+    """(rel, out path, judged path, source path, made size, alpha class, known [size, sha1] or None) ->
+    (rel, "passed" | "unchanged" | "broken", why, size, sha1)."""
+    rel, out_path, judged, src, made, alpha, known = args
+    try:
+        data = Path(out_path).read_bytes()
+    except OSError as e:
+        return rel, "broken", f"not readable: {e.strerror or e}", 0, ""
+    sha1 = hashlib.sha1(data).hexdigest()
+    if known and known == [len(data), sha1]:
+        return rel, "unchanged", "", len(data), sha1
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            img = im.convert("RGBA")
+        if list(img.size) != made:
+            return rel, "broken", f"size {img.size[0]}x{img.size[1]}, made {made[0]}x{made[1]}", len(data), sha1
+        if alpha_class(img) != alpha:
+            return rel, "broken", f"transparency {alpha_class(img)}, the game's is {alpha}", len(data), sha1
+        if judged != out_path:  # (a level image's colour-match original is what the upscaler made: judged on that one)
+            with Image.open(judged) as im:
+                img = im.convert("RGBA")
+        d, d_swapped, why = judge_output(img, src)
+        if not why and d >= SWAP_CLEAR and d_swapped < 0.6 * d:
+            why = "red and blue exchanged"
+        return rel, ("broken" if why else "passed"), why, len(data), sha1
+    except Exception as e:  # noqa: BLE001
+        return rel, "broken", f"not readable: {e}", len(data), sha1
+
+
+def verify_set(src_root, out_root, hd_dir, quality, lock=None):
+    report_path = hd_dir / VERIFY_REPORT
+    started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    errors = []
+    srcs = scan_sources(src_root, errors)
+    jobs = plan_jobs(srcs, None, "auto", [], quality=quality)
+    recs = load_manifest(out_root)
+    marker = load_marker(out_root)
+    backup_root = out_root.parent / "upscaled_precolour"
+    try:
+        verified = json.loads((out_root / VERIFIED_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        verified = {}
+    missing, not_made, work = [], [], []
+    by_rel = {}
+    for job in jobs:
+        rel0 = job.relpaths[0]
+        r = recs.get(job.sha1)
+        if not r:
+            missing.append({"name": rel0, "sha1": job.sha1, "files": job.relpaths, "why": "not made yet"})
+            continue
+        if r.get("fallback") == "none":
+            not_made.append({"name": rel0, "sha1": job.sha1, "files": job.relpaths,
+                             "why": r.get("why") or "this graphics card could not make it"})
+            continue
+        made = r.get("out") or [job.out_w, job.out_h]
+        absent = [rp for rp in job.relpaths if not (out_root / rp).is_file()]
+        if absent:
+            missing.append({"name": rel0, "sha1": job.sha1, "files": job.relpaths,
+                            "why": "not there" if len(absent) == len(job.relpaths) else f"{len(absent)} of its {len(job.relpaths)} files not there"})
+            continue
+        by_rel[rel0] = job
+        for rp in job.relpaths:  # (each file of it: a copy written to every place the disc has the texture)
+            judged = backup_root / rp
+            judged = judged if (rp == rel0 and judged.is_file()) else out_root / rp
+            work.append((rp, str(out_root / rp), str(judged), str(job.srcs[0].path), made, job.alpha,
+                         verified.get(rp)))
+    total = len(work)
+    state = {"state": "running", "started": started, "done": 0, "total": total}
+    _write_json(report_path, state)
+    from concurrent.futures import ProcessPoolExecutor
+    workers = 2 if lock is not None and game_running(lock) else max(1, min(8, (os.cpu_count() or 2) - 2))
+    results = []
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        for res in pool.map(_verify_file, work, chunksize=8):
+            results.append(res)
+            if len(results) % 100 == 0 and len(results) < total:
+                state["done"] = len(results)
+                _write_json(report_path, state)
+                print(f"verify: {len(results)} of {total} checked", flush=True)
+    owners = {rp: j for j in by_rel.values() for rp in j.relpaths}
+    broken, passed_files, unchanged, now_verified = {}, 0, 0, {}
+    for rel, status, why, size, sha1 in results:
+        if status == "broken":
+            # (a file of a texture broken: the texture is remade, all its files)
+            owner = owners.get(rel)
+            key = owner.relpaths[0] if owner else rel
+            if key not in broken:
+                broken[key] = {"name": key, "sha1": owner.sha1 if owner else "", "files": owner.relpaths if owner else [rel],
+                               "why": why if rel == key else f"{rel}: {why}"}
+        else:
+            passed_files += 1
+            unchanged += status == "unchanged"
+            now_verified[rel] = [size, sha1]
+    cards = (marker or {}).get("cards", [])
+    good_card = next((c for c in reversed(cards) if c.get("result") == "good"), None)
+    set_aside = bool(marker and marker.get("set_aside"))
+    passed_images = len(by_rel) - len(broken)
+    report = {
+        "state": "done", "started": started, "finished": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "quality": quality,
+        "images_expected": len(jobs), "files_expected": len(srcs),
+        "images_present": len(by_rel), "files_present": total,
+        "images_passed": passed_images, "files_passed": passed_files, "files_unchanged": unchanged,
+        "card": {"name": good_card.get("name", "") if good_card else "", "recorded": bool(good_card),
+                 "set_aside": set_aside, "why": (marker or {}).get("why", "") if set_aside else ""},
+        "missing": missing, "broken": sorted(broken.values(), key=lambda x: x["name"]), "not_made": not_made,
+        # (the ones this card could not make are not counted: made again on it they come out broken again - the game
+        # draws its own for those; Make HD textures after a driver update tries them again)
+        "remake": len(missing) + len(broken),
+        "intact": not missing and not broken and bool(good_card) and not set_aside,
+        "unreadable_sources": len(errors),
+    }
+    # (The lines F1 shows as they are: verify_report.txt, plain words)
+    g = lambda n: f"{n:,}"  # noqa: E731
+    lines = [f"{g(len(jobs))} images should be there ({g(len(srcs))} files). {g(len(by_rel))} are there; "
+             f"{g(passed_images)} passed every check.",
+             "Checked: each file readable, its size and transparency, its colours and picture against the game's."]
+    if set_aside:
+        lines.append("The set is set aside: the game draws its own textures. " + (marker.get("why") or ""))
+    elif good_card:
+        lines.append(f"Made on a graphics card that passed the test ({good_card.get('name', '')}).")
+    else:
+        lines.append("No graphics card is written down as having made the set well.")
+    if missing or broken:
+        lines.append(f"Missing: {g(len(missing))}. Broken: {g(len(broken))}.")
+        shown = report["broken"] + missing
+        for it in shown[:6]:
+            lines.append(f"  {it['name']} ({it['why']})")
+        if len(shown) > 6:
+            lines.append(f"  and {g(len(shown) - 6)} more (hd_textures\\verify_report.json)")
+    elif report["intact"]:
+        lines.append("The set is complete and intact.")
+    if not_made:
+        lines.append(f"Not made on this graphics card: {g(len(not_made))} (the game draws its own for these).")
+    report["lines"] = lines
+    (hd_dir / "verify_report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")  # (before the state says done)
+    _write_json(report_path, report)
+    _write_json(out_root / VERIFIED_NAME, now_verified)
+    print(f"verify: {report['images_expected']} images ({report['files_expected']} files) expected; "
+          f"{report['images_present']} present, {passed_images} passed ({unchanged} files unchanged since the last "
+          f"verify); {len(missing)} missing, {len(broken)} broken, {len(not_made)} not made; "
+          f"made-on-card record: {'good (' + good_card.get('name', '') + ')' if good_card else 'none'}"
+          f"{', the set is set aside' if set_aside else ''}", flush=True)
+    return 0
+
+
+def forget_broken(out_root, hd_dir):
+    """(TODO 281, "Remake N broken images") The last report's missing and broken images removed with their
+    manifest records (their colour-match originals and ledger entries too): the maker's next run makes only those."""
+    try:
+        report = json.loads((hd_dir / VERIFY_REPORT).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        print("remake: no verify report", flush=True)
+        return 0
+    items = report.get("missing", []) + report.get("broken", [])
+    backup_root = out_root.parent / "upscaled_precolour"
+    ledger_path = backup_root / "colour_gains.json"
+    try:
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8")) if ledger_path.exists() else {}
+    except ValueError:
+        ledger = {}
+    drop = set()
+    for it in items:
+        for rp in it.get("files", []):
+            for path in (out_root / rp, backup_root / rp):
+                if path.is_file():
+                    path.unlink()
+            ledger.pop(rp, None)
+        if it.get("sha1"):
+            drop.add(it["sha1"])
+    mf = out_root / MANIFEST_NAME
+    if drop and mf.exists():
+        lines = [ln for ln in mf.read_text(encoding="utf-8").splitlines()
+                 if not any(f'"sha1": "{h}"' in ln for h in drop)]
+        mf.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    if items and ledger_path.exists():
+        ledger_path.write_text(json.dumps(ledger, indent=0, sort_keys=True), encoding="utf-8")
+    report["state"] = "remaking"
+    _write_json(hd_dir / VERIFY_REPORT, report)
+    print(f"remake: {len(items)} image(s) removed to be made again", flush=True)
+    return 0
+
+
 def print_plan(srcs, jobs):
     tiers = Counter(s.tier for s in srcs)
     alphas = Counter(s.alpha for s in srcs)
@@ -1273,6 +1573,11 @@ def main():
     ap.add_argument("--check-colours", action="store_true",
                     help="check an existing set's colours against the sources (red and blue exchanged back, far-off "
                          "images removed to be made again), then exit")
+    ap.add_argument("--verify", action="store_true",
+                    help="(TODO 281) check the whole set and write hd_textures/verify_report.json; nothing is changed")
+    ap.add_argument("--forget-broken", action="store_true",
+                    help="(TODO 281) remove the last verify report's missing and broken images (and their "
+                         "manifest records) so that the next run makes only those, then exit")
     ap.add_argument("--match-colour", action="store_true",
                     help="match each image's colour to the game's as it is made (match_colour.py)")
     args = ap.parse_args()
@@ -1287,6 +1592,12 @@ def main():
 
     if args.audit:
         sys.exit(audit(args.src, args.out))
+    if args.verify:
+        hd_dir = args.hd_dir or args.out.parent
+        sys.exit(verify_set(args.src, args.out, hd_dir, args.quality,
+                            None if args.no_wait_for_game else hd_dir / ".game_running"))
+    if args.forget_broken:
+        sys.exit(forget_broken(args.out, args.hd_dir or args.out.parent))
     if args.check_colours:
         hd_dir = args.hd_dir or args.out.parent
         check_set(args.src, args.out, args.out.parent / "upscaled_precolour", hd_dir / "upscale_status.json",
@@ -1331,6 +1642,30 @@ def main():
 
     def status(state, made):
         write_status(status_path, state=state, done=made, total=total, quality=args.quality)
+
+    # (TODO 289) Graphics driver resets: the upscaler works in pieces (tiles) of the image, each one long job for the
+    # graphics card; one that runs over Windows' 2 seconds is taken as a hung card and the driver is reset (the screen
+    # black for seconds; a GTX 1660 SUPER's setup window died with it, and the update with the window). Smaller
+    # pieces are shorter jobs: a card known for it starts with them, and a reset seen in Windows' log (event 4101)
+    # during a run makes the pieces smaller from then on (remembered in .tile.json beside the images).
+    tile_path = args.out / TILE_NAME
+    if not args.tile:
+        prev_tile = load_tile(tile_path)
+        if prev_tile:
+            args.tile = prev_tile
+            print(f"note: the upscaler works in pieces of {prev_tile} pixels on this PC (a graphics driver reset was "
+                  f"seen with bigger ones)", flush=True)
+        elif reset_left_last_run(status_path):
+            args.tile = TILE_STEPS[0]
+            save_tile(tile_path, args.tile, "a graphics driver reset during the last run, which did not finish")
+            print(f"note: the graphics driver was reset during the last run, which did not finish: the upscaler works "
+                  f"in pieces of {args.tile} pixels from now on", flush=True)
+        else:
+            card = card_names()
+            if card and resets_prone(card):
+                args.tile = TILE_STEPS[0]
+                print(f"note: the upscaler works in pieces of {args.tile} pixels on this graphics card ({card}): "
+                      f"bigger ones can take longer than Windows allows and reset its driver", flush=True)
 
     needs_exe = any(j.backend == "ncnn" for j in todo)
     if needs_exe and not args.exe.is_file():
@@ -1421,7 +1756,7 @@ def main():
             print(f"note: {counts[1]} of the {counts[0]} HD textures already here are broken, and this graphics card's "
                   f"({name or 'unknown'}) test images come out broken too. The set is set aside: the "
                   f"game draws its own textures. Nothing is deleted. After a graphics driver update, F1 > Graphics > "
-                  f"Check HD textures tries the card again and takes them back if it is good.", flush=True)
+                  f"Make HD textures tries the card again and takes them back if it is good.", flush=True)
         elif counts:
             print(f"note: the HD textures already here are good ({counts[0]} checked, {counts[1]} broken and removed): "
                   f"they stay in use" + (", and are used again from the next start of the game." if was_aside else "."), flush=True)
@@ -1579,7 +1914,7 @@ def main():
                     card_failed(gpu_name[0])
                     print(f"note: this graphics card ({gpu_name[0] or 'unknown'}) gives broken images in every way "
                           f"the upscaler has: no HD textures are made on it (the game's own are drawn). A newer "
-                          f"graphics driver may fix it: then F1 > Graphics > Check HD textures tries "
+                          f"graphics driver may fix it: then F1 > Graphics > Make HD textures tries "
                           f"again.", flush=True)
                     write_status(status_path, state="card_broken", done=done_before + done, total=total,
                                  quality=args.quality, gpu=gpu_name[0])
@@ -1601,12 +1936,15 @@ def main():
                     errors.append((job.srcs[0].relpath, f"stage: {e}"))
             cur = in_dir
             stopped = False
+            reset = False
             for i in range(1, passes + 1):
                 nxt = gdir / f"p{i}"
                 nxt.mkdir()
                 t0 = time.time()
                 if backend == "ncnn":
                     tile, gpu = (setup[0]["tile"], setup[0]["gpu"]) if setup[0] else (args.tile, args.gpu)
+                    if args.tile and tile and setup[0] and args.tile < tile:
+                        tile = args.tile  # (TODO 289: pieces made smaller after a driver reset)
                     rc, err, stopped = run_binary(args.exe, cur, nxt, model, tile, gpu,
                                                   stop=game_gone if args.game_pid else (None if gentle else should_stop),
                                                   gentle=gentle)
@@ -1617,6 +1955,11 @@ def main():
                     if rc != 0 and not stopped:
                         tail = err.strip().splitlines()[-3:]
                         print("  stderr: " + " | ".join(tail), file=sys.stderr)
+                    # (TODO 289) The graphics driver reset while this ran (Windows' event 4101), or the upscaler lost
+                    # its card: smaller pieces from now on, and this batch made again with them.
+                    if not stopped and (driver_resets_since(t0 - 2.0) or device_lost(err)):
+                        reset = True
+                        break
                 else:  # onnx-dml
                     scale = MODELS.get(model, {}).get("scale", 4)
                     run_onnx_dir(sessions[model], scale, cur, nxt,
@@ -1630,6 +1973,23 @@ def main():
                 cur = nxt
             if stopped:  # (the game started: this batch again, once it may)
                 shutil.rmtree(gdir, ignore_errors=True)
+                continue
+            if reset:
+                shutil.rmtree(gdir, ignore_errors=True)
+                was = tile or 0
+                smaller = next((s for s in TILE_STEPS if was == 0 or s < was), None)
+                if smaller is None:
+                    print("note: the graphics driver was reset even with the smallest pieces: no more HD textures are "
+                          "made on this card in this run (what is made is kept; the next run carries on)", flush=True)
+                    status("working", done_before + done)
+                    break
+                args.tile = smaller
+                if setup[0]:
+                    setup[0]["tile"] = smaller
+                save_tile(tile_path, smaller, f"a graphics driver reset with pieces of {was or 'auto'}")
+                print(f"note: the graphics driver was reset during the upscale (Windows' event 4101): pieces of {smaller} "
+                      f"pixels from now on, and this batch made again", flush=True)
+                time.sleep(5.0)  # (the driver back first)
                 continue
             if pending:
                 pending.result()

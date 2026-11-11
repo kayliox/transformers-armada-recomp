@@ -209,7 +209,7 @@ namespace nr
             if (const std::string why = hdOff ? std::string() : setAsideWhy(g.upscaled); !why.empty())
             {
                 std::fprintf(stderr, "[native render] HD textures set aside (%s): the game's own textures. After a graphics driver "
-                                     "update, F1 > Graphics > Check HD textures tries the card again\n", why.c_str());
+                                     "update, F1 > Graphics > Make HD textures tries the card again\n", why.c_str());
                 hdOff = true;
             }
             g.native = g.upscaled.empty() ? fs::path() : g.upscaled.parent_path() / "converted" / "textures";

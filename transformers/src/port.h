@@ -13,6 +13,9 @@ namespace tf::port
     // from the level's begin to its end - or 0: the menus and the intro, a level at the
     // console's 30, and the checker's run of the console's logic (decomp::consoleRules).
     int levelRate();
+    // (TODO 290) The creature effects' update that runs now (0x533010) steps a frame of the console's 30 a second
+    // (overrides.cpp effectsUpdate): its frame time is that 30th of a second (FramePeriod).
+    bool effectsAtConsoleStep();
     // The governor's detail scale pinned at 1 (TODO 160: a console's load balancer; TF_DETAIL_PS2=1 leaves it to the load).
     bool fullDetail();
     // In-between pictures (TF_IN_BETWEEN, on by default): the level that runs now draws each

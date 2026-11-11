@@ -51,7 +51,7 @@ cd transformers-armada-recomp
 ```
 
 - `-InstallPrerequisites` installs any missing tools with winget.
-- `-SkipHdTextures` leaves out the HD textures. You can run `setup.ps1` again later to make them.
+- `-SkipHdTextures` leaves out the HD textures. You can make them later in the game (F1 > Graphics > Make HD textures) or run `setup.ps1` again.
 - If the setup stops, run it again. Finished steps are kept.
 
 For a manual build, see [BUILDING.md](BUILDING.md).
@@ -167,7 +167,7 @@ Your choices are saved in `settings.ini` in the install folder.
 | Anti-aliasing | Smooths jagged edges: edge filter, multisampling (up to 8x) and supersampling (1.5x). |
 | Texture quality | Texture sharpness and filtering. Low suits 4 GB graphics cards. |
 | Sharp distant textures | Keeps textures sharp into the distance on high-resolution screens. |
-| HD textures | The HD textures made from your disc, on or off (native renderer; takes a restart). Its buttons open their folder and make or check them. |
+| HD textures | The HD textures made from your disc, on or off (native renderer; takes a restart). Its buttons open their folder, **Make HD textures** (says the disk space and time first), **Verify HD textures** (checks images without changing them) and **Remake N broken images** (after a verify that found some). On Linux, the maker buttons show [commands to run in a terminal](BUILDING.md#hd-textures-and-sharp-fonts). |
 | Texture pack | Emulated renderer only: PCSX2 texture packs from a replacements folder. Not the HD textures. |
 
 The **Ultra** preset sets everything to its highest: the longest distances, every tree in full 3D, full enemy
@@ -176,7 +176,7 @@ frame rate drops, try **High**.
 
 If a graphics card makes the HD textures black (some GTX 16-series cards do), the maker notices, tries safer
 ways, and if none works it makes none: F1 says so and the game shows its own textures. After a graphics driver
-update, **Check HD textures** tries again.
+update, **Make HD textures** tries again.
 
 ### Controls
 

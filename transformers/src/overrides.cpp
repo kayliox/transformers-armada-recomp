@@ -2386,6 +2386,110 @@ namespace
     void forestFrameSample(double intervalMs, double workMs, bool counts);
     bool forestCanGiveWay();
 
+    // (TODO 275) The trees between the camera and the player (0x429510, config/overrides.toml): a tree within the
+    // near distance of the camera fades out in three counts of the instance's byte +0xF5, a count a frame - 0.1 s at
+    // the console's 30, a pop at 240 (12 ms). Each count now adds the step at 0x6CB0FC: 1 on the frames where the
+    // console's 30-a-second clock passes a tick (the remainder carried over), else 0 - 0.1 s at any rate; at 30 always
+    // 1, the game's own. The near distance the drawing reads is 0x6CB0F8: the game's (0x6CDF60, which 0x284C70 sets
+    // every frame from the camera's distance to the player, 7 units at most) with "Trees close to you" Fade out, or -1
+    // with Stay (no tree is nearer than that: none fades).
+    constexpr uint32_t kTreeFadeStep = 0x006CB0FCu, kTreeNear = 0x006CB0F8u, kTreeNearSource = 0x006CDF60u;
+    constexpr uint32_t kTreeFar = 0x006CB0F4u, kTreeFarSource = 0x006CDF64u;
+    std::atomic<bool> g_nearTreesStay{false};
+    double g_treeFadeTicks = 0.0;
+
+    void setTreeFade(uint8_t *rdram, bool frame)
+    {
+        // (the two words are padding: 0 until set here - anything else means something uses them, said once)
+        static bool checked = false;
+        if (!checked)
+        {
+            checked = true;
+            uint32_t a = 0u, b = 0u, c = 0u;
+            std::memcpy(&a, rdram + kTreeNear, sizeof(a));
+            std::memcpy(&b, rdram + kTreeFadeStep, sizeof(b));
+            std::memcpy(&c, rdram + kTreeFar, sizeof(c));
+            if (a != 0u || b != 0u || c != 0u)
+                std::fprintf(stderr, "[tf] trees close to you: the padding words held %08x %08x %08x before the first frame\n", a, b, c);
+        }
+        uint32_t step = 1u;
+        static const bool perFrame = [] { const char *e = std::getenv("TF_TREE_FADE"); return e && std::strcmp(e, "frames") == 0; }();
+        if (frame && g_levelRate > 30 && !perFrame) // (TF_TREE_FADE=frames: a count a frame, as before - tests)
+        {
+            g_treeFadeTicks += 30.0 / static_cast<double>(g_levelRate);
+            step = g_treeFadeTicks >= 1.0 ? 1u : 0u;
+            g_treeFadeTicks -= static_cast<double>(step);
+        }
+        else
+            g_treeFadeTicks = 0.0;
+        std::memcpy(rdram + kTreeFadeStep, &step, sizeof(step)); // (little-endian: the byte the drawing reads is 1 or 0)
+        float near = -1.0f, far = 0.0f;
+        std::memcpy(&far, rdram + kTreeFarSource, sizeof(far));
+        if (!g_nearTreesStay.load(std::memory_order_relaxed))
+            std::memcpy(&near, rdram + kTreeNearSource, sizeof(near));
+        // (TF_TREE_NEAR_TEST=<squared units>[@<frames>]: that near distance instead, from that many frames on - tests:
+        // every tree that near starts its fade in the same frame)
+        static const char *nearTestEnv = std::getenv("TF_TREE_NEAR_TEST");
+        static const float nearTest = nearTestEnv && *nearTestEnv ? static_cast<float>(std::atof(nearTestEnv)) : 0.0f;
+        static const long nearTestFrom = [] { const char *at = nearTestEnv ? std::strchr(nearTestEnv, '@') : nullptr; return at ? std::atol(at + 1) : 0L; }();
+        static long frames = 0;
+        if (frame)
+            ++frames;
+        if (nearTest > 0.0f && frames >= nearTestFrom)
+        {
+            if (frames == nearTestFrom)
+                std::fprintf(stderr, "[tf] trees close to you: near distance %g from frame %ld (TF_TREE_NEAR_TEST)\n", std::sqrt(nearTest), frames);
+            near = nearTest, far = nearTest * 1.65f; // (the game's 49 / 81)
+        }
+        std::memcpy(rdram + kTreeNear, &near, sizeof(near));
+        std::memcpy(rdram + kTreeFar, &far, sizeof(far));
+    }
+
+    // (TODO 290) The creature effects (taCreatureEffectSwitcher's update, 0x533010: once a frame for each creature
+    // drawn). The electric shock (effects 5, 0x15, 0x10: a stunned or EMP'd creature) and effect 0xF move their texture
+    // by a fixed step and draw a new random brightness every frame - frames of the console's 30 a second: at 240 the
+    // crackle and its flicker ran eight times as fast, a shimmer. While one of those runs, the update now runs on the
+    // frames where the console's 30-a-second clock passes a tick (the remainder carried over), with a 30th of a second
+    // as its frame time (rates.cpp FramePeriod): the offsets, the flicker and the effect's length as at 30. Other
+    // effects (and none) step every frame as before. TF_EFFECTS_AT_30=0: every frame, as before.
+    constexpr uint32_t kEffectsUpdate = TF_GA(0x00533010u), kEffectNow = 0x138u;
+    PS2Runtime::RecompiledFunction g_effectsUpdate = nullptr;
+    double g_effectsTicks = 0.0;
+    bool g_effectsTick = true;         // this frame the console's 30-a-second clock passes a tick
+    bool g_effectsConsoleStep = false; // the update that runs now steps a console frame
+
+    void stepEffectsTick(bool frame)
+    {
+        if (frame && g_levelRate > 30)
+        {
+            g_effectsTicks += 30.0 / static_cast<double>(g_levelRate);
+            g_effectsTick = g_effectsTicks >= 1.0;
+            if (g_effectsTick)
+                g_effectsTicks -= 1.0;
+        }
+        else
+        {
+            g_effectsTicks = 0.0;
+            g_effectsTick = true;
+        }
+    }
+
+    void effectsUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static const bool off = std::getenv("TF_EFFECTS_AT_30") && *std::getenv("TF_EFFECTS_AT_30") == '0';
+        uint32_t effect = 0u;
+        if (const uint8_t *self = getConstMemPtr(rdram, getRegU32(ctx, 4) + kEffectNow))
+            std::memcpy(&effect, self, sizeof(effect));
+        const bool stepped = effect == 5u || effect == 0x15u || effect == 0x10u || effect == 0xFu;
+        g_effectsConsoleStep = !off && g_levelRate > 30 && stepped && !decomp::consoleRules();
+        if (g_effectsConsoleStep && !g_effectsTick)
+        {
+            ctx->pc = getRegU32(ctx, 31); // (not this frame)
+            return;
+        }
+        g_effectsUpdate(rdram, ctx, runtime);
+    }
+
     void setFrameWords(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         setEcoScale(rdram);
@@ -4356,6 +4460,8 @@ namespace
             }
         }
         setFrameWords(rdram, ctx, runtime);
+        setTreeFade(rdram, false);
+        stepEffectsTick(false);
     }
 
     // Every frame (the governor and the game's set-up code write these).
@@ -4528,6 +4634,8 @@ namespace
         }
         takeSettings(rdram, ctx, runtime);
         setFrameWords(rdram, ctx, runtime);
+        setTreeFade(rdram, true);
+        stepEffectsTick(true);
         if (g_frameRate > 30 && playrec::keyPresses(kKeyF4, ps2_host_input::takeKeyPresses(kKeyF4)) > 0) // (N12 b)
             switchPictureLock(rdram, ctx, runtime);
         // (Testing aid: TF_F4_TICKS=<tick>[,<tick>...] presses F4 at those ticks - testTick.)
@@ -5601,6 +5709,8 @@ namespace
             g_forestFps = std::clamp(std::atoi(f), 0, 1000);
         if (const char *full = std::getenv("TF_FOREST_FULL_DETAIL"); full && *full == '1')
             g_forestFull.store(true);
+        if (const char *near = std::getenv("TF_NEAR_TREES"); near && std::strcmp(near, "stay") == 0)
+            g_nearTreesStay.store(true); // (TODO 275, setTreeFade)
         if (const char *leaves = std::getenv("TF_FOREST_FULL_LEAVES"); leaves && *leaves)
             g_forestFullBudget = static_cast<uint32_t>(std::clamp(std::atol(leaves), 1L, 0x7FFFFFFFL));
         if (const char *mb = std::getenv("TF_DMA_BUFFER_MB"); mb && *mb)
@@ -7816,6 +7926,25 @@ namespace
                 ps2_settings::add(s);
             }
             {
+                // (TODO 275) The trees between the camera and your Autobot: the game fades them out so that it stays in
+                // view (setTreeFade).
+                Setting s;
+                s.key = "TF_NEAR_TREES";
+                s.section = "Graphics";
+                s.label = "Trees close to you";
+                s.order = 43;
+                s.help = "The trees between the camera and your Autobot. Fade out: as on the console - a tree close to the camera fades away (in a fifth of a second) so that your Autobot stays in view. Stay: they are always drawn, a denser jungle, but a tree can hide your Autobot. Neither is faster: measured on a drive through Deep Amazon's forest, the same frame rate.";
+                s.choices.push_back(Choice{"fade", "Fade out (the console's)"});
+                s.choices.push_back(Choice{"stay", "Stay"});
+                s.defaultValue = "fade";
+                s.apply = [](const std::string &value)
+                {
+                    g_nearTreesStay.store(value == "stay");
+                    return true;
+                };
+                ps2_settings::add(s);
+            }
+            {
                 Setting s;
                 s.key = "TF_FOREST_ADAPTIVE";
                 s.section = "Graphics";
@@ -9222,6 +9351,10 @@ namespace
         if ((g_executorLoop = runtime.lookupFunction(kExecutorLoop)) != nullptr)
             runtime.registerFunction(kExecutorLoop, executorLoop);
         language::install(runtime); // (the PAL release's language: language.h)
+        // (TODO 290: the creature effects' update - passed through outside a level at the PC port's rate; registered at any
+        // rate, as the cap changes while the game runs)
+        if ((g_effectsUpdate = runtime.lookupFunction(kEffectsUpdate)) != nullptr)
+            runtime.registerFunction(kEffectsUpdate, effectsUpdate);
         if ((g_preGameEnd = runtime.lookupFunction(kPreGameEnd)) != nullptr)
             runtime.registerFunction(kPreGameEnd, preGameEnd);
         // (TF_CAR_LOG at the console's 30: the cars' step wrapped for its log alone - g_levelRate 0 passes it through)
@@ -9389,6 +9522,11 @@ namespace tf::port
     int levelRate()
     {
         return decomp::consoleRules() ? 0 : g_levelRate; // (the checker compares with the console's logic)
+    }
+
+    bool effectsAtConsoleStep()
+    {
+        return g_effectsConsoleStep; // (TODO 290: effectsUpdate)
     }
 
     int pictureCap()

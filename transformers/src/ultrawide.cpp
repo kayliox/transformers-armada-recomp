@@ -14,6 +14,18 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+// The return address a wrapped function was called with: $ra, or in a decomp-bridge build where a call out from native
+// code carries the bridge's sentinel there, the original call site's (decomp_bridge/bridge_runtime.cpp defines it).
+// Use the real $ra by default; a private bridge can override it on either toolchain.
+extern "C" uint32_t tfCallerReturnAddress(R5900Context *ctx);
+extern "C" uint32_t tfCallerReturnAddressDefault(R5900Context *ctx) { return GPR_U32(ctx, 31); }
+#if defined(_MSC_VER)
+#pragma comment(linker, "/alternatename:tfCallerReturnAddress=tfCallerReturnAddressDefault")
+#else
+extern "C" uint32_t tfCallerReturnAddress(R5900Context *ctx)
+    __attribute__((weak, alias("tfCallerReturnAddressDefault")));
+#endif
 #include <set>
 #include <string>
 #include <tuple>
@@ -147,7 +159,7 @@ namespace ultrawide
 
         void fovHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            const uint32_t call = GPR_U32(ctx, 31) - 8u;
+            const uint32_t call = tfCallerReturnAddress(ctx) - 8u;
             g_fov(rdram, ctx, runtime); // (a leaf: it returns)
             const uint32_t from = call == kFovInCameraFrustum ? g_cameraFrustumFrom : (call == kFovInBuildFrustum ? g_buildFrustumFrom : 0u);
             const bool inCamera = call == kFovInCameraFrustum, inBuild = call == kFovInBuildFrustum;
@@ -172,7 +184,7 @@ namespace ultrawide
 
         void tanHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            const uint32_t call = GPR_U32(ctx, 31) - 8u;
+            const uint32_t call = tfCallerReturnAddress(ctx) - 8u;
             g_tan(rdram, ctx, runtime); // (a leaf)
             const float k = wideK() * fovFactor();
             const bool widen = call == kTanCall || extra(call);
@@ -184,7 +196,7 @@ namespace ultrawide
         void displayInfoHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t returnAddress = GPR_U32(ctx, 31);
-            const uint32_t call = returnAddress - 8u;
+            const uint32_t call = tfCallerReturnAddress(ctx) - 8u;
             const uint32_t info = GPR_U32(ctx, 4);
             g_displayInfo(rdram, ctx, runtime);
             if (ctx->pc != returnAddress)
@@ -208,7 +220,7 @@ namespace ultrawide
 
         void cameraFrustumHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            const uint32_t from = GPR_U32(ctx, 31) - 8u;
+            const uint32_t from = tfCallerReturnAddress(ctx) - 8u;
             const uint32_t frustum = GPR_U32(ctx, 4);
             g_cameraFrustumFrom = from;
             g_cameraFrustum(rdram, ctx, runtime);
@@ -229,7 +241,7 @@ namespace ultrawide
 
         void buildFrustumHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            g_buildFrustumFrom = GPR_U32(ctx, 31) - 8u;
+            g_buildFrustumFrom = tfCallerReturnAddress(ctx) - 8u;
             g_buildFrustum(rdram, ctx, runtime);
         }
 

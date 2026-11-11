@@ -39,6 +39,7 @@ namespace nr
         Drift,                 // 0x0480 of the grass image, alone in its table: the ground mist's drifting streaks (Antarctica)
         Smear,                 // 0x2220 (image 83f1438f69bcf7be): the vertices facing q0 moved by it, colour q1 / q2 (the dash's after-image)
         CityBlocks,            // 0x22c0 (image a31dd0bedf37226c): a box per vertex, one face of it a batch (Cybertron's city, TODO 162)
+        ElectricShock,         // 0x1ac0 (image 83f1438f69bcf7be): taShader_ElectricShock - the stunned creature's crackling shell (TODO 290)
     };
 
     constexpr uint32_t kMaxRoutines = 6;

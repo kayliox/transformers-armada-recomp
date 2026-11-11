@@ -2,6 +2,7 @@
 // (Its own file: windows.h and raylib.h do not go in one translation unit.)
 
 #include "hd_progress.h"
+#include "graphics_driver.h"
 
 #include <algorithm>
 #include <atomic>
@@ -19,6 +20,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <dxgi.h>
 #include <shellapi.h>
 #endif
 
@@ -35,6 +37,13 @@ namespace hd_progress
 {
     namespace
     {
+        // (TODO 281) A whole set's making time, in minutes, beside the game, per kind of graphics card (makeMinutes).
+        // Measured 2026-11-11, a Best set from scratch: RX 7900 XTX 32.7 min, RX 5700 XT 57.5 min; beside a running
+        // game (a level, about 100 fps) the 7900 XTX made 735 images in 12 minutes against 758 alone - 3% slower. The
+        // ranges reach down to the slower cards of each kind (RX 6800 / RTX 3060; GTX 1060 / 1650).
+        constexpr int MINUTES_FAST_LO = 30, MINUTES_FAST_HI = 60;
+        constexpr int MINUTES_MID_LO = 55, MINUTES_MID_HI = 120;
+        constexpr int MINUTES_ANY_LO = 45, MINUTES_ANY_HI = 240;
         std::atomic<uint64_t> g_generation{0};
         std::mutex g_mutex;
         std::string g_line;
@@ -159,7 +168,7 @@ namespace hd_progress
         }
 
         // (card_broken, TODO 242: this graphics card's upscales come out broken in every way the upscaler has, so
-        // nothing is made on it - finished as far as the game goes; F1 > Check HD textures tries the card again)
+        // nothing is made on it - finished as far as the game goes; F1 > Make HD textures tries the card again)
         bool finished(const Status &s)
         {
             return s.ok && (s.state == "done" || s.state == "card_broken");
@@ -198,6 +207,8 @@ namespace hd_progress
 #if defined(_WIN32)
         HANDLE g_running = INVALID_HANDLE_VALUE;
         DWORD g_ourMaker = 0; // (the window this game started: closed by the player, it is not started again)
+        enum class Mode { Make, Verify };
+        std::atomic<Mode> g_ourMode{Mode::Make}; // (TODO 281: what that window does)
         // (TODO 267, the user's choice: the HD textures are made only while the game is open) The game's maker window,
         // and everything it starts (Python, the upscaler), in a job of the game's that kills them when it closes - the
         // game's end too, a crash included. Images are written whole (a file beside, then swapped in) and the lock goes
@@ -253,14 +264,14 @@ namespace hd_progress
             return pid ? pidAlive(pid) : true;
         }
 
-        // The minimized window that carries on with the set (make_hd_textures.ps1 -Resume).
-        void startMaker(const fs::path &game)
+        // The minimized window that carries on with the set (make_hd_textures.ps1 -Resume; TODO 281: -Verify, -Remake).
+        void startMaker(const fs::path &game, const wchar_t *mode = L"-Resume")
         {
             const fs::path script = game / "tools" / "make_hd_textures.ps1";
             std::error_code ec;
             if (!fs::exists(script, ec))
                 return;
-            std::wstring cmd = L"powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File \"" + script.wstring() + L"\" -Resume -GamePid " +
+            std::wstring cmd = L"powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File \"" + script.wstring() + L"\" " + mode + L" -GamePid " +
                                std::to_wstring(GetCurrentProcessId());
             STARTUPINFOW si{};
             si.cb = sizeof si;
@@ -280,6 +291,7 @@ namespace hd_progress
                     const bool held = job && AssignProcessToJobObject(job, pi.hProcess);
                     ResumeThread(pi.hThread);
                     g_ourMaker = pi.dwProcessId;
+                    g_ourMode = std::wstring(mode) == L"-Verify" ? Mode::Verify : Mode::Make;
                     CloseHandle(pi.hThread);
                     CloseHandle(pi.hProcess);
                     std::fprintf(stderr, "[hd textures] the set is not finished: a window makes the rest while the game is open%s\n",
@@ -407,6 +419,14 @@ namespace hd_progress
         g_dir = findDir();
         if (g_dir.empty())
             return;
+        // (User decision 2026-11-11) The card, for the HD tools (make_hd_textures.ps1 reads it: on built-in or low-end
+        // graphics it makes nothing, and an update takes away a set made before).
+        graphics_driver::writeGpuFile(g_dir.string());
+        if (graphics_driver::lowEnd())
+        {
+            std::fprintf(stderr, "[hd textures] built-in or low-end graphics: no HD textures are made here\n");
+            return;
+        }
         holdRunningSign();
         const fs::path status = g_dir / "upscale_status.json";
         const Status s = readStatus(status);
@@ -452,22 +472,29 @@ namespace hd_progress
     std::string makeLabel()
     {
 #if defined(_WIN32)
-        // (TODO 267: the game's own window at work - Stop; stopped this session - Resume)
+        // (TODO 267: the game's own window at work - Stop; stopped this session - Resume; TODO 281: a verify at work)
         if (!g_stopped && g_ourMaker && pidAlive(g_ourMaker))
-            return "Stop making HD textures";
+            return g_ourMode == Mode::Verify ? "Verifying HD textures" : "Stop making HD textures";
         if (g_stopped)
             return "Resume making HD textures";
 #endif
         std::error_code ec;
         const fs::path dir = g_dir.empty() ? fs::absolute(fs::path("hd_textures"), ec) : g_dir;
         const Status s = readStatus(dir / "upscale_status.json");
-        const bool made = s.ok ? finished(s) : fs::is_directory(dir / "upscaled", ec);
-        return made ? "Check HD textures" : "Make HD textures";
+        // (TODO 281) A finished set: Verify (it reports, nothing changed). A set this card made broken, or set aside
+        // (TODO 242 / 259): Make tries the card again (after a driver update). None, or unfinished: Make.
+        const bool made = s.ok ? (finished(s) && s.state == "done") : fs::is_directory(dir / "upscaled", ec);
+        return made && nr::hdSetAside().empty() ? "Verify HD textures" : "Make HD textures";
     }
 
     std::string makeHdTextures()
     {
+        if (graphics_driver::lowEnd())
+            return "Not on this PC: its graphics are built-in or low-end, and making HD textures would make the game stutter or crash.";
 #if defined(_WIN32)
+        // (TODO 281) A verify at work: let it finish (it changes nothing; F1 shows its result).
+        if (g_ourMaker && pidAlive(g_ourMaker) && g_ourMode == Mode::Verify)
+            return "Verifying: the result shows here when it is done.";
         // (TODO 267) The button's Stop: the game's maker window and what it started end now (the job's), for this session.
         if (!g_stopped && g_ourMaker && pidAlive(g_ourMaker) && g_makerJob)
         {
@@ -512,6 +539,182 @@ namespace hd_progress
 #endif
     }
 
+    // ---- TODO 281: the card before a first make, Verify HD textures, Remake N broken images ----
+
+    namespace
+    {
+        // The graphics card the upscaler works on (the first one Windows lists that is not a software one).
+        std::string cardName()
+        {
+#if defined(_WIN32)
+            static const std::string name = []() -> std::string {
+                std::string out;
+                IDXGIFactory1 *factory = nullptr;
+                if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void **>(&factory))) && factory)
+                {
+                    IDXGIAdapter1 *adapter = nullptr;
+                    for (UINT i = 0; out.empty() && factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i)
+                    {
+                        DXGI_ADAPTER_DESC1 d{};
+                        if (SUCCEEDED(adapter->GetDesc1(&d)) && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE))
+                        {
+                            char buf[256] = {};
+                            WideCharToMultiByte(CP_UTF8, 0, d.Description, -1, buf, sizeof buf - 1, nullptr, nullptr);
+                            out = buf;
+                        }
+                        adapter->Release();
+                    }
+                    factory->Release();
+                }
+                return out;
+            }();
+            return name;
+#else
+            return {};
+#endif
+        }
+
+        bool has(const std::string &text, const char *part) { return text.find(part) != std::string::npos; }
+
+        // How long a whole set takes on this card, while the game runs beside it (MINUTES_*: measured, see TODO 281).
+        void makeMinutes(const std::string &card, int &lo, int &hi)
+        {
+            std::string c = card;
+            std::transform(c.begin(), c.end(), c.begin(), [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+            // (recent cards: AMD RX 6800 and up, RX 7000 / 9000; NVIDIA RTX 30 / 40 / 50)
+            const bool fast = (has(c, "RX 68") || has(c, "RX 69") || has(c, "RX 7") || has(c, "RX 9")) ||
+                              (has(c, "RTX") && (has(c, " 30") || has(c, " 40") || has(c, " 50")));
+            // (the generation before: AMD RX 5000 / RX 6400 - 6750; NVIDIA RTX 20, GTX 16, GTX 10)
+            const bool mid = has(c, "RX 5") || has(c, "RX 6") || has(c, "RTX 20") || has(c, "GTX 16") || has(c, "GTX 10");
+            if (fast)
+                lo = MINUTES_FAST_LO, hi = MINUTES_FAST_HI;
+            else if (mid)
+                lo = MINUTES_MID_LO, hi = MINUTES_MID_HI;
+            else
+                lo = MINUTES_ANY_LO, hi = MINUTES_ANY_HI; // (any other card, laptops' and older ones too: a wide range)
+        }
+
+        std::string readText(const fs::path &file)
+        {
+            std::ifstream in(file, std::ios::binary);
+            std::stringstream ss;
+            ss << in.rdbuf();
+            return ss.str();
+        }
+    }
+
+    bool needsMakeCard()
+    {
+        std::error_code ec;
+        const fs::path dir = g_dir.empty() ? fs::absolute(fs::path("hd_textures"), ec) : g_dir;
+        if (readStatus(dir / "upscale_status.json").ok)
+            return false; // (begun, or made: carried on without asking again)
+        return !fs::is_directory(dir / "upscaled", ec);
+    }
+
+    MakeCost makeCost()
+    {
+        MakeCost c;
+        // (measured 2026-11-11, a whole Best set: 7.5 GB in hd_textures - 5.6 the images, 1.6 their colour-match originals,
+        // the rest the disc's archives and the fonts - and the game's compressed copies of them, about 0.9 GB)
+        c.needGb = 8.5;
+        std::error_code ec;
+        const fs::space_info space = fs::space(fs::current_path(ec), ec);
+        c.freeGb = ec ? -1.0 : static_cast<double>(space.available) / (1024.0 * 1024.0 * 1024.0);
+        c.card = cardName();
+        makeMinutes(c.card, c.minutesLo, c.minutesHi);
+        return c;
+    }
+
+    VerifyState verifyState()
+    {
+        static std::chrono::steady_clock::time_point at{};
+        static VerifyState cached;
+        const auto now = std::chrono::steady_clock::now();
+        if (at != std::chrono::steady_clock::time_point{} && now - at < std::chrono::seconds(1))
+            return cached;
+        at = now;
+        VerifyState v;
+        std::error_code ec;
+        const fs::path dir = g_dir.empty() ? fs::absolute(fs::path("hd_textures"), ec) : g_dir;
+        const std::string json = readText(dir / "verify_report.json");
+        v.state = field(json, "state");
+        if (v.state == "running")
+        {
+            v.done = std::atoll(field(json, "done").c_str());
+            v.total = std::atoll(field(json, "total").c_str());
+        }
+        else if (v.state == "done")
+        {
+            v.remake = std::atoi(field(json, "remake").c_str());
+            v.intact = field(json, "intact") == "true";
+            v.finished = field(json, "finished");
+            std::istringstream lines(readText(dir / "verify_report.txt"));
+            for (std::string l; std::getline(lines, l);)
+            {
+                if (!l.empty() && l.back() == '\r')
+                    l.pop_back();
+                if (!l.empty())
+                    v.lines.push_back(l);
+            }
+        }
+#if defined(_WIN32)
+        // (a verify that ended without a report - the window closed: not "running" any more)
+        if (v.state == "running" && !(g_ourMaker && pidAlive(g_ourMaker) && g_ourMode == Mode::Verify) && !makerRunning(dir))
+            v.state = "stopped";
+#endif
+        cached = v;
+        return v;
+    }
+
+    namespace
+    {
+        // (Verify / Remake: the game's small window, as Make starts it)
+        std::string startMode(const wchar_t *mode)
+        {
+#if defined(_WIN32)
+            std::error_code ec;
+            if (g_dir.empty())
+                return "Not here: there are no HD textures";
+            if (!fs::exists(g_dir.parent_path() / "tools" / "make_hd_textures.ps1", ec))
+                return "Not here: tools\\make_hd_textures.ps1 is missing";
+            if (makerRunning(g_dir))
+                return "Being made already, in its own window";
+            holdRunningSign();
+            g_stopped = false;
+            startMaker(g_dir.parent_path(), mode);
+            return {};
+#else
+            // (Linux) F1 names the command; make_hd_textures.sh passes the same options to upscale_textures.py.
+            return std::wstring(mode) == L"-Verify" ? "Run tools/make_hd_textures.sh --verify" : "Run tools/make_hd_textures.sh --remake";
+#endif
+        }
+    }
+
+    std::string verifyHdTextures()
+    {
+        const std::string why = startMode(L"-Verify");
+        if (!why.empty())
+            return why;
+        std::fprintf(stderr, "[hd textures] verifying the set (F1): nothing is changed\n");
+        return "Verifying in a small window. Nothing is changed; the result shows here.";
+    }
+
+    std::string remakeBroken()
+    {
+        const std::string why = startMode(L"-Remake");
+        if (!why.empty())
+            return why;
+        std::fprintf(stderr, "[hd textures] remaking the images the last verify found (F1)\n");
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            if (g_line.empty())
+                g_line = "HD TEXTURES: STARTING";
+        }
+        startWatch(true, true);
+        return "Making them again in a small window while the game is open.";
+    }
+
     uint64_t generation() { return g_generation.load(std::memory_order_relaxed); }
 
     std::string line()
@@ -527,7 +730,7 @@ namespace hd_progress
                 aside = !nr::hdSetAside().empty();
             }
             if (aside)
-                return "HD TEXTURES: NOT USED. THIS GRAPHICS CARD MAKES BROKEN HD IMAGES. AFTER A DRIVER UPDATE: CHECK HD TEXTURES";
+                return "HD TEXTURES: NOT USED. THIS GRAPHICS CARD MAKES BROKEN HD IMAGES. AFTER A DRIVER UPDATE: MAKE HD TEXTURES";
         }
         if (g_ready)
             return "HD TEXTURES READY: RESTART TO USE THEM";

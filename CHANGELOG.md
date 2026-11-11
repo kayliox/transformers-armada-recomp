@@ -10,6 +10,8 @@
   lists them) the game has the emulated renderer only. vkd3d cannot yet compile the grass shader's double-precision
   version, so the grass uses its single-precision version there (checked on a Steam Deck: the same picture, 0.1% of
   pixels apart at blade edges).
+- Linux: `tools/make_hd_textures.sh --verify` checks HD images without changing them, and `--remake` makes again only
+  the images it found missing or broken (F1's HD buttons show the commands).
 - Linux: OpenGL goes through Mesa's Zink driver when the usual driver lacks a feature the GPU renderer needs (AMD,
   the Steam Deck). `TF_ZINK=0` turns this off.
 - Native renderer: the optional Vulkan backend (in development, off by default) compiles with the current backend
@@ -31,6 +33,7 @@
 - Linux: the VSync setting (F1 > Graphics) works there too (Off: the pictures go to the screen at once).
 
 **Fixed**
+- Linux: public builds link the 0.6.0 ultrawide hooks without the private decompilation bridge.
 - The first level (Amazon Basin) no longer stops with "Generic fatal error" on Linux: a C library function the game
   uses behaved differently there.
 - The game no longer crashes when it closes on Linux with Zink.
@@ -61,6 +64,64 @@
 - Linux and Steam Deck: "Finishing HD textures" no longer stays on screen after the HD set is finished, including
   sets made before this fix, and "HD textures ready" no longer comes back at every start once the set is finished.
   `make_hd_textures.sh` checks the set's images once, as the Windows maker does (0.4.7's checks too).
+
+## 0.6.0
+
+**New**
+- F1 is redesigned: each setting has one kind of control (a switch, a slider or a list), the default list is
+  short, and one "Show all settings" switch shows everything. Quit is now its own tab.
+- F1 > Graphics > "Trees close to you": the trees near the camera fade out (as on the console) or stay.
+- F1 > HD textures: making them now says first what it costs (disk space and time on your graphics card). A
+  finished set can be verified, and any broken images can be made again.
+- On laptops with two graphics chips, the game now uses the stronger one.
+- If your Intel graphics driver is very old, the game says so at start and shows where to get a new one. Old
+  Intel drivers scrambled the picture and the F1 menu.
+
+**Changed**
+- HD textures are no longer made on built-in graphics or cards with under 3.5 GB of video memory: making them
+  in the background made the game stutter or crash there. The update removes an HD set made on such a PC (once),
+  and the game uses its own textures.
+
+**Fixed**
+- The warp gates in levels now swirl, as in the HQ. On every graphics card the swirl stood still.
+- The electric shock effect (EMP grenades, the electric weapons) crackles and flickers again instead of showing a
+  still purple coat, and at the same speed at any frame rate.
+- Intel graphics no longer start with a black screen for a moment.
+- The FPS counter showed 600 or more on some PCs instead of the real rate.
+- The bright band in the sky with the modern glow (bloom) is gone.
+- The European disc: "Press ENTER" now works with the keyboard in all five languages.
+- A rare crash when a warp tunnel started.
+- F1 > Graphics > Resolution showed a size that is not the game's ("Auto (2560 x 1344)") with the native renderer.
+  It now says the game is drawn at the screen's size.
+
+## 0.5.4
+
+**Fixed**
+- An update could crash a PC (the screen went black and the graphics driver restarted) while it was making HD
+  textures, and the update stopped half way. The texture maker now works in smaller pieces on graphics cards that
+  need it, notices a driver restart, and carries on where it was instead of stopping.
+- If the setup window closes or crashes during an update, the update keeps going and finishes. Opening the setup
+  again shows how it went. (This part reaches you from the next update on, since an update runs with the setup
+  from the update before.)
+- A setup run as administrator now puts the shortcuts where every user of the PC sees them, and the player who is
+  signed in can change the game's files (settings, saves, HD textures).
+- If Windows asks for permission during the install, the setup now says so, instead of looking stuck.
+
+**New**
+- The game is also in the Start menu, so Steam's "Add a Non-Steam Game" lists it. Started from Steam or another
+  launcher, the game now counts as running until you quit it.
+
+## 0.5.3
+
+**Fixed**
+- F1 > Controls showed "Invert mouse up / down" twice, with an error message, and changing it (above all with a
+  controller) could switch straight back. It is one row again and keeps your choice.
+
+## 0.5.2
+
+**Fixed**
+- The setup window now accepts the European disc (SLES-52388). In 0.5.1 it still asked for the USA disc and kept
+  the Install button greyed out, so the European support could not be installed. Download the new tfa-setup.exe.
 
 ## 0.5.1
 

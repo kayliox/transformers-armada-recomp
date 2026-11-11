@@ -3,6 +3,7 @@
 #include "mod_menu.h"
 
 #include "camera_mode.h"
+#include "graphics_driver.h"
 #include "hd_progress.h"
 #include "install_layout.h"
 #include "support_report.h"
@@ -781,8 +782,17 @@ namespace mod_menu
         // word is swapped in place where the loaded table has them (same length: nothing moves).
         // Found by a scan of 2 MB a game frame while no level runs; each found word is checked every
         // frame and dropped when its bytes are something else (the memory reused).
+        // The European disc's other four tables say it in their own words (TODO 288: STRINGS\FRENCH.TXT
+        // ... SPANISH.TXT, KEY_START and KEY_PRESSSTART; their KEY_ATTRACTMODE is the English
+        // "PRESS START"), START at another place in each; the bytes as the tables hold them (Windows-1252).
         constexpr uint32_t kRamSize = PS2_RAM_SIZE, kScanStep = 0x00200000u;
-        const std::string_view kStartTexts[] = {"Press START button", "PRESS START"};
+        const std::string_view kStartTexts[] = {"Press START button", "PRESS START",
+                                                "Appuyer sur START",         // French
+                                                "START-Taste dr\xfc"
+                                                "cken",                      // German
+                                                "Premi il tasto START",      // Italian
+                                                "Pulsa el bot\xf3"
+                                                "n START"};                  // Spanish
         std::vector<uint32_t> g_startWords; // the address of each START / ENTER
         uint32_t g_startScanAt = 0u;
         int g_startScanPasses = 0;
@@ -815,14 +825,15 @@ namespace mod_menu
                     const char *hit = std::search(p, base + end, text.begin(), text.end());
                     if (hit == base + end)
                         break;
-                    const uint32_t at = static_cast<uint32_t>(hit - base) + 6u; // (START: at 6 in both)
+                    const uint32_t at = static_cast<uint32_t>(hit - base + text.find("START"));
                     // PRESS START alone: not followed by more capitals (another string)
                     const char next = hit + text.size() < base + kRamSize ? hit[text.size()] : '\0';
                     if ((text.size() > 11u || !(next >= 'A' && next <= 'Z')) &&
                         std::find(g_startWords.begin(), g_startWords.end(), at) == g_startWords.end())
                     {
                         g_startWords.push_back(at);
-                        std::fprintf(stderr, "[mod menu] \"%.*s\" at %08x\n", static_cast<int>(text.size()), hit, at - 6u);
+                        std::fprintf(stderr, "[mod menu] \"%.*s\" at %08x\n", static_cast<int>(text.size()), hit,
+                                     static_cast<uint32_t>(hit - base));
                     }
                     p = hit + 1;
                 }
@@ -1351,7 +1362,7 @@ namespace mod_menu
         bool otherRenderersRow(const SettingRow &r)
         {
             const bool native = ps2_settings::value("TF_RENDERER") == "native";
-            return (r.key == "PS2X_GPU_AA" && native) || (r.key == "TF_NATIVE_AA" && !native);
+            return (r.key == "PS2X_GPU_AA" && native) || (r.key == "TF_NATIVE_AA" && !native) || r.key == "TF_MENU_ALL";
         }
 
         Page pageOf(const SettingRow &r)
@@ -1462,7 +1473,7 @@ namespace mod_menu
             {"TF_DISTANCE_METER", "Distance meter", "The prototype's distance to the target, under the crosshair."},
             {"TF_SPEEDRUN_TIMER", "Speedrun timer", "A timer with a split for each level."},
             {"TF_RENDERER", "Renderer", "Native is faster and sharper. Takes a restart."},
-            {"PS2X_GPU_SCALE", "Resolution", "The resolution the game renders at."},
+            {"PS2X_GPU_SCALE", "Resolution", "The resolution the game renders at. With the native renderer the game is drawn at the screen's size, and this sets only the menus and movies."},
             {"TF_DRAW_DISTANCE", "Draw distance", "How far you can see detail: scenery, trees, grass and the ground."},
             {"TF_SCENERY_DISTANCE", "Scenery distance", "How far buildings and ruins keep their detail."},
             {"TF_FOREST_DISTANCE", "Forest distance", "How far the trees are full 3D models."},
@@ -1555,6 +1566,7 @@ namespace mod_menu
         }
 
         // One setting's row, by key (nothing when it is not registered or not for this renderer).
+        bool g_inAdvanced = false; // (TODO 286 d: the rows of a shown advanced part carry the tag)
         void keyRow(const char *key)
         {
             const SettingRow *found = rowFor(key);
@@ -1562,7 +1574,10 @@ namespace mod_menu
                 return;
             const SettingRow r = *found;
             const Words *w = wordsFor(r.key);
-            const std::string label = w ? w->label : labelOf(r);
+            std::string label = w ? w->label : labelOf(r);
+            // (TODO 286 d: no renderer names in labels - the rows of the renderer not in use are hidden)
+            if (const size_t at = label.find(" (native renderer)"); at != std::string::npos)
+                label.erase(at);
             if (g_list)
             {
                 listItem(label + " (" + r.key + ")");
@@ -1574,7 +1589,8 @@ namespace mod_menu
                 labels.push_back(choiceLabel(r, c));
             // (TODO 217: a dimmed row says why it is dimmed - its unavailable help - not what it would do)
             const int chosen = menu_style::choiceRow(r.key.c_str(), label, labels, r.selected, r.available,
-                                                     r.pending ? "RESTART" : nullptr, w && r.available ? std::string(w->help) : r.help);
+                                                     r.pending ? "RESTART" : (g_inAdvanced ? "ADVANCED" : nullptr),
+                                                     w && r.available ? std::string(w->help) : r.help);
             if (chosen >= 0 && chosen < static_cast<int>(r.choices.size()))
             {
                 ps2_settings::detail::choose(r.entry, r.choices[static_cast<size_t>(chosen)].value);
@@ -1582,39 +1598,29 @@ namespace mod_menu
             }
         }
 
-        // An "Advanced" fold-out: true while open (its rows follow). Closed by default; kept while the game runs.
-        bool advanced(const char *id)
+        // (TODO 286 d, the approved redesign) One way to the advanced settings: the "Show all settings" switch under the
+        // tabs (TF_MENU_ALL in settings.ini, remembered). On, every advanced row shows in its own place with an ADVANCED
+        // tag, and the Debug tab shows; off, they are hidden (their values stay). advanced(id) is true while it is on; the
+        // rows between it and advancedEnd() carry the tag. TF_MENU_ADVANCED=1 (tests): on from the start.
+        bool showAll()
         {
-            static std::vector<std::string> open;
-            // (TF_MENU_ADVANCED=1, tests: every fold-out open from the start, for TF_MENU_SHOT's pictures)
             static const bool allOpen = [] { const char *e = std::getenv("TF_MENU_ADVANCED"); return e && *e == '1'; }();
-            if (allOpen && std::find(open.begin(), open.end(), id) == open.end())
-                open.push_back(id);
-            const auto at = std::find(open.begin(), open.end(), id);
-            const bool isOpen = at != open.end();
+            return allOpen || ps2_settings::value("TF_MENU_ALL") == "1";
+        }
+        bool advanced(const char *)
+        {
             if (g_list)
             {
                 *g_list += " [advanced:";
-                return true; // (listed open; advancedEnd closes the bracket)
+                return true; // (listed: advancedEnd closes the bracket)
             }
-            ImGui::PushID(id);
-            ImGui::Indent(menu_style::textSize() * 0.6f);
-            const bool clicked = menu_style::smallButton(isOpen ? "Hide advanced" : "Advanced");
-            ImGui::Unindent(menu_style::textSize() * 0.6f);
-            ImGui::PopID();
-            if (clicked)
-            {
-                if (isOpen)
-                    open.erase(at);
-                else
-                    open.push_back(id);
-                return !isOpen;
-            }
-            return isOpen;
+            g_inAdvanced = showAll();
+            return g_inAdvanced;
         }
 
         void advancedEnd()
         {
+            g_inAdvanced = false;
             if (g_list)
                 *g_list += " ]";
         }
@@ -1795,7 +1801,7 @@ namespace mod_menu
         }
 
         // The keys the layouts place (the merged rows' too): left out of the leftover rows.
-        const char *const kPlaced[] = {
+        const char *const kPlaced[] = {"PS2X_MOUSE_INVERT_Y", "PS2X_PRESENT_SYNC", "TF_NATIVE_BLOOM", 
             "PS2X_FULLSCREEN", "PS2X_MONITOR", "PS2X_WIDESCREEN", "TF_ASPECT", "TF_FOV", "TF_HQ_FOV", "TF_FPS_CAP", "PS2X_SHOW_FPS",
             "TF_FRAME_RATE", "TF_FPS_LOCK", "TF_FRAME_PACING", "TF_CRISP_TEXT", "TF_BUTTON_SYMBOLS", "TF_KEY_PROMPTS", "TF_PAD_PROMPTS",
             "TF_SMALL_CROSSHAIR", "TF_HQ_PANELS", "TF_DISTANCE_METER", "TF_SPEEDRUN_TIMER", "TF_RENDERER", "PS2X_GPU_SCALE",
@@ -1845,6 +1851,7 @@ namespace mod_menu
             advancedEnd();
             pageHeading("Frame rate");
             keyRow("TF_FPS_CAP");
+            keyRow("PS2X_PRESENT_SYNC"); // (TODO 286 d: beside the limit it works with)
             keyRow("PS2X_SHOW_FPS");
             if (advanced("display-rate"))
             {
@@ -1853,36 +1860,30 @@ namespace mod_menu
                 keyRow("TF_FRAME_PACING");
             }
             advancedEnd();
-            pageHeading("Interface");
-            keyRow("TF_CRISP_TEXT");
-            // (Sharp text on, but its fonts never made - the HD textures step skipped or stopped before them: said
-            // plainly, not the old letters in silence.)
-            if (!g_list)
-                if (const SettingRow *crisp = rowFor("TF_CRISP_TEXT"); crisp && crisp->available && valueOf(*crisp) != "0" && !hd_progress::crispFontsFound())
-                    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Sharp text: not made yet - the HD textures step makes them");
-            mergedRow("prompts", "Button prompts",
-                      "Which buttons the game shows in its hints. Match device: your keys, or your controller's buttons.",
-                      buttonPrompts(), false);
-            keyRow("TF_SMALL_CROSSHAIR");
-            keyRow("TF_HQ_PANELS");
-            keyRow("TF_DISTANCE_METER");
-            keyRow("TF_SPEEDRUN_TIMER"); // (kept in settings.ini, TODO 74)
-            settingRows(Page::Display);
-            if (!g_list && speedrun_timer::enabled())
-            {
-                ImGui::Dummy(ImVec2(0.0f, 4.0f));
-                if (menu_style::button("Reset the timer"))
-                    speedrun_timer::reset();
-                const speedrun_timer::View v = speedrun_timer::view();
-                for (size_t i = 0; i < v.splits.size(); ++i)
-                    ImGui::TextDisabled("Level %zu   %s", i + 1, speedrun_timer::format(v.splits[i]).c_str());
-            }
+            if (advanced("display-more"))
+                settingRows(Page::Display);
+            advancedEnd();
+        }
+
+        // (TODO 290) A graphics driver known to draw the game wrong: said at the top of Graphics and About.
+        void driverWarning()
+        {
+            const std::string &w = graphics_driver::warning();
+            if (w.empty() || g_list)
+                return;
+            menu_style::heading("Graphics driver");
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(menu_style::colour("amber")));
+            ImGui::TextWrapped("%s", w.c_str());
+            ImGui::PopStyleColor();
         }
 
         void pageGraphics()
         {
+            driverWarning();
             mergedRow("preset", "Preset", "One choice for all the graphics settings.", presets(), true);
-            keyRow("TF_RENDERER");
+            if (advanced("graphics-renderer"))
+                keyRow("TF_RENDERER");
+            advancedEnd();
             keyRow("PS2X_GPU_SCALE");
             keyRow("TF_DRAW_DISTANCE");
             if (advanced("graphics-distance"))
@@ -1894,19 +1895,19 @@ namespace mod_menu
                 keyRow("TF_GRASS_DISTANCE");
                 keyRow("TF_TERRAIN_DETAIL");
                 keyRow("TF_FOREST_ADAPTIVE");
+                keyRow("TF_ENEMY_DETAIL");
             }
             advancedEnd();
-            keyRow("TF_ENEMY_DETAIL");
-            mergedRow("antialiasing", "Anti-aliasing", "Smooths jagged edges. Higher costs more.", antiAliasing(), true);
+            mergedRow("antialiasing", "Smooth edges", "Smooths jagged edges. Higher costs more.", antiAliasing(), true);
             if (advanced("graphics-aa"))
             {
                 keyRow("TF_NATIVE_AA");
                 keyRow("PS2X_GPU_AA");
                 keyRow("PS2X_GPU_MSAA");
                 keyRow("TF_NATIVE_SSAA");
+                keyRow("TF_NATIVE_QUALITY");
             }
             advancedEnd();
-            keyRow("TF_NATIVE_QUALITY");
             // (TODO 243) The HD textures (the native renderer's, made from the disc) on or off, with their buttons. The
             // texture pack rows are the emulated renderer's PCSX2 packs, a different thing: shown only with it.
             const bool native = ps2_settings::value("TF_RENDERER") == "native";
@@ -1923,6 +1924,18 @@ namespace mod_menu
                         note = hd_progress::openTextureFolder();
                         noteAt = ImGui::GetTime();
                     }
+                    // (User decision 2026-11-11) Built-in or low-end graphics: no HD textures are made here, so no Make button.
+                    if (graphics_driver::lowEnd())
+                    {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(menu_style::colour("amber")));
+                        ImGui::TextWrapped("Built-in or low-end graphics: HD textures are not made on this PC (they make the game "
+                                           "stutter or crash on it).");
+                        ImGui::PopStyleColor();
+                        if (!note.empty() && ImGui::GetTime() - noteAt < 6.0)
+                            ImGui::TextWrapped("%s", note.c_str());
+                    }
+                    else
+                    {
                     // (TODO 219) The HD step for a player who skipped it or never finished it, in its own small window.
                     static std::string makeLabel;
                     static double labelAt = -100.0;
@@ -1932,29 +1945,88 @@ namespace mod_menu
                         labelAt = ImGui::GetTime();
                     }
                     ImGui::SameLine();
+                    // (TODO 281) Make: before a first set, a card says what it costs and asks. Verify: the set checked and
+                    // reported (nothing changed). Remake N broken images: after a verify that found some.
+                    static bool card = std::getenv("TF_HD_CARD_TEST") != nullptr; // (TF_HD_CARD_TEST=1: open from the start, tests)
                     if (menu_style::button(makeLabel.c_str()))
                     {
-                        note = hd_progress::makeHdTextures();
+                        if (makeLabel == "Verify HD textures")
+                            note = hd_progress::verifyHdTextures();
+                        else if (makeLabel == "Make HD textures" && hd_progress::needsMakeCard())
+                            card = !card, note.clear();
+                        else
+                            note = hd_progress::makeHdTextures();
                         noteAt = ImGui::GetTime();
+                        labelAt = -100.0;
+                    }
+                    const hd_progress::VerifyState verify = hd_progress::verifyState();
+                    if (!card && verify.state == "done" && verify.remake > 0 && makeLabel == "Verify HD textures")
+                    {
+                        const std::string remake = "Remake " + std::to_string(verify.remake) + (verify.remake == 1 ? " broken image" : " broken images");
+                        ImGui::SameLine();
+                        if (menu_style::button(remake.c_str()))
+                        {
+                            note = hd_progress::remakeBroken();
+                            noteAt = ImGui::GetTime();
+                            labelAt = -100.0;
+                        }
+                    }
+                    if (card)
+                    {
+                        const hd_progress::MakeCost cost = hd_progress::makeCost();
+                        char disk[160], time[160];
+                        if (cost.freeGb >= 0.0)
+                            std::snprintf(disk, sizeof disk, "Needs about %.1f GB of disk (%.0f GB free on this drive).", cost.needGb, cost.freeGb);
+                        else
+                            std::snprintf(disk, sizeof disk, "Needs about %.1f GB of disk.", cost.needGb);
+                        std::snprintf(time, sizeof time, "Takes about %d to %d minutes on this graphics card, while you play.", cost.minutesLo,
+                                      cost.minutesHi);
+                        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+                        menu_style::heading("Make HD textures?");
+                        ImGui::TextUnformatted(disk);
+                        ImGui::TextUnformatted(time);
+                        ImGui::TextUnformatted("The game runs a little slower until they are done.");
+                        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+                        if (menu_style::button("Start", true))
+                        {
+                            card = false;
+                            note = hd_progress::makeHdTextures();
+                            noteAt = ImGui::GetTime();
+                            labelAt = -100.0;
+                        }
+                        ImGui::SameLine();
+                        if (menu_style::button("Not now"))
+                            card = false;
+                    }
+                    else if (verify.state == "running")
+                        ImGui::TextDisabled("Verifying the HD textures: %lld of %lld files checked", verify.done, verify.total);
+                    else if (verify.state == "done" && makeLabel == "Verify HD textures")
+                    {
+                        ImGui::PushTextWrapPos(0.0f);
+                        for (const std::string &l : verify.lines)
+                            ImGui::TextDisabled("%s", l.c_str());
+                        ImGui::PopTextWrapPos();
                     }
                     if (!note.empty() && ImGui::GetTime() - noteAt < 10.0)
                         ImGui::TextDisabled("%s", note.c_str());
+                    }
                 }
                 else
-                    listItem("Open texture folder, Make HD textures (buttons)");
+                    listItem("Open texture folder, Make / Verify HD textures, Remake broken images (buttons)");
             }
+            keyRow("TF_SMOOTH_TEXTURES");
+            keyRow("TF_NATIVE_BLOOM"); // (Glow)
             if (advanced("graphics-textures"))
             {
                 keyRow("TF_SHARP_TEXTURES");
-                keyRow("TF_SMOOTH_TEXTURES");
                 if (!native)
                 {
                     keyRow("PS2X_TEXTURE_PACK");
                     keyRow("PS2X_GPU_ANISOTROPY");
                 }
+                settingRows(Page::Graphics);
             }
             advancedEnd();
-            settingRows(Page::Graphics);
         }
 
         void pageControls()
@@ -1966,13 +2038,24 @@ namespace mod_menu
             settingRows(Page::Controls, "Mouse");
             pageHeading("Controller");
             keyRow("PS2X_SONYPAD_RUMBLE");
-            keyRow("PS2X_SONYPAD_LIGHTBAR");
-            keyRow("TF_LIGHTBAR_ALERTS");
-            keyRow("TF_ADAPTIVE_TRIGGERS");
-            keyRow("TF_TRIGGER_STRENGTH");
-            keyRow("TF_PAD_SPEAKER");
-            keyRow("TF_PAD_SPEAKER_VOLUME");
-            keyRow("TF_PAD_SPEAKER_DELAY");
+            {
+                // (TODO 286 d) The DualSense / DualShock 4's own rows: shown while one is connected, else with "Show all
+                // settings".
+                ps2x::sonypad::InputState pad;
+                const bool sony = !g_list && ps2x::sonypad::readHostPad(pad);
+                if (sony || advanced("controls-sony"))
+                {
+                    keyRow("PS2X_SONYPAD_LIGHTBAR");
+                    keyRow("TF_LIGHTBAR_ALERTS");
+                    keyRow("TF_ADAPTIVE_TRIGGERS");
+                    keyRow("TF_TRIGGER_STRENGTH");
+                    keyRow("TF_PAD_SPEAKER");
+                    keyRow("TF_PAD_SPEAKER_VOLUME");
+                    keyRow("TF_PAD_SPEAKER_DELAY");
+                }
+                if (!sony)
+                    advancedEnd();
+            }
             keyRow("PS2X_STICK_LEFT_DEADZONE");
             keyRow("PS2X_STICK_RIGHT_DEADZONE");
             keyRow("PS2X_STICK_RESPONSE");
@@ -2041,7 +2124,33 @@ namespace mod_menu
             }
             pageHeading("Game");
             keyRow("TF_CFG_showHUD");
+            keyRow("TF_CRISP_TEXT");
+            // (Sharp text on, but its fonts never made - the HD textures step skipped or stopped before them: said
+            // plainly, not the old letters in silence.)
+            if (!g_list)
+                if (const SettingRow *crisp = rowFor("TF_CRISP_TEXT"); crisp && crisp->available && valueOf(*crisp) != "0" && !hd_progress::crispFontsFound())
+                    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Sharp text: not made yet - the HD textures step makes them");
+            mergedRow("prompts", "Button prompts",
+                      "Which buttons the game shows in its hints. Match device: your keys, or your controller's buttons.",
+                      buttonPrompts(), false);
+            keyRow("TF_SMALL_CROSSHAIR");
             keyRow("TF_START_SCREENS");
+            if (advanced("game-more"))
+            {
+                keyRow("TF_HQ_PANELS");
+                keyRow("TF_DISTANCE_METER");
+                keyRow("TF_SPEEDRUN_TIMER"); // (kept in settings.ini, TODO 74)
+            if (!g_list && speedrun_timer::enabled())
+            {
+                ImGui::Dummy(ImVec2(0.0f, 4.0f));
+                if (menu_style::button("Reset the timer"))
+                    speedrun_timer::reset();
+                const speedrun_timer::View v = speedrun_timer::view();
+                for (size_t i = 0; i < v.splits.size(); ++i)
+                    ImGui::TextDisabled("Level %zu   %s", i + 1, speedrun_timer::format(v.splits[i]).c_str());
+            }
+            }
+            advancedEnd();
             settingRows(Page::Gameplay);
             pageHeading("Cheat codes");
             if (!g_list)
@@ -2127,8 +2236,7 @@ namespace mod_menu
         bool pageShown(Page page)
         {
 #if defined(TF_OVERLAY)
-            (void)page;
-            return true; // (Debug always: its recordings - TODO 156)
+            return page != Page::Other || showAll(); // (TODO 286 d: Debug with "Show all settings")
 #else
             // The public build (no overlay): no Mods & cheats page and no Debug page - their rows are the overlay's.
             return page != Page::Mods && page != Page::Other;
@@ -2143,6 +2251,7 @@ namespace mod_menu
         // reaches it below the last tab (g_navQuit), Cross asks and then quits, Circle takes the question back.
         uint64_t g_quitAskedFrame = 0u, g_menuFrames = 0u;
         bool g_navQuit = false, g_navQuitPress = false;
+        bool g_navShowAll = false, g_navShowAllPress = false; // (TODO 286 d: the pad on the "Show all settings" switch)
         void quitNow(PS2Runtime &runtime)
         {
             std::fprintf(stderr, "[mod menu] Quit game: the game is closed from the menu\n");
@@ -2179,6 +2288,7 @@ namespace mod_menu
                 break;
             case Page::About:
                 // The version, the update check and updating (TODO 104: updates.h).
+                driverWarning();
                 if (g_list)
                     keyRow("TF_UPDATE_CHECK");
                 else
@@ -2418,11 +2528,30 @@ namespace mod_menu
             {
                 // (TODO 286 c) Below the last tab: the Quit game button. Cross asks, Cross again quits, Circle takes the
                 // question back (and with no question closes the menu, as at the tabs).
+                if (g_navShowAll)
+                {
+                    if (in.up)
+                        g_navShowAll = false;
+                    else if (in.down)
+                    {
+                        g_navShowAll = false;
+                        g_navQuit = true;
+                    }
+                    else if (in.confirm)
+                        g_navShowAllPress = true;
+                    else if (in.back)
+                    {
+                        g_open = false;
+                        g_holdBlock = true;
+                    }
+                    return;
+                }
                 if (g_navQuit)
                 {
                     if (in.up)
                     {
                         g_navQuit = false;
+                        g_navShowAll = g_quitAskedFrame == 0u; // (up from Quit: the switch above it)
                         g_quitAskedFrame = 0u;
                     }
                     else if (in.confirm)
@@ -2442,7 +2571,7 @@ namespace mod_menu
                 if (in.up)
                     stepPage(-1);
                 if (in.down && lastShown)
-                    g_navQuit = true;
+                    g_navShowAll = true;
                 else if (in.down)
                     stepPage(1);
                 if (in.confirm)
@@ -2594,7 +2723,7 @@ namespace mod_menu
 
             // The side bar.
             ImGui::SetCursorScreenPos(ImVec2(pad, top));
-            ImGui::BeginChild("##side", ImVec2(sideWidth, bottom - top), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
+            ImGui::BeginChild("##side", ImVec2(sideWidth, bottom - top - size * 2.6f), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar); // (room for "Show all settings")
             for (int i = 0; i < static_cast<int>(std::size(kPages)); ++i)
             {
                 if (!pageShown(kPages[i].page))
@@ -2616,6 +2745,34 @@ namespace mod_menu
                 ImGui::Dummy(ImVec2(0.0f, size * 0.15f));
             }
             ImGui::EndChild();
+            {
+                // (TODO 286 d) "Show all settings" under the tabs: the one way to the advanced settings.
+                const bool all = showAll();
+                const float rowH = size * 2.0f;
+                const ImVec2 ra(pad, bottom - rowH), rb(pad + sideWidth, bottom);
+                ImGui::SetCursorScreenPos(ra);
+                const bool clicked = ImGui::InvisibleButton("##showall", ImVec2(sideWidth, rowH));
+                const bool hot = ImGui::IsItemHovered();
+                dl->AddLine(ImVec2(ra.x, ra.y - size * 0.3f), ImVec2(rb.x, ra.y - size * 0.3f), colour("line"), 1.0f);
+                dl->AddText(f.text, size * 0.9f, ImVec2(ra.x, ra.y + rowH * 0.5f - size * 0.5f), hot ? colour("text") : colour("dim"),
+                            "Show all settings");
+                const float sh = size * 1.0f, sw = sh * 1.9f;
+                const ImVec2 ka(rb.x - sw, ra.y + (rowH - sh) * 0.5f), kb(rb.x, ka.y + sh);
+                dl->AddRectFilled(ka, kb, all ? colour("blue") : IM_COL32(30, 37, 49, 255), sh * 0.5f);
+                if (!all)
+                    dl->AddRect(ka, kb, hot ? colour("blue") : colour("line"), sh * 0.5f);
+                dl->AddCircleFilled(ImVec2(all ? kb.x - sh * 0.5f : ka.x + sh * 0.5f, ka.y + sh * 0.5f), sh * 0.5f - 3.0f, colour("text"));
+                if (g_navPad && g_navLevel == 0 && g_navShowAll)
+                    dl->AddRect(ImVec2(ra.x - 4.0f, ra.y), ImVec2(rb.x + 4.0f, rb.y), colour("blue"), 3.0f, 0, 2.0f);
+                if (hot)
+                    menu_style::setHelp("Off: the settings most players need. On: every setting, the advanced ones marked, and the Debug tab.");
+                if (clicked || std::exchange(g_navShowAllPress, false))
+                    if (const SettingRow *r = rowFor("TF_MENU_ALL"))
+                    {
+                        ps2_settings::detail::choose(r->entry, all ? "0" : "1");
+                        g_rowsAt = -1.0;
+                    }
+            }
 
             // The page.
             const float pageX = pad + sideWidth + pad;
@@ -2745,6 +2902,18 @@ namespace mod_menu
 
     void addSettings()
     {
+        {
+            // (TODO 286 d) "Show all settings" (the switch under F1's tabs): remembered in settings.ini, never a row.
+            ps2_settings::Setting s;
+            s.key = "TF_MENU_ALL";
+            s.section = "Overlay";
+            s.label = "Show all settings";
+            s.help = "Every setting in F1, the advanced ones marked.";
+            s.choices = {{"0", "Off"}, {"1", "On"}};
+            s.defaultValue = "0";
+            s.apply = [](const std::string &) { return true; };
+            ps2_settings::add(s);
+        }
         updates::addSettings(); // About: checking for updates automatically (updates.h)
         menu_mouse::addSettings(); // Controls: the mouse in the pause menu (menu_mouse.h)
         distance_meter::addSettings(); // Mods & cheats: the prototype's distance meter (distance_meter.h)
@@ -2898,6 +3067,7 @@ namespace mod_menu
         {
             g_navLevel = 0;
             g_navQuit = g_navQuitPress = false; // (TODO 286 c: the Quit question not left open for next time)
+            g_navShowAll = g_navShowAllPress = false;
             g_quitAskedFrame = 0u;
         }
         navLog();

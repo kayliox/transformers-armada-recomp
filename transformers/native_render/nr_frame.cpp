@@ -1044,7 +1044,9 @@ namespace nr::frame
             float threshold[3] = {}, strength[3] = {};
             size_t chain = 0, additions = 0;
             // The chain's vignette: its strips of one grey each (a copy modulated by a colour, a band of the buffer), in the
-            // buffer's order - after the chain's turn, top to bottom on the screen. 0: none found (a flat bloom).
+            // buffer's order - after the chain's turn, top to bottom on the screen. 0: none found (a flat bloom). Each is the
+            // grey's own weight (grey / 0x80, the GS's modulation), as the game's glow takes it: the vignette follows the
+            // sun down the screen, often only two or three bands lit and none brighter than half (TODO 271).
             float profile[8] = {};
             int profileN = 0;
         };
@@ -1167,15 +1169,13 @@ namespace nr::frame
                 if (strips.size() >= 4u && strips.size() <= 8u)
                 {
                     std::sort(strips.begin(), strips.end());
-                    float sum = 0.0f;
-                    for (const auto &s : strips)
-                        sum += s.second;
-                    if (sum > 0.0f)
-                    {
-                        out.profileN = static_cast<int>(strips.size());
-                        for (int k = 0; k < out.profileN; ++k)
-                            out.profile[k] = strips[static_cast<size_t>(k)].second * static_cast<float>(out.profileN) / sum; // (mean 1)
-                    }
+                    // (TODO 271: not scaled to a mean of 1 any more - with the sun's band alone lit, Deep Amazon's sunset, that
+                    // made its two bands 5.7 and 2.3 times the glow, where the game gives them 0.43 and 0.17: a yellow-white
+                    // band across the sky with a hard edge; in the other states measured 3 to 27 times the game's glow. The F1 strength slider
+                    // stays the way to more.)
+                    out.profileN = static_cast<int>(strips.size());
+                    for (int k = 0; k < out.profileN; ++k)
+                        out.profile[k] = strips[static_cast<size_t>(k)].second;
                 }
             }
             out.found = out.additions != 0u;

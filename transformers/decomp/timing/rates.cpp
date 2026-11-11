@@ -34,6 +34,8 @@ namespace tf::timing
 
         // The return address of the period's call in a car's reset (0x31F6D0).
         constexpr uint32_t kCarResetReturn = 0x0031F7E0u;
+        // The creature effects' update (taCreatureEffectSwitcher, 0x533010, 0x6C8 bytes): its calls of the period.
+        constexpr uint32_t kEffectsUpdate = TF_GA(0x00533010u), kEffectsUpdateSize = 0x6C8u;
     }
 
     f32 LevelFrameRate(int rate)
@@ -82,6 +84,11 @@ namespace tf::timing
         // at every rate (overrides.cpp, "The cars").
         if (port::levelRate() != 0 && decomp::guest().gpr(31) == kCarResetReturn)
             return ConsoleFramePeriod();
+        // PC: (TODO 290) the creature effects' update steps a console frame while the electric shock runs - every 30th
+        // of a second at the PC port's rate (overrides.cpp effectsUpdate) - and takes that frame's time.
+        if (port::levelRate() != 0 && port::effectsAtConsoleStep())
+            if (const uint32_t ra = decomp::guest().gpr(31); ra > kEffectsUpdate && ra < kEffectsUpdate + kEffectsUpdateSize)
+                return ConsoleFramePeriod();
         f32 rate = frameRates[RateStandard()];
         if (halfRate != 0)
             rate = rate / 2.0f;

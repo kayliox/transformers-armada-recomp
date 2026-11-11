@@ -6,6 +6,7 @@
 // the window's GL reads itself (nr_glshare.h: no copy through the CPU); otherwise the CPU hand-over
 // uploads straight from the renderer's mapped readback (no copy on the render side), which the window
 // gives back once the upload has returned. TF_NATIVE_SHARE=0 keeps the CPU hand-over.
+#include "graphics_driver.h"
 #include "nr_types.h"
 #include "nr_backend.h"
 #include "nr_glshare.h"
@@ -267,7 +268,13 @@ namespace nr
             if (share == 0)
             {
                 const char *v = std::getenv("TF_NATIVE_SHARE");
-                share = (!v || *v != '0') && glshare::available() ? 1 : -1;
+                // (TODO 290) Intel's drivers: the CPU hand-over from the start. The N100's UHD Graphics read the shared
+                // pictures as zeros (a black start until the check gave up on them), an Iris Xe on an old driver could
+                // not share at all; TF_NATIVE_SHARE=1 tries the sharing all the same.
+                const bool intel = graphics_driver::vendor() == 0x8086u && !(v && *v == '1');
+                if (intel)
+                    std::fprintf(stderr, "[native render] an Intel graphics card: pictures handed over through the CPU (TF_NATIVE_SHARE=1: shared)\n");
+                share = (!v || *v != '0') && !intel && glshare::available() ? 1 : -1;
                 backend().setSharedPictures(share == 1);
             }
             struct Imported
@@ -329,6 +336,11 @@ namespace nr
                         unsigned colour = 0u, alpha = 0u;
                         if (glshare::readBack(im.texture, sp.width, sp.height, colour, alpha))
                         {
+                            // (TF_NATIVE_SHARE_TEST=zeros: read as nothing but zeros, as Intel's driver does - tests of the
+                            // fallback to the CPU hand-over, TODO 284)
+                            static const bool zeros = std::getenv("TF_NATIVE_SHARE_TEST") && std::strcmp(std::getenv("TF_NATIVE_SHARE_TEST"), "zeros") == 0;
+                            if (zeros)
+                                colour = alpha = 0u;
                             if (colour != 0u || alpha != 0u)
                             {
                                 verified = true;
@@ -351,6 +363,10 @@ namespace nr
             }
             else if (share != 1 && backend().latestPicture(src, pitch, readback, serial, sp))
             {
+                // (TODO 284) The picture taken, as the shared path marks it: the paced hand-over (paceWait) waits for one
+                // newer than this. Unmarked, every wait found the CPU hand-over's picture "new" again - the window drew
+                // as fast as it could and counted each draw: the FPS counter read 600-1500 (TF_NATIVE_SHARE=0, Proton, the
+                // Intel fallback).
                 fresh = true;
                 g_takenSerial.store(serial, std::memory_order_relaxed);
                 w = sp.width;

@@ -22,7 +22,6 @@ mod winapi;
 mod launcher;
 
 use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -35,6 +34,7 @@ const REPO_URL: &str = match option_env!("TFA_REPO_URL") {
 };
 const MODS: bool = option_env!("TFA_MODS").is_some();
 const USA_ISO_SIZE: u64 = 2_900_951_040; // Transformers (USA), SLUS-20668
+const PAL_ISO_SIZE: u64 = 4_546_691_072; // Transformers (Europe), SLES-52388: experimental, maintained by a contributor
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const ACCENT: Color32 = Color32::from_rgb(0xF0, 0x8A, 0x24);
@@ -100,6 +100,7 @@ struct App {
     hd_fast: bool,          // (TODO 219) HD textures: Fast (2K characters, one pass) instead of Best
     hd_while_playing: bool, // keep making them while the game runs
     gpu: Option<(String, u64)>, // the graphics card the suggestion is for (name, video memory)
+    low_end: bool,              // built-in or low-end graphics: no HD textures made (detect_gpu)
     hd_playable: bool,      // the HD step has got to the upscale: the game can be played meanwhile
     phase: Phase,
     steps: Vec<Step>,
@@ -140,6 +141,7 @@ impl App {
             hd_fast: false,
             hd_while_playing: false,
             gpu: None,
+            low_end: false,
             hd_playable: false,
             phase: Phase::Form,
             steps: make_steps(MODS),
@@ -166,6 +168,12 @@ impl App {
         let best = cards.into_iter().filter(|(n, _)| !n.to_ascii_lowercase().contains("basic")).max_by_key(|(_, v)| *v);
         if let Some((name, vram)) = best {
             self.hd_fast = suggest_fast(&name, vram);
+            // (User decision 2026-11-11) Built-in or low-end graphics (no card with 3.5 GB of its own video memory; the
+            // GTX 1650's 4 GB and up are not): no HD textures are made on it - make_hd_textures.ps1 refuses too.
+            self.low_end = vram < 3584 * 1024 * 1024 || std::env::var("TFA_LOW_END").is_ok_and(|v| v == "1"); // (TFA_LOW_END=1: tests)
+            if self.low_end {
+                self.hd = false;
+            }
             self.gpu = Some((name, vram));
         }
     }
@@ -210,6 +218,12 @@ impl App {
 
     fn start_update(&mut self) {
         self.update = true;
+        self.update_step_texts();
+        self.start();
+    }
+
+    /// The steps' texts for an update.
+    fn update_step_texts(&mut self) {
         for (i, s) in self.steps.iter_mut().enumerate() {
             s.status = Status::Pending;
             s.detail = match i {
@@ -221,7 +235,6 @@ impl App {
             };
         }
         self.steps[STEP_TOOLS].status = Status::Done;
-        self.start();
     }
 
     fn start(&mut self) {
@@ -256,6 +269,60 @@ impl App {
         };
         std::thread::spawn(move || {
             let result = job.run(&tx);
+            let _ = tx.send(Msg::Finished(result));
+        });
+    }
+
+    /// (TODO 289) A step the setup before this one left running (its window died - a graphics driver reset): followed
+    /// to its end in this window instead of a second update or install started beside it.
+    fn follow_left_step(&mut self, left: LeftStep) {
+        self.update = left.update;
+        self.play = left.play;
+        for s in self.steps.iter_mut() {
+            s.status = Status::Pending;
+        }
+        if self.update {
+            self.update_step_texts();
+        }
+        let (tx, rx) = channel();
+        self.rx = Some(rx);
+        self.phase = Phase::Running;
+        self.progress = 0.0;
+        let folder = PathBuf::from(&self.folder);
+        let repo = self.repo();
+        let (update, managed) = (self.update, false);
+        let first = if update { STEP_DOWNLOAD } else { STEP_TOOLS };
+        let _ = tx.send(Msg::Step(first));
+        let _ = tx.send(Msg::Detail(first, "the setup closed while this was running: it went on by itself, followed here".into()));
+        std::thread::spawn(move || {
+            let pid = left.pid;
+            let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let code = Arc::new(Mutex::new(None::<i32>));
+            let waiter = {
+                let (done, code) = (done.clone(), code.clone());
+                std::thread::spawn(move || {
+                    *code.lock().unwrap() = winapi::wait_for_exit(pid);
+                    done.store(true, std::sync::atomic::Ordering::SeqCst);
+                })
+            };
+            // (from a little before the log's end: the last lines shown at once)
+            let len = std::fs::metadata(&left.log).map(|m| m.len()).unwrap_or(0);
+            let tail = Arc::new(Mutex::new(Vec::<String>::new()));
+            follow_log(&left.log, len.saturating_sub(4096), first, &tx, &tail, &|| done.load(std::sync::atomic::Ordering::SeqCst));
+            let _ = waiter.join();
+            LeftStep::clear(&folder);
+            let result = match *code.lock().unwrap() {
+                Some(0) => {
+                    copy_self(&folder);
+                    if !update && !managed {
+                        remember_folder(&folder);
+                    }
+                    let _ = std::fs::remove_file(folder.join(UNFINISHED_MARK));
+                    desktop_shortcut_once(&folder, &repo);
+                    Ok(())
+                }
+                _ => Err(format!("{}\n\nThe full log: {}", tail.lock().unwrap().join("\n"), left.log.display())),
+            };
             let _ = tx.send(Msg::Finished(result));
         });
     }
@@ -390,10 +457,19 @@ struct Job {
 }
 
 impl Job {
+    fn log_path(&self) -> PathBuf {
+        self.folder.join(if self.update { "update-setup.log" } else { "setup.log" })
+    }
+
     fn run(&self, tx: &Sender<Msg>) -> Result<(), String> {
         std::fs::create_dir_all(&self.folder).map_err(|e| format!("cannot make {}: {e}", self.folder.display()))?;
-        let log_path = self.folder.join(if self.update { "update-setup.log" } else { "setup.log" });
-        let log = Arc::new(Mutex::new(std::fs::File::create(&log_path).ok()));
+        let log_path = self.log_path();
+        // (TODO 289: opened for appending - the steps' programs write their output into it themselves, so a step
+        // goes on writing it when this window is gone - a graphics driver reset took a player's setup window, and
+        // its update with it)
+        let log = Arc::new(Mutex::new(std::fs::File::create(&log_path).ok().and_then(|_| {
+            std::fs::OpenOptions::new().append(true).open(&log_path).ok()
+        })));
         let mut path_env = std::env::var("PATH").unwrap_or_default();
         // (a run that does not finish - closed half way - leaves this mark: the setup opens again next time,
         // not the game; a player's report. Installs from before the mark have none: finished.)
@@ -558,78 +634,181 @@ Git could not be installed or found. Install Git from git-scm.com and run the se
         // (update.ps1 on a failure: no 30 s pause in a window nobody sees)
         cmd.env("TFA_UPDATE_NO_PAUSE", "1");
         if self.managed { cmd.env("RECOMPLAUNCHER", "1"); }
-        cmd.args(args).env("PATH", &path_env).env_remove("PSModulePath").stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null()).creation_flags_no_window();
+        // (TODO 289) Its output goes straight into the log file, which this window follows - not through pipes to this
+        // window: a player's graphics driver reset (a GTX 1660 SUPER, during the HD textures) took the setup's window
+        // down, and with its pipes gone and its job object closed the whole update died with it. Now the step carries
+        // on by itself, and the setup started again follows it (see `follow_left_step`).
+        let log_path = self.log_path();
+        let out_file = log.lock().unwrap().as_ref().and_then(|f| f.try_clone().ok());
+        let (out_file, err_file) = match out_file.and_then(|f| f.try_clone().ok().map(|g| (f, g))) {
+            Some(pair) => pair,
+            None => return Err(format!("the log {} could not be written", log_path.display())),
+        };
+        let start_at = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
+        cmd.args(args).env("PATH", &path_env).env_remove("PSModulePath").stdout(Stdio::from(out_file)).stderr(Stdio::from(err_file))
+            .stdin(Stdio::null()).creation_flags_no_window();
         if let Some(d) = dir {
             cmd.current_dir(d);
         }
+        winapi::allow_foreground();
         let mut child = cmd.spawn().map_err(|e| format!("{exe} could not be started: {e}"))?;
-        // (its whole process tree in a job object: Cancel ends all of it. When the step is done what it
-        // left is ended too - but not after an update that starts the game again at its end)
-        let tree = Arc::new(winapi::ProcessTree::new(&child, !self.play));
+        // (its whole process tree in a job object: Cancel ends all of it, and so does closing this window (on_exit).
+        // Not ended when this program dies (no kill-on-close): an update then finishes on its own. When the step is
+        // done what it left is ended - but not after an update that starts the game again at its end)
+        let tree = Arc::new(winapi::ProcessTree::new(&child, false));
         *self.child.lock().unwrap() = Some(tree.clone());
+        let running = LeftStep { pid: child.id(), started: winapi::process_started(child.id()).unwrap_or(0), log: log_path.clone(),
+                                 update: self.update, play: self.play };
+        running.write(&self.folder);
         let tail = Arc::new(Mutex::new(Vec::<String>::new()));
-        let current = Arc::new(Mutex::new(step));
-        let readers: Vec<_> = [child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
-                                child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>)]
-            .into_iter()
-            .flatten()
-            .map(|stream| {
-                let (tx, tail, current, log) = (tx.clone(), tail.clone(), current.clone(), log.clone());
-                std::thread::spawn(move || {
-                    for line in BufReader::new(stream).lines().map_while(Result::ok) {
-                        if let Some(f) = log.lock().unwrap().as_mut() {
-                            use std::io::Write;
-                            let _ = writeln!(f, "{line}");
-                        }
-                        let text = line.trim().to_string();
-                        if text.is_empty() {
-                            continue;
-                        }
-                        let mut cur = current.lock().unwrap();
-                        if let Some(title) = text.strip_prefix("==> ") {
-                            let (s, p) = classify(title, *cur);
-                            if s != *cur {
-                                *cur = s;
-                                let _ = tx.send(Msg::Step(s));
-                            }
-                            if let Some(p) = p {
-                                let _ = tx.send(Msg::Progress(p));
-                            }
-                            let _ = tx.send(Msg::Detail(s, title.to_string()));
-                        } else if !text.starts_with("--") && !text.contains("warning") && !text.contains("RemoteException") {
-                            if *cur == STEP_GAME {
-                                if let Some(p) = compile_progress(&text) {
-                                    let _ = tx.send(Msg::Progress(p));
-                                }
-                            }
-                            if *cur == STEP_HD {
-                                if let Some(p) = hd_progress(&text) {
-                                    let _ = tx.send(Msg::Progress(p));
-                                }
-                            }
-                            let short: String = text.chars().take(110).collect();
-                            let _ = tx.send(Msg::Detail(*cur, short));
-                        }
-                        let mut t = tail.lock().unwrap();
-                        t.push(text);
-                        if t.len() > 12 {
-                            t.remove(0);
-                        }
-                    }
-                })
-            })
-            .collect();
-        let status = child.wait().map_err(|e| e.to_string())?;
-        for r in readers {
-            let _ = r.join();
-        }
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let follower = {
+            let (tx, tail, done, log_path) = (tx.clone(), tail.clone(), done.clone(), log_path.clone());
+            std::thread::spawn(move || follow_log(&log_path, start_at, step, &tx, &tail, &|| done.load(std::sync::atomic::Ordering::SeqCst)))
+        };
+        let status = child.wait().map_err(|e| e.to_string());
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = follower.join();
+        LeftStep::clear(&self.folder);
         *self.child.lock().unwrap() = None;
+        if !self.play {
+            tree.terminate(); // (what the step left running)
+        }
         drop(tree);
-        if status.success() {
+        if status?.success() {
             Ok(())
         } else {
             Err(tail.lock().unwrap().join("\n"))
         }
+    }
+}
+
+/// (TODO 289) The step that is running, written beside the log while it runs: a setup started again after its window
+/// died (a graphics driver reset) finds the step still going and follows it instead of starting a second one.
+struct LeftStep {
+    pid: u32,
+    started: u64, // (its start time: with the id it names the process - ids are given out again)
+    log: PathBuf,
+    update: bool,
+    play: bool,
+}
+
+const LEFT_STEP_FILE: &str = "setup-running.txt";
+
+impl LeftStep {
+    fn write(&self, folder: &Path) {
+        let _ = std::fs::write(folder.join(LEFT_STEP_FILE),
+                               format!("{}\n{}\n{}\n{}\n{}\n", self.pid, self.started, u8::from(self.update), u8::from(self.play),
+                                       self.log.display()));
+    }
+
+    fn clear(folder: &Path) {
+        let _ = std::fs::remove_file(folder.join(LEFT_STEP_FILE));
+    }
+
+    /// The step a setup before this one left running: Some only while that very process still runs.
+    fn find(folder: &Path) -> Option<LeftStep> {
+        let text = std::fs::read_to_string(folder.join(LEFT_STEP_FILE)).ok()?;
+        let mut lines = text.lines();
+        let pid: u32 = lines.next()?.trim().parse().ok()?;
+        let started: u64 = lines.next()?.trim().parse().ok()?;
+        let update = lines.next()?.trim() == "1";
+        let play = lines.next()?.trim() == "1";
+        let log = PathBuf::from(lines.next()?.trim());
+        match winapi::process_started(pid) {
+            Some(t) if started == 0 || t == started => Some(LeftStep { pid, started, log, update, play }),
+            _ => {
+                LeftStep::clear(folder); // (gone: nothing to follow)
+                None
+            }
+        }
+    }
+}
+
+/// Follows a step's log from `start_at`: each new line into the log's tail, the steps and the details shown, until
+/// `ended()` says the step has ended (then what is left is read too).
+fn follow_log(log_path: &Path, start_at: u64, step: usize, tx: &Sender<Msg>, tail: &Arc<Mutex<Vec<String>>>, ended: &dyn Fn() -> bool) {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut current = step;
+    let mut file = None;
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; 16384];
+    let (mut quiet_since, mut hinted) = (Instant::now(), false);
+    loop {
+        let finished = ended(); // (asked before the read: what was written before the end is still read)
+        if file.is_none() {
+            file = std::fs::File::open(log_path).ok().and_then(|mut f| f.seek(SeekFrom::Start(start_at)).ok().map(|_| f));
+        }
+        let mut got = false;
+        if let Some(f) = file.as_mut() {
+            while let Ok(n) = f.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                got = true;
+                pending.extend_from_slice(&buf[..n]);
+                while let Some(at) = pending.iter().position(|&b| b == b'\n') {
+                    let line: Vec<u8> = pending.drain(..=at).collect();
+                    show_line(&String::from_utf8_lossy(&line), &mut current, tx, tail);
+                }
+            }
+        }
+        if finished && !got {
+            if !pending.is_empty() {
+                show_line(&String::from_utf8_lossy(&pending), &mut current, tx, tail);
+            }
+            return;
+        }
+        if got {
+            quiet_since = Instant::now();
+            hinted = false;
+        } else {
+            // (TODO 290) A step quiet for a while after an installer started: Windows' permission prompt is most
+            // likely waiting, perhaps only as a flashing button in the taskbar.
+            let last = tail.lock().unwrap().last().map(|l| l.to_ascii_lowercase()).unwrap_or_default();
+            if !hinted && quiet_since.elapsed().as_secs() >= 20 && (last.contains("starting package install") || last.contains("winget install")) {
+                hinted = true;
+                let _ = tx.send(Msg::Detail(current, "Windows may be asking for permission to install: if a shield button flashes in the taskbar, click it and choose Yes".into()));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+    }
+}
+
+/// One line of a step's output: the steps and details it marks, and the tail kept for an error.
+fn show_line(line: &str, current: &mut usize, tx: &Sender<Msg>, tail: &Arc<Mutex<Vec<String>>>) {
+    let text = line.trim().to_string();
+    if text.is_empty() {
+        return;
+    }
+    if let Some(title) = text.strip_prefix("==> ") {
+        let (s, p) = classify(title, *current);
+        if s != *current {
+            *current = s;
+            let _ = tx.send(Msg::Step(s));
+        }
+        if let Some(p) = p {
+            let _ = tx.send(Msg::Progress(p));
+        }
+        let _ = tx.send(Msg::Detail(s, title.to_string()));
+    } else if !text.starts_with("--") && !text.contains("warning") && !text.contains("RemoteException") {
+        if *current == STEP_GAME {
+            if let Some(p) = compile_progress(&text) {
+                let _ = tx.send(Msg::Progress(p));
+            }
+        }
+        if *current == STEP_HD {
+            if let Some(p) = hd_progress(&text) {
+                let _ = tx.send(Msg::Progress(p));
+            }
+        }
+        let short: String = text.chars().take(110).collect();
+        let _ = tx.send(Msg::Detail(*current, short));
+    }
+    let mut t = tail.lock().unwrap();
+    t.push(text);
+    if t.len() > 12 {
+        t.remove(0);
     }
 }
 
@@ -778,13 +957,44 @@ fn remembered_folder() -> Option<String> {
 /// player, it stays deleted). It starts the setup's copy in the install folder, which starts the game when the
 /// install is finished and carries on the setup when it is not; its icon is the game's own.
 fn desktop_shortcut_once(folder: &Path, repo: &Path) {
-    let Some(flag) = remembered_folder_file().and_then(|f| f.parent().map(|d| d.join("desktop_shortcut_made"))) else { return };
+    grant_player(folder);
+    shortcut_once(folder, repo, "Desktop", "desktop_shortcut_made");
+    // (TODO 276) The same in the Start menu's programs: Steam's "Add a Non-Steam Game" lists the Start menu's
+    // programs, so the game is there to tick - no browsing for a file deep in the install folder.
+    shortcut_once(folder, repo, "Programs", "start_menu_shortcut_made");
+}
+
+/// (TODO 290) A setup run as administrator with another account's password: the install's files are made by that
+/// account. The signed-in player (who owns Windows' desktop - explorer.exe) is given the right to change them, so the
+/// game's settings, saves, HD textures and updates work when he plays without being administrator. Nothing happens
+/// when the setup is not elevated, or elevated as the player himself (the folder's own rights already cover him).
+fn grant_player(folder: &Path) {
+    let script = "if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { exit 0 }; $o = Get-CimInstance Win32_Process -Filter \"name='explorer.exe'\" | Select-Object -First 1 | Invoke-CimMethod -MethodName GetOwner; if (-not $o.User) { exit 0 }; $u = \"$($o.Domain)\\$($o.User)\"; if ($u -ieq [Security.Principal.WindowsIdentity]::GetCurrent().Name) { exit 0 }; icacls $env:TFA_DIR /grant \"${u}:(OI)(CI)M\" /Q | Out-Null";
+    let _ = Command::new(program("powershell"))
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("TFA_DIR", folder)
+        .env_remove("PSModulePath")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags_no_window()
+        .status();
+}
+
+/// The shortcut in one of Windows' special folders (`Desktop`, `Programs`: the Start menu's), once (its flag file
+/// beside the remembered folder's).
+fn shortcut_once(folder: &Path, repo: &Path, place: &str, flag_name: &str) {
+    let Some(flag) = remembered_folder_file().and_then(|f| f.parent().map(|d| d.join(flag_name))) else { return };
     if flag.exists() {
         return;
     }
-    let script = "$d=[Environment]::GetFolderPath('Desktop'); $s=(New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $d 'Transformers Armada.lnk'));                   $s.TargetPath=$env:TFA_TARGET; $s.WorkingDirectory=$env:TFA_DIR; $s.IconLocation=$env:TFA_ICON+',0';                   $s.Description='Transformers Armada (PC)'; $s.Save()";
+    // (TODO 290) A setup run as administrator: the shortcut where every user of the PC sees it (the Public desktop,
+    // the all-users Start menu) - run elevated by another account's password, "the user's own" desktop is that
+    // account's, not the player's, and the player found no shortcut.
+    let script = "$p=$env:TFA_PLACE; if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { $p=@{Desktop='CommonDesktopDirectory'; Programs='CommonPrograms'}[$p] }; $d=[Environment]::GetFolderPath($p); $s=(New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $d 'Transformers Armada.lnk'));                   $s.TargetPath=$env:TFA_TARGET; $s.WorkingDirectory=$env:TFA_DIR; $s.IconLocation=$env:TFA_ICON+',0';                   $s.Description='Transformers Armada (PC)'; $s.Save()";
     let ok = Command::new(program("powershell"))
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("TFA_PLACE", place)
         .env("TFA_TARGET", folder.join("tfa-setup.exe"))
         .env("TFA_DIR", folder)
         .env("TFA_ICON", game_exe(repo))
@@ -1162,13 +1372,36 @@ fn fresh_path(old: &str) -> String {
 /// Starts the game (what Play.bat does): settings.ini made from settings.example.ini on the first
 /// start, then the game's exe in the game's folder.
 fn play(repo: &Path) {
+    let _ = start_game(repo);
+}
+
+fn start_game(repo: &Path) -> Option<std::process::Child> {
     let game = game_folder(repo);
     let settings = game.join("settings.ini");
     let example = game.join("settings.example.ini");
     if !settings.exists() && example.exists() {
         let _ = std::fs::copy(&example, &settings);
     }
-    let _ = Command::new(game_exe(repo)).current_dir(&game).spawn();
+    Command::new(game_exe(repo)).current_dir(&game).spawn().ok()
+}
+
+/// (TODO 276) The game started for a launcher - Steam's non-Steam game, Quiver, a shortcut - and waited for: the
+/// setup's process lives as long as the game, and as long as a game the game started again itself (a setting's
+/// restart), so Steam shows the player in game for the whole session and keeps its overlay and Steam Input on it.
+/// (Before, the setup ended at once: to Steam the game had closed as soon as it opened.) No window: nothing shows.
+fn play_and_wait(repo: &Path) {
+    let Some(child) = start_game(repo) else { return };
+    let tree = winapi::ProcessTree::new(&child, false);
+    let _ = winapi::wait_for_exit(child.id());
+    loop {
+        let left: Vec<u32> = tree.processes().into_iter().filter(|&pid| !winapi::is_console_host(pid)).collect();
+        if left.is_empty() {
+            break;
+        }
+        for pid in left {
+            let _ = winapi::wait_for_exit(pid);
+        }
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1216,6 +1449,14 @@ fn file_row(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str, pick
 }
 
 impl eframe::App for App {
+    // (TODO 289) Closing the window ends the running step, as before; only a setup that dies (a graphics driver
+    // reset took one) leaves it running - to finish on its own, followed by the setup started again.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if !self.play {
+            self.cancel(); // (the game's own "Update now" goes on without the window, as before)
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll();
         if self.phase == Phase::Running || self.check_rx.is_some() {
@@ -1337,10 +1578,11 @@ impl App {
         ui.label(RichText::new("Built on your PC from your own disc: nothing of the game is downloaded.").color(DIM));
         ui.add_space(20.0);
 
-        file_row(ui, "Transformers (USA) disc image", &mut self.retail, "SLUS-20668, .iso", |v| pick_iso(v, "Transformers (USA) disc image"));
+        file_row(ui, "Transformers disc image", &mut self.retail, "USA SLUS-20668 or Europe SLES-52388, .iso", |v| pick_iso(v, "Transformers disc image"));
         let retail_note = match std::fs::metadata(&self.retail) {
             Ok(m) if m.len() == USA_ISO_SIZE => Some(("the USA release (its checksum is checked by the setup)", GOOD)),
-            Ok(_) => Some(("not the size of the USA release (SLUS-20668): only that disc works", BAD)),
+            Ok(m) if m.len() == PAL_ISO_SIZE => Some(("the European release (SLES-52388): experimental, the game is made for the USA disc", GOOD)),
+            Ok(_) => Some(("not the size of the USA release (SLUS-20668) or the European one (SLES-52388): only those discs work", BAD)),
             Err(_) if !self.retail.is_empty() => Some(("file not found", BAD)),
             Err(_) => None,
         };
@@ -1380,7 +1622,12 @@ impl App {
             });
             ui.add_space(6.0);
         }
-        ui.checkbox(&mut self.hd, "HD textures (recommended; made on your graphics card, you can play meanwhile)");
+        if self.low_end {
+            ui.add_enabled(false, egui::Checkbox::new(&mut self.hd, "HD textures"));
+            ui.label(RichText::new("Your graphics are built-in, so HD textures are off to keep the game smooth.").color(DIM).small());
+        } else {
+            ui.checkbox(&mut self.hd, "HD textures (recommended; made on your graphics card, you can play meanwhile)");
+        }
         if self.hd {
             ui.horizontal(|ui| {
                 ui.add_space(24.0);
@@ -1555,7 +1802,7 @@ fn main() -> eframe::Result {
     if all.is_empty() && app.installed() && game_exe(&app.repo()).exists() && !Path::new(&app.folder).join(UNFINISHED_MARK).exists()
         && !winapi::shift_held()
     {
-        play(&app.repo());
+        play_and_wait(&app.repo());
         return Ok(());
     }
     let mut start = false;
@@ -1581,6 +1828,16 @@ fn main() -> eframe::Result {
                 let _ = args.next(); // (read above)
             }
             _ => {}
+        }
+    }
+    // (TODO 289) A step left running by a setup whose window died: this window follows it to its end.
+    if !check {
+        if let Some(left) = LeftStep::find(Path::new(&app.folder)) {
+            app.follow_left_step(left);
+            return eframe::run_native("Transformers Armada - Setup", options, Box::new(|cc| {
+                cc.egui_ctx.set_visuals(egui::Visuals::dark());
+                Ok(Box::new(app))
+            }));
         }
     }
     if check {

@@ -179,9 +179,13 @@ The game can also be started straight from its program file, so any launcher can
 
 **Steam on Windows**
 
-1. In Steam: **Games > Add a Non-Steam Game to My Library > Browse**, pick `TransformersRecomp.exe` above, then
-   **Add Selected Programs**.
-2. Start it from your Steam library like any other game.
+1. In Steam: **Games > Add a Non-Steam Game to My Library**, tick **Transformers Armada** in the list (the setup puts
+   it in the Start menu), then **Add Selected Programs**.
+2. Start it from your Steam library like any other game. Steam shows you in game until the game closes, and Steam
+   Input (your controller's dead zones, remapping) works in it.
+
+If it is not in the list, click **Browse** and pick `tfa-setup.exe` in your install folder (or `TransformersRecomp.exe`
+above).
 
 **Steam Deck**
 

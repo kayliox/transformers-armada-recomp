@@ -230,6 +230,18 @@ VsOut vs(VsIn i)
         smearT = saturate(dot(P0.xyz, i.normal) * 1e8);
         ipos = i.pos + P0.xyz * smearT;
     }
+    // (TODO 290) A stunned creature's crackling shell (mode.z 6: taShader_ElectricShock, image 83f1's 0x1ac0): the vertex
+    // pushed out by p1.z along its direction from the centre p2 (as the routine's RSQRT: none from the centre itself),
+    // ST that direction's y and z plus the effect's offset p1.xy.
+    float2 shockSt = float2(0.0, 0.0);
+    if ((int)mode.z == 6)
+    {
+        const float3 d = i.pos - p[2].xyz;
+        const float l2 = dot(d, d);
+        const float3 dn = l2 > 0.0 ? d * rsqrt(l2) : float3(0.0, 0.0, 0.0);
+        ipos = i.pos + dn * p[1].z;
+        shockSt = dn.yz + p[1].xy;
+    }
     // (TODO 162) Cybertron's city (mode.z 5: image a31d's 0x22c0, traced on captured batches): a building a vertex -
     // the centre its position, the half sizes its ST, the height its colour's alpha times 10, the foot z times p5.w -
     // and a corner of the face the batch draws (p1.x) in size (0-3: the strip's order). A side is the one facing the eye
@@ -307,6 +319,8 @@ VsOut vs(VsIn i)
     // in the next can land a few bits off, and the second pass then fails in places from one frame to the next.
     o.pos.z *= 1.0 + pose.z;
 
+)"
+                              R"(    // (TODO 290: the string split here - MSVC's limit of one string literal)
     float4 vc = misc.y > 0.5 ? round(i.colour * 255.0) : float4(128.0, 128.0, 128.0, 128.0);
     float3 n = i.normal;
     float3 v = normalize(p[4].xyz - i.pos);   // (the lit metal: the eye in q4)
@@ -361,6 +375,8 @@ VsOut vs(VsIn i)
     }
     else if (cm == 20)
         c = trunc(lerp(p[1], p[2], smearT));                              // 0x2220: q1, or q2 where moved
+    else if (cm == 21)
+        c = trunc(P0);                                                    // (TODO 290) the electric shock: q1, FTOI0
     if ((int)mode.z == 5)
         c = cityColour;                                                   // (TODO 162) 0x22c0: the city's face
     // (cm 14, the water's base: the vertex's colour as it is.)
@@ -445,6 +461,8 @@ VsOut vs(VsIn i)
     }
     if ((int)mode.z == 5)
         st = citySt;
+    if ((int)mode.z == 6)
+        st = shockSt;
     o.uv = st * texScale.xy;
     o.q = texScale.z > 0.5 ? i.size : 1.0; // (S, T, Q interpolated, divided per pixel)
     if (texScale.z > 0.5)
