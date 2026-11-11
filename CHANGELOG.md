@@ -48,6 +48,8 @@
   finished picture is copied to the window in one piece instead of row by row (half the time).
 - The native sound mixer does the same work with fewer steps (the sound is bit for bit the same): a little less CPU,
   most on handhelds such as the Steam Deck.
+- F1 > Display > Frame rate limit now includes 45: on a 90 Hz screen such as the Steam Deck OLED's each picture is
+  then shown for two refreshes. A 45 limit is also no longer turned into 60 at the start of a session.
 - Linux and Steam Deck: "Finishing HD textures" no longer stays on screen after the HD set is finished, including
   sets made before this fix, and "HD textures ready" no longer comes back at every start once the set is finished.
   `make_hd_textures.sh` checks the set's images once, as the Windows maker does (0.4.7's checks too).

@@ -3221,7 +3221,7 @@ namespace
     // when a level (or the HQ) begins. TF_RATE_STEPS=fine / divisors (tests) goes over it.
     std::atomic<int> g_pacingChoice{-1}; // (the panel's choice: 0 auto, 1 even, 2 any; -1 none - the environment's)
     // ---- The frame-rate cap (TODO 160, 2026-11-04, the user: "behave like every other PC game") --------------------
-    // The settings' "Frame rate cap" (TF_FPS_CAP: 30, 60, 90, 120, 144, 165, 240, 0 = unlimited; 240 by default) is the
+    // The settings' "Frame rate cap" (TF_FPS_CAP: 30, 45, 60, 90, 120, 144, 165, 240, 0 = unlimited; 240 by default) is the
     // top of the levels' rate. The game's logic moves a fixed step a frame (a level reads FramePeriod when it begins:
     // its clock's step, the gravity a frame), so a PC that cannot draw the cap would play it in slow motion: the rate
     // follows what the PC manages instead - any whole rate from the cap down to 30, down on a miss that lasts, up again
@@ -3247,6 +3247,25 @@ namespace
         static const bool ladder = std::getenv("TF_RATE_LADDER") && *std::getenv("TF_RATE_LADDER") == '1';
         return !ladder;
     }
+
+    // A cap between 30 and 60 (45, half a 90 Hz screen's refresh) decides the pictures as any
+    // other: one a frame. The picture lock's 60 would pull the game up to it and the in-between
+    // pictures would double the VBlanks; TF_MOMENTS=1 needs those fields, so they stay then, and
+    // TF_IN_BETWEEN keeps its own choice.
+    void applyCapBelow60()
+    {
+        g_pictureLock = 0;
+        g_lockShown.store(0);
+        g_fastGameFallback = false;
+        const char *moments = std::getenv("TF_MOMENTS");
+        const bool momentsOn = moments && *moments && *moments != '0';
+        g_moments.store(momentsOn);
+        g_momentsShown.store(momentsOn);
+        const char *inBetween = std::getenv("TF_IN_BETWEEN");
+        if (!(inBetween && *inBetween))
+            g_inBetween = momentsOn;
+    }
+
     std::atomic<bool> g_vrrSteady{false};
     // (TODO 35: the time the level spent at each rate - `[tf] frame rates: ...` every 30 s and when the ladder starts again)
     std::map<int, double> g_rateTimeMs;
@@ -4335,6 +4354,10 @@ namespace
             return;
         // (TODO 161 a: the cap caps pictures; TODO 217: with the cap deciding the rates, a picture lock no longer means 60)
         g_frameRate = g_pictureLock != 0 && !followRates() ? 60 : g_logicRate.load() > 0 ? g_logicRate.load() : g_rateSetting;
+        // (The cap between 30 and 60 chosen live sets the pictures as it does at start-up: no picture lock, no in-between pictures
+        // unless the environment asks for them.)
+        if (cap >= 0 && followRates() && g_frameRate > 30 && g_frameRate < 60)
+            applyCapBelow60();
         std::fprintf(stderr, "[tf] settings: %d frames a second, %s\n", g_frameRate,
                      g_moments.load() ? "pictures at the screen's refresh"
                                       : (g_pictureLock != 0 ? (g_pictureLock == 120 ? "120 pictures" : "60 pictures") : "unlocked"));
@@ -7433,7 +7456,8 @@ namespace
             c.help = "The most pictures a second the game draws. It draws as many as your PC can, up to this. With VSync on, also "
                      "no more than the screen's refresh; with VSync off, Unlimited means as many as your PC can draw. The game "
                      "itself always moves at its true speed, whatever is drawn.";
-            c.choices = {{"30", "30"}, {"60", "60"}, {"90", "90"}, {"120", "120"}, {"144", "144"}, {"165", "165"}, {"240", "240"}, {"0", "Unlimited"}};
+            // (45: half a 90 Hz handheld's refresh - the Steam Deck OLED's battery choice, each picture two refreshes)
+            c.choices = {{"30", "30"}, {"45", "45"}, {"60", "60"}, {"90", "90"}, {"120", "120"}, {"144", "144"}, {"165", "165"}, {"240", "240"}, {"0", "Unlimited"}};
             c.defaultValue = "240";
             c.available = []() { return followRates(); };
             c.unavailableHelp = "TF_RATE_LADDER=1 is set: the frame-rate ladder decides the rates (Game frame rate, Frame pacing).";
@@ -9011,16 +9035,24 @@ namespace
             // settings.ini from an older version (TF_FPS_LOCK=60 / 120 / refresh, the default "refresh" too) no longer
             // pulls the levels and the HQ down to 60 (a player at a 165 cap stayed at 60).
             const bool fastGame = (followRates() || (rateSet && *rateSet)) && g_frameRate > 60;
-            g_moments.store(momentsEnv && *momentsEnv ? *momentsEnv != '0' : (refresh && !fastGame));
-            g_momentsShown.store(g_moments.load());
-            if (fastGame && !(std::getenv("TF_IN_BETWEEN") && *std::getenv("TF_IN_BETWEEN")))
+            // (A cap between 30 and 60 - 45, half a 90 Hz handheld's refresh - decides the pictures too: the picture
+            // lock would pull it up to 60 and the in-between pictures would double its VBlanks.)
+            const bool capBelow60 = followRates() && g_frameRate > 30 && g_frameRate < 60;
+            if (capBelow60)
+                applyCapBelow60();
+            else
             {
-                // (the in-between pictures would double the VBlanks at the fast rate: 240-480 a
-                // second; they come on at half the rate, when the host falls behind)
-                g_fastGameFallback = g_frameRate / 2 >= 60;
-                g_inBetween = g_fastGameFallback;
+                g_moments.store(momentsEnv && *momentsEnv ? *momentsEnv != '0' : (refresh && !fastGame));
+                g_momentsShown.store(g_moments.load());
+                if (fastGame && !(std::getenv("TF_IN_BETWEEN") && *std::getenv("TF_IN_BETWEEN")))
+                {
+                    // (the in-between pictures would double the VBlanks at the fast rate: 240-480 a
+                    // second; they come on at half the rate, when the host falls behind)
+                    g_fastGameFallback = g_frameRate / 2 >= 60;
+                    g_inBetween = g_fastGameFallback;
+                }
             }
-            if (fastGame && (pictures == 60 || pictures == 120))
+            if ((fastGame || capBelow60) && (pictures == 60 || pictures == 120))
                 std::fprintf(stderr, "[tf] %s%d: levels at %d frames, a picture each (the picture lock TF_FPS_LOCK left out)\n",
                              rateSet && *rateSet ? "TF_FRAME_RATE=" : "the frame rate cap ", g_frameRate, g_frameRate);
             else if (g_frameRate > 30 && (pictures == 60 || pictures == 120))
