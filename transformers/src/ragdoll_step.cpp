@@ -35,12 +35,13 @@
 #include <cstring>
 #include <unordered_map>
 #include <vector>
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 namespace ragdoll_step
 {
     namespace
     {
-        constexpr uint32_t kUpdate = 0x003C9E90u;             // taVerletIntegrator::Update(this, dt)
+        constexpr uint32_t kUpdate = TF_GA(0x003C9E90u);             // taVerletIntegrator::Update(this, dt)
         constexpr uint32_t kParticleSize = 0x50u, kActive = 0x48u; // (+0x48: Update leaves at once when 0)
         constexpr uint32_t kMaxParticles = 256u;
         PS2Runtime::RecompiledFunction g_update = nullptr;

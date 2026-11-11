@@ -12,12 +12,14 @@
 #include "distance_meter.h"
 #include "hd_movies.h"
 #include "nr_movie.h"
+#include "nr_backend.h" // (the native renderer's backend in use: its slot waits for the slow-frame report)
 #include "speedrun_timer.h"
 #include "start_screens.h"
 #include "tuning.h"
 #include "photo_mode.h"
 #include "view_turn.h"
 #include "fast_load.h"
+#include "language.h"
 #include "hq_rate.h"
 #include "hq_animation_tween.h"
 #include "port_ext.h"
@@ -75,6 +77,7 @@
 #include <utility>
 #include <tuple>
 #include <vector>
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 // Hooks exported by the runtime (ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp, MPEG.cpp, LibC.cpp).
 namespace ps2_stubs
@@ -91,10 +94,6 @@ namespace nr
     double gameWaitMs();
     void largeImageActivity(unsigned &queued, unsigned &heavy, uint64_t &compressed, uint64_t &pngs);
     uint64_t pipelinesMade();
-    namespace d3d
-    {
-        double slotWaitMs();
-    }
     namespace n5
     {
         void install(PS2Runtime &runtime); // (native_render/nr_n5.cpp: N5, the render device native - docs/N5_PLAN.md)
@@ -370,9 +369,30 @@ namespace
             std::memcpy(&width, rdram + kDisplayMode, sizeof(width));
             std::memcpy(&pixelAspect, rdram + kDisplayMode + 0x10u, sizeof(pixelAspect));
             // 1 for a 4:3 TV, 0.75 for a 16:9 one, 0.75 / k at an ultrawide shape (ultrawide.h).
-            const float tv = width != 0u ? pixelAspect * (640.0f / static_cast<float>(width)) * 0.93f : 1.0f;
-            if (tv > 0.25f && tv < 0.875f)
+            float tv = width != 0u ? pixelAspect * (640.0f / static_cast<float>(width)) * 0.93f : 1.0f;
+            // The PAL release in its 50 Hz mode (tvStandard 1 at 0x6CDD38, pal60 0 at 0x6CF658) draws its taller PAL
+            // pixels: a 4:3 picture's pixel aspect is 0.727934 at width 512, 0.846 by the measure above - under the
+            // 16:9 threshold. Measured against its own 4:3 instead.
+            uint32_t standard = 0u;
+            std::memcpy(&standard, rdram + 0x006CDD38u, sizeof(standard));
+            if (standard == 1u && rdram[0x006CF658u] == 0u)
+                tv /= 0.727934f * 1.25f * 0.93f;
+            // (TODO 282: narrower than 16:9 the widescreen mode's value goes up to the 4:3 TV's own - 0.75 / k, 1 at
+            // 4:3 - so there it is told by the shape's own value, with the widescreen picture on)
+            const float k = ultrawide::wideFactor();
+            if ((tv > 0.25f && tv < 0.875f) || (k < 1.0f && std::fabs(tv - 0.75f / k) < 0.07f))
                 aspect = ultrawide::shape();
+            // A shape measured on 3 frames in a row: at a change of screen the game writes the mode's width and its
+            // pixel aspect apart, and a frame read between them took the PAL release's 640x480 width with its
+            // 512x448 aspect for 16:9 - the 4:3 picture flipped to 16:9 and back for a frame, again and again, at the
+            // 50 / 60 Hz menu and its 60 Hz test (seen on the screen, 2026-11-10). (A movie's 4:3 at once, above.)
+            static float measured = 0.0f, settled = 0.0f;
+            static int same = 0;
+            same = aspect == measured ? same + 1 : 1;
+            measured = aspect;
+            if (same >= 3 || settled == 0.0f)
+                settled = aspect;
+            aspect = settled;
         }
         static float shown = 0.0f;
         if (aspect != shown)
@@ -451,12 +471,12 @@ namespace
     // meet - lower the more frames a second (under water about 26 at the console's 30, 12.5 at 60, 3 at 240 - stuck at the
     // walk's least speed, never a run). At the level's rate the factor is 0.99^(30/R), as the console's frame would have it.
     // TF_WADE_RATE=0: the game's 0.99 a frame.
-    constexpr uint32_t kSetVelocity = 0x0047C830u, kWadeSlowA = 0x0028D728u, kWadeSlowB = 0x0028DCA8u;
+    constexpr uint32_t kSetVelocity = TF_GA(0x0047C830u), kWadeSlowA = 0x0028D728u, kWadeSlowB = 0x0028DCA8u;
     // (rate sweep, 2026-11-08) taTransformerStateLook (0x474000 -> 0x473D90): while its timer +0x8C runs (counted down in
     // seconds) the controller's velocity times 0.8 (gp-0x75E0) is given to SetVelocity each frame (0x473E30, return
     // 0x473E38): the same per-frame factor - at 240 the move died away in an eighth of the time. 0.8^(30/R) at R.
     // TF_LOOK_RATE=0: the game's 0.8 a frame.
-    constexpr uint32_t kLookSlow = 0x00473E38u;
+    constexpr uint32_t kLookSlow = TF_GA(0x00473E38u);
     PS2Runtime::RecompiledFunction g_setVelocity = nullptr;
     void setVelocityAtRate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -507,7 +527,7 @@ namespace
     // At R the share given is 1 - (1 - t)^(30/R): as far in a 30th of a second as at 30. TF_LERP_RATE=0: as before.
     float shareAtLevelRate(float atThirty); // (below)
     constexpr uint32_t kLerp = 0x001B0440u, kSlerp = 0x001AF4C0u;
-    constexpr uint32_t kLerpAtRate[] = {0x002D1124u, 0x002CE25Cu, 0x00480BC4u};
+    constexpr uint32_t kLerpAtRate[] = {0x002D1124u, 0x002CE25Cu, TF_GA(0x00480BC4u)};
     PS2Runtime::RecompiledFunction g_lerp = nullptr, g_slerp = nullptr;
     void lerpShareAtRate(R5900Context *ctx)
     {
@@ -542,23 +562,25 @@ namespace
         if (index == 1u && invertFlipped() && ctx->pc == getRegU32(ctx, 31))
             SET_GPR_U32(ctx, 2, getRegU32(ctx, 2) == 0u ? 1u : 0u);
     }
-    // The mouse turns as the right stick does with the option (the direct third-person turn below applies it itself,
-    // the other cameras get the mouse as their stick, which the game inverts by the option): the runtime's own mouse
-    // inversion stays off. g_mouseInvertY: the third-person turn's (the camera's effective invert).
-    bool g_mouseInvertY = false;
+    // (TODO 287, the user's choice) The mouse has its own Invert setting, F1 > Controls > "Invert mouse up / down"
+    // (PS2X_MOUSE_INVERT_Y, Off by default: moved up looks up), applied by the runtime to the mouse's travel. A save's own
+    // Invert Y option is the controller stick's alone: saves made before TODO 178 (2026-11-06) carry the game's old
+    // default, Yes, and turned the mouse upside down for good (TODO 187 had the mouse follow the stored option). The
+    // direct third-person turn takes the travel as it is; the other cameras get the mouse as their stick, which the game
+    // inverts by the option - g_stickInvertY, that inversion, is taken back there so only the mouse setting counts.
+    bool g_stickInvertY = false;
     void mouseFollowsInvertOption(const uint8_t *rdram)
     {
         uint32_t options = 0u;
         std::memcpy(&options, rdram + kOptionsPointer, sizeof(options));
         if (options == 0u || (options & PS2_RAM_MASK) + 1u >= PS2_RAM_SIZE)
             return;
-        static bool once = (ps2_host_input::setMouseInvertY(false), true);
-        (void)once;
         const bool stored = rdram[(options & PS2_RAM_MASK) + 1u] != 0u;
-        // (TODO 187) The mouse in the direct third-person turn follows the stored option itself: NO = moved up looks up, as
-        // before 178 (the flip is the stick's - the game's own turn reads it; following the flipped answer turned the mouse
-        // upside down with NO).
-        g_mouseInvertY = stored;
+        // (TODO 178: with the flip, the stored YES inverts the stick; without it, the stored NO does)
+        const bool stick = invertFlipped() ? stored : !stored;
+        if (stick != g_stickInvertY)
+            std::fprintf(stderr, "[tf] the save's Invert Y: the stick %s; the mouse by its own setting\n", stick ? "inverted" : "not inverted");
+        g_stickInvertY = stick;
     }
 
     void copyOptions(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -955,7 +977,7 @@ namespace
     // the player, which keeps its position - x, y, z with z up, about 4 units above its
     // feet - in itself.
     constexpr uint32_t kGetPosition = 0x001AFD40u;
-    constexpr uint32_t kListenerPositionCaller = 0x0042E3F0u; // the return address of that call
+    constexpr uint32_t kListenerPositionCaller = TF_GA(0x0042E3F0u); // the return address of that call
     constexpr uint32_t kCameraTarget = 0x74u;                 // in the camera object
     constexpr uint32_t kPlayerPositionField = 0x620u;         // in the player
     PS2Runtime::RecompiledFunction g_getPosition = nullptr;
@@ -1644,7 +1666,7 @@ namespace
     // as 0x1AD450 keeps it. Mouse up looks up (the pitch goes down), mouse right turns right
     // (the yaw down). Where another camera turns (first person, gliding, ...), the mouse goes
     // through the stick as before (mouseLook below).
-    constexpr uint32_t kCameraTurn = 0x0046D410u;
+    constexpr uint32_t kCameraTurn = TF_GA(0x0046D410u);
     constexpr uint32_t kCameraData = 0x00717430u;      // 0x34F2B0's
     constexpr uint32_t kPitchLimitScale = 0x006CBB4Cu; // gp-0x75A4
     constexpr uint32_t kTurnsPerRadian = 0x006CB144u;  // gp-0x7FAC (0x1AD450)
@@ -1733,8 +1755,6 @@ namespace
         const uint8_t *idField = camera != 0u ? getConstMemPtr(rdram, camera + 0x18u) : nullptr;
         if (angles && idField && view_turn::takeMouseTravel(pixelsX, pixelsY))
         {
-            if (g_mouseInvertY) // (TODO 178: the camera's invert as the stick gets it - the game's own turn never sees the mouse)
-                pixelsY = -pixelsY;
             // (TODO 189) The aiming view's zoom (R3 / Circle into taTransformerStateLook, R3 again steps the zoom): the game's
             // stick turn is the rate times the state's +0x20 (0x46D74C: 1, then 0.57 and 0.33 at the two zoom steps - measured
             // 135, 77 and 45 deg/s), so zoomed in the view turns as much across the picture as before. The mouse went to the
@@ -1840,7 +1860,9 @@ namespace
             g_owedYaw = g_owedPitch = 0.0f;
             return;
         }
-        // (TODO 178: the mouse up = the stick up - the game inverts it by the option, as the stick)
+        // (TODO 287: the game inverts the stick by the save's option; taken back for the mouse, which has its own setting)
+        if (g_stickInvertY)
+            pixelsY = -pixelsY;
         g_owedYaw = std::clamp(g_owedYaw + pixelsX * kRadiansPerPixel, -kMaxOwedSeconds * kYawPerSecond,
                                kMaxOwedSeconds * kYawPerSecond);
         g_owedPitch = std::clamp(g_owedPitch + pixelsY * kRadiansPerPixel, -kMaxOwedSeconds * kPitchPerSecond,
@@ -2423,7 +2445,7 @@ namespace
     // in the states. At the PC rate the share is made for the frame (shareAtLevelRate) -
     // remembered, so the next frame starts from the state's own value again, unless a state
     // set another.
-    constexpr uint32_t kControllerMove = 0x0047D6C0u;
+    constexpr uint32_t kControllerMove = TF_GA(0x0047D6C0u);
     constexpr uint32_t kControllerTurnShare = 0x1F0u;
     PS2Runtime::RecompiledFunction g_controllerMove = nullptr;
     struct TurnShare
@@ -2716,7 +2738,7 @@ namespace
     // the step is half, and a jump went 4% higher (5.80 instead of 5.60 in place). The first
     // frame in the air at the PC rate the velocity takes another g (1/30 - dt) / 2 = g dt
     // (R/30 - 1) / 2: then every jump and fall follows the arc it has at 30.
-    constexpr uint32_t kAirborneUpdate = 0x00470F70u;
+    constexpr uint32_t kAirborneUpdate = TF_GA(0x00470F70u);
     constexpr uint32_t kGravity = 0x006CF9B4u;
     constexpr uint32_t kControllerVerticalVelocity = 0x28u;
     PS2Runtime::RecompiledFunction g_airborneUpdate = nullptr;
@@ -2767,9 +2789,9 @@ namespace
     // at 30: a contact adds 30/R to a credit, and only one that brings it to 1 cuts the speed
     // (at 60 every other one); the others only turn the frame's movement along the surface,
     // and the next frame starts from the speed before it.
-    constexpr uint32_t kSetWorldVelocity = 0x0047C720u;
+    constexpr uint32_t kSetWorldVelocity = TF_GA(0x0047C720u);
     constexpr uint32_t kContactVelocityReturn = 0x0028C154u;
-    constexpr uint32_t kSpeedFromVelocity = 0x0047C500u;
+    constexpr uint32_t kSpeedFromVelocity = TF_GA(0x0047C500u);
     constexpr uint32_t kControllerVelocity = 0x20u, kControllerSpeed = 0x44u;
     PS2Runtime::RecompiledFunction g_setWorldVelocity = nullptr, g_speedFromVelocity = nullptr;
     struct ContactSpeed
@@ -2807,7 +2829,7 @@ namespace
     // against its size); with the call left out it settled as at 30. At the PC rate the velocity is given as at 30:
     // once every 30th of a second, the mean of the frames' velocities (= the move over that 30th / its time); the
     // frames between keep it. TF_RAGDOLL_RATE=0: as before.
-    constexpr uint32_t kRagdollVelocityReturn = 0x004777D0u;
+    constexpr uint32_t kRagdollVelocityReturn = TF_GA(0x004777D0u);
     struct RagdollVelocity
     {
         uint32_t controller = 0u;
@@ -2931,7 +2953,7 @@ namespace
     // multiple of 30 the part of a frame the last cycle ran over carries over instead of the
     // half, so that on average a cycle lasts as at 30. At 30 the game's own.
     // TF_CONSOLE_COOLDOWNS=0 leaves them to the game; TF_COOLDOWN_LOG=1 logs each one retimed.
-    constexpr uint32_t kAbilityUpdate = 0x003EF1F0u;
+    constexpr uint32_t kAbilityUpdate = TF_GA(0x003EF1F0u);
     constexpr uint32_t kAbilityTimer = 0x44u;
     PS2Runtime::RecompiledFunction g_abilityUpdate = nullptr;
     struct CooldownSeen
@@ -3006,9 +3028,9 @@ namespace
     // rate the angles the update asks for are 30/R of theirs (from its calls only: by the return
     // address), as far a 30th of a second as at 30. TF_CONSOLE_STEERING=0 leaves them.
     constexpr uint32_t kTurnToward = 0x002A46A0u, kAxisAngle = 0x001AF810u;
-    constexpr uint32_t kMissileTurns[] = {0x003D274Cu, 0x003D2D48u, 0x003D341Cu,  // launch, homing, recovering
-                                          0x003D2ADCu, 0x003D2C70u, 0x003D302Cu, 0x003D31B4u}; // (behind a flag nothing sets)
-    constexpr uint32_t kMissileSpins[] = {0x003D2A50u, 0x003D2BE4u, 0x003D2FA0u, 0x003D3128u};
+    constexpr uint32_t kMissileTurns[] = {TF_GA(0x003D274Cu), TF_GA(0x003D2D48u), TF_GA(0x003D341Cu),  // launch, homing, recovering
+                                          TF_GA(0x003D2ADCu), TF_GA(0x003D2C70u), TF_GA(0x003D302Cu), TF_GA(0x003D31B4u)}; // (behind a flag nothing sets)
+    constexpr uint32_t kMissileSpins[] = {TF_GA(0x003D2A50u), TF_GA(0x003D2BE4u), TF_GA(0x003D2FA0u), TF_GA(0x003D3128u)};
     PS2Runtime::RecompiledFunction g_turnToward = nullptr, g_axisAngle = nullptr;
 
     template <size_t N>
@@ -3055,10 +3077,45 @@ namespace
     // without (field A, the other pass with a scissor of one pixel). A level from a state made
     // at 30 switched to the PC rate (TF_60FPS=force) gets those of a field a frame, as a level
     // begun at it has.
-    void setViewFields(uint8_t *rdram, int32_t field)
+    // (TODO 287) The scan reads all of main RAM (256 MB): 30-55 ms in one frame, and the frame rate's steps called it each
+    // time (setInBetween) - a step was a visible hitch, four of them on the user's jet bike ride. The views found are kept:
+    // a later call for the same field (`quick`) only checks them - each still a view, already at that field - and scans
+    // again only when one is not (a new level's views, a state loaded, the other field asked for). A view the game makes
+    // in between takes the field from betwixtMode, which setInBetween sets with it. TF_VIEW_SCAN=1: the full scan always.
+    std::vector<uint32_t> g_viewsFound;
+    int32_t g_viewsField = 1; // (none written yet)
+    void setViewFields(uint8_t *rdram, int32_t field, bool quick = false)
     {
         constexpr uint32_t kViewVtable = 0x006B2CA0u;
         constexpr uint32_t kRamBytes = PS2_RAM_SIZE;
+        static const bool alwaysScan = std::getenv("TF_VIEW_SCAN") && *std::getenv("TF_VIEW_SCAN") == '1';
+        if (quick && !alwaysScan && field == g_viewsField && !g_viewsFound.empty())
+        {
+            bool same = true;
+            for (const uint32_t at : g_viewsFound)
+            {
+                uint32_t word = 0u, inner = 0u;
+                int32_t current = 0;
+                std::memcpy(&word, rdram + at, sizeof(word));
+                std::memcpy(&inner, rdram + at + 4u, sizeof(inner));
+                inner &= 0x1FFFFFFFu;
+                if (word != kViewVtable || (inner & 3u) != 0u || inner < 0x00100000u || inner + 0x210u > kRamBytes)
+                {
+                    same = false;
+                    break;
+                }
+                std::memcpy(&current, rdram + inner + 0x20Cu, sizeof(current));
+                if (current != field)
+                {
+                    same = false;
+                    break;
+                }
+            }
+            if (same)
+                return; // (the views as they were: nothing to write)
+        }
+        g_viewsFound.clear();
+        g_viewsField = field;
         uint32_t views = 0u;
         for (uint32_t at = 0u; at + 8u <= kRamBytes; at += 4u)
         {
@@ -3076,6 +3133,7 @@ namespace
             if (current != 0 && current != -1)
                 continue; // (not a view)
             std::memcpy(rdram + inner + 0x20Cu, &field, sizeof(field));
+            g_viewsFound.push_back(at);
             ++views;
         }
         std::fprintf(stderr, "[tf] %u views made to draw %s a frame\n", views, field < 0 ? "one field" : "two fields");
@@ -3197,7 +3255,7 @@ namespace
     void setInBetween(uint8_t *rdram, PS2Runtime *runtime, bool on)
     {
         g_inBetweenHeld = !on;
-        setViewFields(rdram, inBetweenShown() ? 0 : -1);
+        setViewFields(rdram, inBetweenShown() ? 0 : -1, true); // (TODO 287: a rate step's own call checks the views it knows)
         applyVBlankPeriod(runtime);
         const bool inBetween = inBetweenNow();
         rdram[kHalfRate] = inBetween ? 1u : 0u;
@@ -3389,8 +3447,10 @@ namespace
             // the limit, fell and climbed every 10 s; with variable refresh a little under its top, as the ladder's
             // "any rate" - 240 Hz: 235. VSync off (the settings', PS2X_PRESENT_SYNC=0 - presents at once, allowed to tear):
             // the cap itself, Unlimited as many as the PC manages - TODO 266.)
+            // (TODO 283: with variable refresh the top stays a little under the screen's also with VSync off - Off is
+            // the default now, and past its range a FreeSync / G-Sync screen stops following the pictures and tears)
             int top = g_frameRate;
-            if (screenHz >= 50.0 && ps2_host_present::sync() != 0)
+            if (screenHz >= 50.0 && (ps2_host_present::sync() != 0 || vrr))
             {
                 const double margin = vrr ? std::max(3.0, 0.02 * screenHz) : 0.0;
                 top = std::max(30, std::min(top, static_cast<int>(std::floor(screenHz - margin + 0.5))));
@@ -4241,7 +4301,11 @@ namespace
         if (g_frameRate > 30)
         {
             const int madeAt = levelRateInMemory(rdram);
-            const int rate = madeAt > 30 || (madeAt == 30 && g_force60) ? g_frameRate : 0;
+            // (TODO 282: a level made at 30 too, whatever made it so - a limit of 30 at the time, the console's rate
+            // asked for then. It stayed at 30 until the next level with a higher limit set now; only TF_60FPS=force
+            // took it to the rate. TF_KEEP_30=1: as before.)
+            static const bool keep30 = std::getenv("TF_KEEP_30") && *std::getenv("TF_KEEP_30") == '1';
+            const int rate = madeAt > 30 || (madeAt == 30 && (g_force60 || !keep30)) ? g_frameRate : 0;
             g_unpinnedCarPeriod = 0.0f;
             if (madeAt > 30)
             {
@@ -4361,7 +4425,21 @@ namespace
         std::fprintf(stderr, "[tf] settings: %d frames a second, %s\n", g_frameRate,
                      g_moments.load() ? "pictures at the screen's refresh"
                                       : (g_pictureLock != 0 ? (g_pictureLock == 120 ? "120 pictures" : "60 pictures") : "unlocked"));
-        if (g_levelRate == 0 || g_inHq) // (the HQ keeps its own rate: g_inHq)
+        // (TODO 282) In the HQ: its rate from the new limit at once, as an HQ begun now would have it (it kept the old
+        // one until the next HQ). Nothing of a level's to convert: the HQ's per-frame steps follow the rate (hq_rate).
+        if (g_inHq)
+        {
+            const int hqRate = g_hqRate < 0 ? g_frameRate : g_hqRate;
+            if (cap >= 0 && g_hqRate < 0 && hqRate != g_levelRate) // (only for a new limit; the rate may have stepped down since)
+            {
+                std::fprintf(stderr, "[tf] the HQ at %d frames a second (the limit changed in it)\n", hqRate);
+                switchFrameRate(rdram, ctx, runtime, hqRate, false, true);
+                if (hqRate > 30)
+                    startAdapting();
+            }
+            return;
+        }
+        if (g_levelRate == 0)
             return;
         if (g_levelRate != g_frameRate)
         {
@@ -4409,6 +4487,45 @@ namespace
         if (runtime->eeScheduler().loadedStateCount() != g_statesSeen)
             adoptLoadedState(rdram, ctx, runtime); // (in case the hook was not there)
         levelAfterHq(rdram, ctx, runtime);
+        // TF_TEST_CAP=<vblank>:<cap>[,<vblank>:<cap>...] (tests, TODO 282): the frame rate limit set at those VBlanks, as
+        // the menu's row sets it (0: Unlimited).
+        {
+            static std::vector<std::pair<uint64_t, int>> plan = []()
+            {
+                std::vector<std::pair<uint64_t, int>> p;
+                for (const char *t = std::getenv("TF_TEST_CAP"); t && *t;)
+                {
+                    char *end = nullptr;
+                    const uint64_t at = std::strtoull(t, &end, 10);
+                    if (end == t || *end != ':')
+                        break;
+                    const int cap = static_cast<int>(std::strtol(end + 1, &end, 10));
+                    p.emplace_back(at, cap);
+                    t = *end == ',' ? end + 1 : end;
+                    if (*end != ',')
+                        break;
+                }
+                return p;
+            }();
+            static size_t next = 0u;
+            if (next < plan.size() && g_levelHooks && runtime->eeScheduler().currentVSyncTick() >= plan[next].first)
+            {
+                std::fprintf(stderr, "[tf] TF_TEST_CAP: the limit set to %d at VBlank %llu\n", plan[next].second,
+                             static_cast<unsigned long long>(runtime->eeScheduler().currentVSyncTick()));
+                g_wantCap.store(plan[next++].second);
+            }
+            // TF_TEST_VSYNC=<vblank> (tests): VSync turned off at that VBlank, as the menu's row does it.
+            static const uint64_t syncOffAt = std::getenv("TF_TEST_VSYNC") ? std::strtoull(std::getenv("TF_TEST_VSYNC"), nullptr, 10) : 0u;
+            static bool syncOffDone = false;
+            if (syncOffAt != 0u && !syncOffDone && g_levelHooks && runtime->eeScheduler().currentVSyncTick() >= syncOffAt)
+            {
+                syncOffDone = true;
+                std::fprintf(stderr, "[tf] TF_TEST_VSYNC: VSync off at VBlank %llu\n",
+                             static_cast<unsigned long long>(runtime->eeScheduler().currentVSyncTick()));
+                ps2_host_present::setSync(0);
+                g_wantCap.store(g_rateSetting >= kUnlimitedRate ? 0 : g_rateSetting);
+            }
+        }
         takeSettings(rdram, ctx, runtime);
         setFrameWords(rdram, ctx, runtime);
         if (g_frameRate > 30 && playrec::keyPresses(kKeyF4, ps2_host_input::takeKeyPresses(kKeyF4)) > 0) // (N12 b)
@@ -4505,7 +4622,7 @@ namespace
     // scale (+0x3C, set from the detail-level store's camera scale by taDisplayList_StaticScene::Clear, 0x361AC0)
     // times that. TF_TERRAIN_DETAIL=<f>: the scale times f after each Clear (+0x40, the grass cover's eighth root, is
     // made before and stays the game's).
-    constexpr uint32_t kStaticSceneClear = 0x00361AC0u;
+    constexpr uint32_t kStaticSceneClear = TF_GA(0x00361AC0u);
     PS2Runtime::RecompiledFunction g_staticSceneClear = nullptr;
     std::atomic<float> g_terrainDetail{1.0f};
     void staticSceneClear(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -4562,7 +4679,7 @@ namespace
     // back slowly to the setting when there is room. A smaller reach is the game's own way of fewer trees:
     // the farthest go flat (sprite) and fade out first, nothing pops; the nearest are always the 3D ones.
     // TF_FOREST=old: the cap 400 and the reach the setting's, as before.
-    constexpr uint32_t kEcoCreateInstance = 0x004293C0u, kEcoDeleteAll = 0x00429260u;
+    constexpr uint32_t kEcoCreateInstance = TF_GA(0x004293C0u), kEcoDeleteAll = TF_GA(0x00429260u);
     constexpr uint32_t kEcoInstanceCount = 0x00733EE4u; // (the map's size)
     constexpr uint32_t kEcoCapWord = 0x006CD29Cu;       // (the patched compare in CreateInstance reads it)
     constexpr uint32_t kEcoNodePoolCount = 0x00731E64u; // (the node pool's size, 800: 0x695960)
@@ -4681,9 +4798,9 @@ namespace
     void ecoTimed(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const auto start = std::chrono::steady_clock::now();
-        if (Which == 0 && g_forestDiag && ctx->pc == 0x00430190u) // (not a resumed call)
+        if (Which == 0 && g_forestDiag && ctx->pc == TF_GA(0x00430190u)) // (not a resumed call)
             forestDiagLeaf(rdram, ctx);
-        if (Which == 1 && g_forestDiag && ctx->pc == 0x00429510u)
+        if (Which == 1 && g_forestDiag && ctx->pc == TF_GA(0x00429510u))
             g_fdInDraw = true;
         g_forestDepth += Which;
         (Which == 0 ? g_ecoLeafTrees : g_ecoDraw)(rdram, ctx, runtime);
@@ -5086,7 +5203,7 @@ namespace
     // at a1).
     void forestDiagSecondary(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
-        if (ctx->pc == 0x004332A0u) // (its one caller is the drawing, 0x429510)
+        if (ctx->pc == TF_GA(0x004332A0u)) // (its one caller is the drawing, 0x429510)
         {
             ++g_fdFrame.secCalls;
             g_fdFrame.secDistMax = std::max(g_fdFrame.secDistMax, ecoDistance(rdram, getRegU32(ctx, 5)));
@@ -5507,15 +5624,15 @@ namespace
             runtime.registerFunction(kEcoCreateInstance, ecoCreateInstance);
         if (g_ecoDeleteAll)
             runtime.registerFunction(kEcoDeleteAll, ecoDeleteAll);
-        if ((g_ecoLeafTrees = runtime.lookupFunction(0x00430190u)) != nullptr)
-            runtime.registerFunction(0x00430190u, ecoTimed<0>);
-        if ((g_ecoDraw = runtime.lookupFunction(0x00429510u)) != nullptr)
-            runtime.registerFunction(0x00429510u, ecoTimed<1>);
+        if ((g_ecoLeafTrees = runtime.lookupFunction(TF_GA(0x00430190u))) != nullptr)
+            runtime.registerFunction(TF_GA(0x00430190u), ecoTimed<0>);
+        if ((g_ecoDraw = runtime.lookupFunction(TF_GA(0x00429510u))) != nullptr)
+            runtime.registerFunction(TF_GA(0x00429510u), ecoTimed<1>);
         if (const char *diag = std::getenv("TF_FOREST_DIAG"); diag && *diag == '1')
         {
             g_forestDiag = true;
-            if ((g_fdSecondary = runtime.lookupFunction(0x004332A0u)) != nullptr)
-                runtime.registerFunction(0x004332A0u, forestDiagSecondary);
+            if ((g_fdSecondary = runtime.lookupFunction(TF_GA(0x004332A0u))) != nullptr)
+                runtime.registerFunction(TF_GA(0x004332A0u), forestDiagSecondary);
             if ((g_fdLod = runtime.lookupFunction(0x0026B260u)) != nullptr)
                 runtime.registerFunction(0x0026B260u, forestDiagLod);
             if ((g_fdLevel = runtime.lookupFunction(0x00213B30u)) != nullptr)
@@ -5525,12 +5642,12 @@ namespace
         }
         if (const char *split = std::getenv("TF_FOREST_SPLIT"); split && *split == '1')
         {
-            g_layoutRender = runtime.lookupFunction(0x004332A0u);
-            g_layoutDraw = runtime.lookupFunction(0x00432340u);
+            g_layoutRender = runtime.lookupFunction(TF_GA(0x004332A0u));
+            g_layoutDraw = runtime.lookupFunction(TF_GA(0x00432340u));
             if (g_layoutRender && g_layoutDraw)
             {
-                runtime.registerFunction(0x004332A0u, layoutTimed);
-                runtime.registerFunction(0x00432340u, layoutDrawTimed);
+                runtime.registerFunction(TF_GA(0x004332A0u), layoutTimed);
+                runtime.registerFunction(TF_GA(0x00432340u), layoutDrawTimed);
             }
             if ((g_meshSurfaceRender = runtime.lookupFunction(0x001FFC70u)) != nullptr) // (vlMeshSurface::vfunc_03, the mesh's render)
                 runtime.registerFunction(0x001FFC70u, meshSurfaceTimed);
@@ -6020,7 +6137,7 @@ namespace
         }
         // (the incidental objects' (0x33FEE0) pick: their squared distance from the camera object (*(gp-0x3DC0)) in $f20,
         // the object in $s2, the level kept at +0x168)
-        if (getRegU32(ctx, 31) == 0x0033FFD8u && getRegU32(ctx, 4) == 5u)
+        if (getRegU32(ctx, 31) == TF_GA(0x0033FFD8u) && getRegU32(ctx, 4) == 5u)
         {
             const uint32_t object = getRegU32(ctx, 18);
             const float d2 = ctx->f[20];
@@ -6401,7 +6518,7 @@ namespace
     // calls that node's Cull (vtable +0x10). With Enemy detail Full that Cull runs with the node cull's distance limit
     // and small-on-screen test lifted, as an animation actor's does (openActorCull, the model node's own +0x50) - the
     // model drawn at any distance, not only its glow. TF_LOD_CENSUS=1: each panel's model once - class, level, radius.
-    constexpr uint32_t kPickupPanelDraw = 0x0037C4C0u;
+    constexpr uint32_t kPickupPanelDraw = TF_GA(0x0037C4C0u);
     PS2Runtime::RecompiledFunction g_pickupPanelDraw = nullptr;
     ActorCullOpen openActorCull(uint8_t *rdram, R5900Context *ctx);
     void closeActorCull(uint8_t *rdram, uint32_t gp, const ActorCullOpen &o);
@@ -6444,7 +6561,7 @@ namespace
 
     // (TF_LOD_CENSUS=1) The pickup manager's Cull (0x00378B70: its pickups from +0x140, the next at +8): every 20 s
     // each pickup's class and position - where to put the player for a far look (TF_PLACE).
-    constexpr uint32_t kPickupManagerCull = 0x00378B70u;
+    constexpr uint32_t kPickupManagerCull = TF_GA(0x00378B70u);
     PS2Runtime::RecompiledFunction g_pickupManagerCull = nullptr;
     void pickupManagerCull(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
@@ -6719,13 +6836,13 @@ namespace
         bool zeroIsFull; // (false: counted on entry)
     };
     constexpr PoolCensusSite kPoolCensusSites[] = {
-        {0x0036A670u, "particle buffer take", true},   {0x003D4F50u, "projectile reserve", true},
-        {0x0040F610u, "surface impact take", true},    {0x0027B7F0u, "sound emitter take", true},
-        {0x002B4EB0u, "actor pool take", true},        {0x00525EF0u, "actor budget check", true},
+        {TF_GA(0x0036A670u), "particle buffer take", true},   {TF_GA(0x003D4F50u), "projectile reserve", true},
+        {TF_GA(0x0040F610u), "surface impact take", true},    {0x0027B7F0u, "sound emitter take", true},
+        {0x002B4EB0u, "actor pool take", true},        {TF_GA(0x00525EF0u), "actor budget check", true},
         {0x00106270u, "OUT OF MEMORY handler", false}, {0x00106620u, "generic fatal error", false},
         {0x002F90F0u, "tree collision add", false},
-        {0x005CD3D0u, "gib pool take", true},          {0x0035C320u, "decal add", false},
-        {0x002B46C0u, "actor block allocate", false},  {0x005A8170u, "display list clear", false},
+        {TF_GA(0x005CD3D0u), "gib pool take", true},          {TF_GA(0x0035C320u), "decal add", false},
+        {0x002B46C0u, "actor block allocate", false},  {TF_GA(0x005A8170u), "display list clear", false},
     };
     // (N7 step 2) The trees' collision (taEcoCollisionSystem): 0x2F90F0 adds a tree near the player to one array of
     // 150 instances (a0+4: its +0xC the count, +8 the entries) unless the tree stands in a cleared rectangle; at 150
@@ -7036,7 +7153,7 @@ namespace
             if (count >= 150u)
                 ++g_poolCensusEmpty[I];
         }
-        if (kPoolCensusSites[I].address == 0x0035C320u)
+        if (kPoolCensusSites[I].address == TF_GA(0x0035C320u))
         {
             const uint32_t set = getRegU32(ctx, 4), count = censusWord(rdram, set + 0x10u), size = censusWord(rdram, set + 0x24u);
             g_censusDecalSizeMax = std::max(g_censusDecalSizeMax, size);
@@ -7044,7 +7161,7 @@ namespace
             if (count + 1u > size)
                 ++g_censusDecalFull;
         }
-        if (kPoolCensusSites[I].address == 0x005A8170u)
+        if (kPoolCensusSites[I].address == TF_GA(0x005A8170u))
             censusDisplayListFree(rdram);
         g_poolCensusOriginal[I](rdram, ctx, runtime);
         if (kPoolCensusSites[I].address == 0x002B46C0u && ctx->pc == ra)
@@ -7064,10 +7181,10 @@ namespace
         if (kPoolCensusSites[I].zeroIsFull && empty) // (returned, and empty-handed)
         {
             ++g_poolCensusEmpty[I];
-            if (kPoolCensusSites[I].address == 0x00525EF0u)
+            if (kPoolCensusSites[I].address == TF_GA(0x00525EF0u))
                 poolCensusBudgetRefused(rdram, gp, a1);
         }
-        if (kPoolCensusSites[I].address == 0x00525EF0u)
+        if (kPoolCensusSites[I].address == TF_GA(0x00525EF0u))
             poolCensusPerPool(rdram, runtime, a1, !empty);
     }
     template <size_t... I>
@@ -7338,6 +7455,7 @@ namespace
                                                  envOf("TF_GRASS_DISTANCE"));
         nr::setGrassReach(d.grass);
         nr::setTextureSharpness(textureSharpnessOf(envOf("TF_SHARP_TEXTURES")));
+        nr::setTextureSmoothing(envOf("TF_SMOOTH_TEXTURES") != "0");
         g_enemyDetail.store(enemyDetailOf(envOf("TF_ENEMY_DETAIL")));
         g_terrainDetail.store(terrainDetailOf(envOf("TF_TERRAIN_DETAIL"), preset));
         if ((g_staticSceneClear = runtime.lookupFunction(kStaticSceneClear)) != nullptr)
@@ -7375,6 +7493,7 @@ namespace
         ultrawide::addSettings();   // Graphics: the picture's shape (ultrawide.h)
         native_sound::addSettings(); // Sound: the native sound server (native_sound.h)
         fast_load::addSettings();   // Gameplay: fast loading (fast_load.h)
+        language::addSettings();    // Gameplay: the PAL release's language (language.h)
         mod_menu::addSettings();    // Controls: driving with W / S (mod_menu.h)
         small_crosshair::addSettings(); // Display: the small crosshair (small_crosshair.h)
         crisp_text::addSettings();  // Display: sharp text and PS5 button symbols (crisp_text.h, TODO 119)
@@ -7474,17 +7593,20 @@ namespace
             // (TODO 266) VSync: the presents wait for the screen's refresh (On: by the screen, as always - at its refresh,
             // at once with FreeSync / G-Sync) or go at once (Off: allowed to tear; the frame rate cap alone limits the
             // pictures, Unlimited none). Live: the presents at once (ps2_host_present::setSync), a level's rates from the
-            // next frame (taken as a cap change), the HQ's when it is entered next.
+            // next frame (taken as a cap change), and the HQ's too (TODO 282: it was the HQ's only when it was entered next -
+            // VSync turned off in the HQ "did nothing").
             Setting v;
             v.key = "PS2X_PRESENT_SYNC";
             v.section = "Graphics";
             v.label = "VSync";
             v.order = 6;
-            v.help = "On: each picture waits for your screen's refresh, so nothing tears, and the game draws no more pictures "
-                     "than the screen shows. Off: each picture goes to the screen at once, as many as your PC can draw up to the "
-                     "frame rate cap, with less delay to your input; the picture may tear.";
-            v.choices = {{"on", "On"}, {"0", "Off"}};
-            v.defaultValue = "on";
+            // (TODO 283, the user's choice: Off by default. With no line in settings.ini the presents go at once -
+            // the runtime's ps2_host_present::sync, patch 0168; "on" is what the row writes for On.)
+            v.help = "Off: more frames, up to the frame rate cap; the picture may tear. On: no tearing, never above the "
+                     "screen's refresh. With FreeSync or G-Sync the game stays a little under the screen's top rate "
+                     "either way, so the screen keeps following it.";
+            v.choices = {{"0", "Off"}, {"on", "On"}};
+            v.defaultValue = "0";
             v.current = []() { return std::string(ps2_host_present::sync() == 0 ? "0" : "on"); };
             v.apply = [](const std::string &value)
             {
@@ -7747,6 +7869,27 @@ namespace
                 s.apply = [](const std::string &value)
                 {
                     nr::setTextureSharpness(textureSharpnessOf(value));
+                    return true;
+                };
+                ps2_settings::add(s);
+            }
+            {
+                // Issue #17: a texture magnified on screen filtered as the draw asks for a magnified one (MMAG), where the
+                // GS's distance rule picked MMIN's nearest texels - the characters' skin, blocky at 1440 lines with the
+                // game's own textures (nr::setTextureSmoothing). On by default; Off: the PS2's choice.
+                Setting s;
+                s.key = "TF_SMOOTH_TEXTURES";
+                s.section = "Graphics";
+                s.label = "Smooth textures";
+                s.order = 45; // (after Sharp textures: the same order, added after it)
+                s.help = "Native renderer: the game's own textures stay smooth up close on a high-resolution screen. The PS2 "
+                         "showed some of them, the characters' among them, as hard texels, which look blocky at 1440p and "
+                         "4K. Off: the PS2's.";
+                s.choices = {Choice{"", "On"}, Choice{"0", "Off"}};
+                s.defaultValue = "";
+                s.apply = [](const std::string &value)
+                {
+                    nr::setTextureSmoothing(value != "0");
                     return true;
                 };
                 ps2_settings::add(s);
@@ -8020,14 +8163,14 @@ namespace
         static double cpuBefore = 0.0;
         const double cpu = 0.0;
 #endif
-        static double renderWaitBefore = nr::gameWaitMs(), slotWaitBefore = nr::d3d::slotWaitMs();
+        static double renderWaitBefore = nr::gameWaitMs(), slotWaitBefore = nr::backend().slotWaitMs();
         static uint64_t pipelinesBefore = nr::pipelinesMade(), compressedBefore = 0u, pngsBefore = 0u;
         static auto windowStart = now;
         static int linesInWindow = 0;
         const double intervalMs = std::chrono::duration<double, std::milli>(now - last).count();
         const double idleMs = std::chrono::duration<double, std::milli>(ee.idleHostTime() - idleBefore).count();
         const double cpuMs = cpu - cpuBefore, renderWait = nr::gameWaitMs() - renderWaitBefore,
-                     slotWait = nr::d3d::slotWaitMs() - slotWaitBefore;
+                     slotWait = nr::backend().slotWaitMs() - slotWaitBefore;
         const uint64_t pipelines = nr::pipelinesMade();
         unsigned queued = 0u, heavy = 0u;
         uint64_t compressed = 0u, pngs = 0u;
@@ -8056,14 +8199,104 @@ namespace
         idleBefore = ee.idleHostTime();
         cpuBefore = cpu;
         renderWaitBefore = nr::gameWaitMs();
-        slotWaitBefore = nr::d3d::slotWaitMs();
+        slotWaitBefore = nr::backend().slotWaitMs();
         pipelinesBefore = pipelines;
         compressedBefore = compressed;
         pngsBefore = pngs;
     }
 
+    // (TF_FPS=1) Every 2 s of wall time: the game's frames, VBlanks and pictures a second, the EE's work and the host's
+    // idle time a frame. Called once a frame by the frame-kick hooks (the USA one and the PAL one).
+    void printFrameRate(PS2Runtime *runtime)
+    {
+        using clock = std::chrono::steady_clock;
+        static auto windowStart = clock::now();
+        static uint32_t frames = 0;
+        static uint64_t windowTick = 0;
+        static uint64_t windowPictures = 0;
+        static uint64_t windowLeftOut = 0;
+        static auto windowIdle = runtime->eeScheduler().idleHostTime();
+        // The 1% low (issue 12's thread placement bench): the frames of the last 30 s (the state load left out, as
+        // bench.ps1 does), the average of the slowest 1% as a rate. A ring buffer, so a long session costs no more
+        // than a short one and the report does not hitch the frames it measures.
+        struct FrameTime
+        {
+            clock::time_point at;
+            float ms;
+        };
+        constexpr size_t kRingFrames = 16384u; // (30 s at up to ~540 frames a second; faster, the window is shorter)
+        constexpr auto kLowWindow = std::chrono::seconds(30);
+        static std::vector<FrameTime> ring(kRingFrames);
+        static std::vector<float> slowest = []
+        {
+            std::vector<float> v;
+            v.reserve(kRingFrames);
+            return v;
+        }();
+        static size_t ringNext = 0;
+        static size_t ringCount = 0;
+        static clock::time_point lastFrame{};
+        static bool reportedOnce = false;
+        const auto frameNow = clock::now();
+        if (reportedOnce && lastFrame != clock::time_point{})
+        {
+            ring[ringNext] = FrameTime{frameNow, std::chrono::duration<float, std::milli>(frameNow - lastFrame).count()};
+            ringNext = (ringNext + 1u) % kRingFrames;
+            ringCount = std::min(ringCount + 1u, kRingFrames);
+        }
+        lastFrame = frameNow;
+        ++frames;
+        const double elapsed = std::chrono::duration<double>(frameNow - windowStart).count();
+        if (elapsed >= 2.0)
+        {
+            const uint64_t tick = runtime->eeScheduler().currentVSyncTick();
+            ps2_host_display::Clock::time_point lastPicture{};
+            const uint64_t pictures = ps2_host_display::pictureCount(lastPicture);
+            std::cerr << "[tf] fps " << frames / elapsed << " vblank/s " << (tick - windowTick) / elapsed
+                      << " pictures/s " << (pictures - windowPictures) / elapsed
+                      << " EE work ms a frame "
+                      << (g_workFrames ? static_cast<double>(g_workCycleSum) / g_workFrames / kEeCyclesPerMs : 0.0)
+                      << " (at most " << g_workCycleMax / kEeCyclesPerMs << ")"
+                      << " host idle ms a frame "
+                      << std::chrono::duration<double, std::milli>(runtime->eeScheduler().idleHostTime() - windowIdle).count() /
+                             std::max(frames, 1u)
+                      << " in-between left out " << ps2_host_display::secondFieldsLeftOut() - windowLeftOut;
+            // (newest first, up to the first frame older than the window)
+            slowest.clear();
+            for (size_t i = 0; i < ringCount; ++i)
+            {
+                const FrameTime &f = ring[(ringNext + kRingFrames - 1u - i) % kRingFrames];
+                if (frameNow - f.at > kLowWindow)
+                    break;
+                slowest.push_back(f.ms);
+            }
+            if (slowest.size() >= 100u)
+            {
+                const size_t count = slowest.size() / 100u;
+                std::nth_element(slowest.begin(), slowest.begin() + static_cast<std::ptrdiff_t>(count - 1u), slowest.end(), std::greater<float>());
+                double sum = 0.0;
+                for (size_t i = 0; i < count; ++i)
+                    sum += slowest[i];
+                std::cerr << " 1% low " << (sum > 0.0 ? 1000.0 * static_cast<double>(count) / sum : 0.0);
+            }
+            std::cerr << std::endl;
+            reportedOnce = true;
+            frames = 0;
+            windowTick = tick;
+            windowPictures = pictures;
+            windowLeftOut = ps2_host_display::secondFieldsLeftOut();
+            windowIdle = runtime->eeScheduler().idleHostTime();
+            windowStart = clock::now();
+            g_workCycleSum = 0u;
+            g_workCycleMax = 0u;
+            g_workFrames = 0u;
+        }
+    }
+
     void frameKick(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        if (language::redirectForText(rdram, ctx, runtime)) // (the PAL release's text in another language: language.h)
+            return;
         testStall(runtime);
         reportSlowFrame(rdram, runtime);
         key_text::frame(rdram); // (the sticks' words for the keyboard: key_text.h)
@@ -8078,90 +8311,7 @@ namespace
         if (g_censusAddress != 0u)
             reportCensus();
         if (g_printFps)
-        {
-            using clock = std::chrono::steady_clock;
-            static auto windowStart = clock::now();
-            static uint32_t frames = 0;
-            static uint64_t windowTick = 0;
-            static uint64_t windowPictures = 0;
-            static uint64_t windowLeftOut = 0;
-            static auto windowIdle = runtime->eeScheduler().idleHostTime();
-            // The 1% low (issue 12's thread placement bench): the frames of the last 30 s (the state load left out, as
-            // bench.ps1 does), the average of the slowest 1% as a rate. A ring buffer, so a long session costs no more
-            // than a short one and the report does not hitch the frames it measures.
-            struct FrameTime
-            {
-                clock::time_point at;
-                float ms;
-            };
-            constexpr size_t kRingFrames = 16384u; // (30 s at up to ~540 frames a second; faster, the window is shorter)
-            constexpr auto kLowWindow = std::chrono::seconds(30);
-            static std::vector<FrameTime> ring(kRingFrames);
-            static std::vector<float> slowest = []
-            {
-                std::vector<float> v;
-                v.reserve(kRingFrames);
-                return v;
-            }();
-            static size_t ringNext = 0;
-            static size_t ringCount = 0;
-            static clock::time_point lastFrame{};
-            static bool reportedOnce = false;
-            const auto frameNow = clock::now();
-            if (reportedOnce && lastFrame != clock::time_point{})
-            {
-                ring[ringNext] = FrameTime{frameNow, std::chrono::duration<float, std::milli>(frameNow - lastFrame).count()};
-                ringNext = (ringNext + 1u) % kRingFrames;
-                ringCount = std::min(ringCount + 1u, kRingFrames);
-            }
-            lastFrame = frameNow;
-            ++frames;
-            const double elapsed = std::chrono::duration<double>(frameNow - windowStart).count();
-            if (elapsed >= 2.0)
-            {
-                const uint64_t tick = runtime->eeScheduler().currentVSyncTick();
-                ps2_host_display::Clock::time_point lastPicture{};
-                const uint64_t pictures = ps2_host_display::pictureCount(lastPicture);
-                std::cerr << "[tf] fps " << frames / elapsed << " vblank/s " << (tick - windowTick) / elapsed
-                          << " pictures/s " << (pictures - windowPictures) / elapsed
-                          << " EE work ms a frame "
-                          << (g_workFrames ? static_cast<double>(g_workCycleSum) / g_workFrames / kEeCyclesPerMs : 0.0)
-                          << " (at most " << g_workCycleMax / kEeCyclesPerMs << ")"
-                          << " host idle ms a frame "
-                          << std::chrono::duration<double, std::milli>(runtime->eeScheduler().idleHostTime() - windowIdle).count() /
-                                 std::max(frames, 1u)
-                          << " in-between left out " << ps2_host_display::secondFieldsLeftOut() - windowLeftOut;
-                // (newest first, up to the first frame older than the window)
-                slowest.clear();
-                for (size_t i = 0; i < ringCount; ++i)
-                {
-                    const FrameTime &f = ring[(ringNext + kRingFrames - 1u - i) % kRingFrames];
-                    if (frameNow - f.at > kLowWindow)
-                        break;
-                    slowest.push_back(f.ms);
-                }
-                if (slowest.size() >= 100u)
-                {
-                    const size_t count = slowest.size() / 100u;
-                    std::nth_element(slowest.begin(), slowest.begin() + static_cast<std::ptrdiff_t>(count - 1u), slowest.end(), std::greater<float>());
-                    double sum = 0.0;
-                    for (size_t i = 0; i < count; ++i)
-                        sum += slowest[i];
-                    std::cerr << " 1% low " << (sum > 0.0 ? 1000.0 * static_cast<double>(count) / sum : 0.0);
-                }
-                std::cerr << std::endl;
-                reportedOnce = true;
-                frames = 0;
-                windowTick = tick;
-                windowPictures = pictures;
-                windowLeftOut = ps2_host_display::secondFieldsLeftOut();
-                windowIdle = runtime->eeScheduler().idleHostTime();
-                windowStart = clock::now();
-                g_workCycleSum = 0u;
-                g_workCycleMax = 0u;
-                g_workFrames = 0u;
-            }
-        }
+            printFrameRate(runtime);
         if (playrec::armed())
         {
             // (N12 b: the frame's check for a play recording or its replay - playrec.h)
@@ -8188,6 +8338,7 @@ namespace
         g_mouseLookRdram = rdram;
         mouseLook();
         updateDisplayAspect(rdram);
+        language::frame(rdram, ctx, runtime); // (the PAL release's language: language.h)
         applyFrameRate(rdram, ctx, runtime);
         applyDrawDistance(rdram, runtime);
         charDetailFrame(runtime);
@@ -8562,10 +8713,10 @@ namespace
         installDiffHooks(runtime);
         if (std::getenv("TF_STEALTH_LOG"))
         {
-            if ((g_suitCtor = runtime.lookupFunction(0x004E72F0u)) != nullptr)
-                runtime.registerFunction(0x004E72F0u, suitCtor);
-            if ((g_suitSetActive = runtime.lookupFunction(0x004E7290u)) != nullptr)
-                runtime.registerFunction(0x004E7290u, suitSetActive);
+            if ((g_suitCtor = runtime.lookupFunction(TF_GA(0x004E72F0u))) != nullptr)
+                runtime.registerFunction(TF_GA(0x004E72F0u), suitCtor);
+            if ((g_suitSetActive = runtime.lookupFunction(TF_GA(0x004E7290u))) != nullptr)
+                runtime.registerFunction(TF_GA(0x004E7290u), suitSetActive);
             std::fprintf(stderr, "[tf:stealth] hooks: constructor %s, SetActive %s\n", g_suitCtor ? "in" : "MISSING",
                          g_suitSetActive ? "in" : "MISSING");
         }
@@ -9070,6 +9221,7 @@ namespace
         // and picture rules only where they were before.
         if ((g_executorLoop = runtime.lookupFunction(kExecutorLoop)) != nullptr)
             runtime.registerFunction(kExecutorLoop, executorLoop);
+        language::install(runtime); // (the PAL release's language: language.h)
         if ((g_preGameEnd = runtime.lookupFunction(kPreGameEnd)) != nullptr)
             runtime.registerFunction(kPreGameEnd, preGameEnd);
         // (TF_CAR_LOG at the console's 30: the cars' step wrapped for its log alone - g_levelRate 0 passes it through)
@@ -9173,6 +9325,9 @@ namespace
         }
         guest_code::writeAll(runtime.memory().getRDRAM());
     }
+
+    // The PAL release (SLES-52388): the same hooks, its code addresses given by TF_GA (game_version.h).
+    constexpr uint32_t kPalElfCrc32 = 0xA0DBA384u;
 }
 
 namespace tf::port
@@ -9291,3 +9446,4 @@ namespace tf::port
 }
 
 PS2_REGISTER_GAME_OVERRIDE("Transformers (USA)", "SLUS_206.68", kEntry, kElfCrc32, applyTransformers);
+PS2_REGISTER_GAME_OVERRIDE("Transformers (Europe)", "SLES_523.88", kEntry, kPalElfCrc32, applyTransformers);

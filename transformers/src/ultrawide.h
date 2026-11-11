@@ -38,6 +38,8 @@ namespace ultrawide
     void noteWindow(int width, int height);
     // The shape the game's wide picture is shown at (16:9 or wider).
     float shape();
+    // shape / 16:9 while the game draws its widescreen picture, else 1 (the game thread's last frame()).
+    float wideFactor();
     // Once a rendered frame, on the game thread: the 4/3 constant for the shape.
     void frame(uint8_t *rdram);
     // The settings panel's choice (F5, Graphics).

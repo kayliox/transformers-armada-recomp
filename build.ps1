@@ -31,6 +31,7 @@ param(
     [switch]$SkipRecompile,
     [switch]$NoPatches,     # leave PS2Recomp as it is (when editing it directly)
     [switch]$Public,        # the public build (no overlay\: no mods) into out\build-public, from a tree that has the overlay
+    [switch]$Vulkan,        # the Vulkan backend too (-DTF_VULKAN=ON; in development, off by default). The build folder keeps it.
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$OverlayArgs  # the overlay's own (overlay\build_hooks.ps1)
 )
 
@@ -47,7 +48,45 @@ $Work = Join-Path $Root "work"
 $Build = Join-Path $Root $(if ($Public) { "out\build-public" } else { "out\build" })
 $ToolsBuild = Join-Path $Root "out\tools"
 $Tools = Join-Path $Root "transformers\tools"
-$ElfName = "SLUS_206.68"
+
+# --- The release being built: USA (SLUS-20668, transformers\config\) or another one with its own
+# config (transformers\config\versions\<serial>\). TF_GAME_VERSION when set; else the release whose
+# executable is in game\; else the disc image's (extract_iso.py --detect). The Python tools read
+# TF_GAME_VERSION for the config they use.
+$Versions = [ordered]@{}
+$Versions["SLUS-20668"] = (Get-Content (Join-Path $Root "transformers\config\game.json") -Raw | ConvertFrom-Json).elf_name
+foreach ($f in Get-ChildItem (Join-Path $Root "transformers\config\versions") -Filter game.json -Recurse -ErrorAction SilentlyContinue) {
+    $Versions[$f.Directory.Name] = (Get-Content $f.FullName -Raw | ConvertFrom-Json).elf_name
+}
+$GameVersion = $env:TF_GAME_VERSION
+if (-not $GameVersion) {
+    $GameVersion = @($Versions.Keys | Where-Object { Test-Path (Join-Path $Game $Versions[$_]) }) | Select-Object -First 1
+}
+if (-not $GameVersion) {
+    $disc = if ($Iso) { $Iso } else { (Get-ChildItem $Root -Filter *.iso -File | Select-Object -First 1).FullName }
+    if ($disc) { $GameVersion = (& python (Join-Path $Tools "extract_iso.py") --detect $disc | Out-String).Trim() }
+}
+if (-not $GameVersion) { $GameVersion = "SLUS-20668" }
+if (-not $Versions.Contains($GameVersion)) { throw "No config for the release $GameVersion (transformers\config\versions\$GameVersion)." }
+$env:TF_GAME_VERSION = $GameVersion
+$ElfName = $Versions[$GameVersion]
+# Another release runs the USA hooks at its own addresses (transformers\src\game_version.h, TF_GA): every code address
+# the C++ uses must be written with TF_GA, or that build would hook the wrong place.
+if ($GameVersion -ne "SLUS-20668") {
+    & python (Join-Path $Tools "check_pal_addresses.py")
+    if ($LASTEXITCODE -ne 0) { throw "Code addresses not translated for $GameVersion (see above)." }
+    # (docs\PAL_ADDRESSES.md) The private tree's mods (overlay\) use USA addresses that are not wrapped: another release
+    # is built without them, as -Public builds.
+    if (-not $Public -and (Test-Path -LiteralPath (Join-Path $Root "overlay"))) {
+        Write-Host "The mods (overlay\) are USA only: $GameVersion is built without them." -ForegroundColor Yellow
+        $Public = $true
+        $Build = Join-Path $Root "out\build-public"
+    }
+} else {
+    # (docs\PAL_ADDRESSES.md) The USA build checks the same, as a warning: an address added without TF_GA shows at once.
+    & python (Join-Path $Tools "check_pal_addresses.py") | Out-Host
+    if ($LASTEXITCODE -ne 0) { Write-Host "warning: code addresses without TF_GA (above): the European build would stop on them. docs\PAL_ADDRESSES.md" -ForegroundColor Yellow }
+}
 
 # --- Timing: each step's time, a summary at the end, the record used for the next estimates -------
 $Clock = [Diagnostics.Stopwatch]::StartNew()
@@ -236,8 +275,9 @@ function Get-GeneratorArgs([string]$Dir) {
     $a + @("-G", $vs[0].Generator, "-DCMAKE_GENERATOR_INSTANCE=$($vs[0].Path)")
 }
 $genArgs = Get-GeneratorArgs $ToolsBuild
-$cmakeArgs = @("-S", $Root, "-B", $Build) + (Get-GeneratorArgs $Build)
+$cmakeArgs = @("-S", $Root, "-B", $Build, "-DTF_GAME_VERSION=$GameVersion") + (Get-GeneratorArgs $Build)
 if ($Public) { $cmakeArgs += "-DTF_OVERLAY_DIR=" } # (the overlay left out: transformers\CMakeLists.txt)
+if ($Vulkan) { $cmakeArgs += "-DTF_VULKAN=ON" }     # (the Vulkan backend: transformers\CMakeLists.txt; -DTF_VULKAN=OFF turns it off again)
 
 # What the translation (steps 3-4) depends on, one line per input: "<name> <SHA-256>". The
 # recompiler and analyzer are the programs themselves - MSBuild relinks them only when a source

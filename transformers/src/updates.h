@@ -54,6 +54,8 @@ namespace updates
     // The About page of the F1 menu (mod_menu.cpp; ImGui). `settings`: the page's settings rows (the
     // automatic check), drawn by the menu under the Updates heading.
     void drawAbout(PS2Runtime &runtime, const std::function<void()> &settings);
+    // One line for a report: the version's number, commit, branch, date and kind (support_report.h).
+    std::string buildLine();
     // A newer version is there (the menu's notice); and a line for it ("" when there is none).
     bool updateAvailable();
     std::string noticeText();

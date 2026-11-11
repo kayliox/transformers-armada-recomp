@@ -31,6 +31,7 @@
 // the screen's refresh). TF_NATIVE_WARP_DOT=<x>: the dots' size (1 = a PS2 pixel's area). TF_NATIVE_WARP_LOG=1: a line
 // a second while a tunnel shows.
 #include "nr_types.h"
+#include "nr_backend.h"
 
 #include "runtime/ps2_host_display.h"
 #include "runtime/ps2_vu1.h"
@@ -875,7 +876,7 @@ namespace nr::warp
             check(run.data);
             return false;
         }
-        if (ps2_host_display::emulatedDrawing() || !d3d::drawsPictures())
+        if (ps2_host_display::emulatedDrawing() || !backend().drawsPictures())
             return declined("the GS draws"); // (the GS draws: the program's packets are its pictures)
         uint8_t *data = run.data;
         auto word = [&](uint32_t q, uint32_t l) {

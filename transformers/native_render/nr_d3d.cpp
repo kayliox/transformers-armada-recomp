@@ -561,7 +561,8 @@ void gsClip(triangle VsOut tri[3], inout TriangleStream<VsOut> stream)
 // GS's level plus up to `base` levels finer where the screen shows that detail (their own footprint):
 // never coarser than the GS's image, never a level the GS would not blur to. Level 0 linear through the
 // anisotropic filter with its footprint held to the GS image's size (no level past it), the rest at the
-// level the GS picks.
+// level the GS picks. lod.x 2 (the smooth-textures setting): MMAG's filter also where the level is magnified
+// on screen, whatever the distance says.
 // The pixel shader's variants (TODO 94): what a draw never uses left out when it is compiled - the same arithmetic on
 // the paths kept, far fewer registers (the one shader for every draw ran at a fraction of the GPU's pixel rate). Set by
 // psVariantOf on the C++ side; unset, every path is in and picked at run time, as before.
@@ -608,7 +609,13 @@ float4 sampleGs(float2 uv, float2 uvx, float2 uvy, float gsq)
         if (lodf.w < 1.5)
             level = floor(level + 0.5);
     }
-    const bool smooth = base > 0.0 || (mag ? lodf.y > 0.5 : lodf.z > 0.5);
+    // (Issue #17, lod.x 2: the smooth-textures setting) The GS takes MMIN by distance alone, where it counts the
+    // texture as shrunk; on a tall picture the same draw can show each texel over many pixels (the lit meshes' skin,
+    // 0xa0: MMIN nearest - blocks at 1440 lines). Where the level drawn is magnified on screen (d < level), the
+    // draw's MMAG filter applies instead, as the GS would choose for a magnified texture: a draw that asked for hard
+    // texels when magnified (MMAG nearest) keeps them.
+    const bool screenMag = lod.x > 1.5 && d < level;
+    const bool smooth = base > 0.0 || ((mag || screenMag) ? lodf.y > 0.5 : lodf.z > 0.5);
     if (level <= 0.0 && smooth)
     {
         const float k = exp2(min(base - d, 0.0));
@@ -7463,9 +7470,9 @@ namespace nr::d3d
 // (nr_types.h's preUpload: the capture's textures made ahead, to this file's queue.)
 namespace nr
 {
-    void preUpload(const std::shared_ptr<const Texture> &texture) { d3d::preUploadImpl(texture); }
-    bool rendererStarting() { return d3d::startingNow(); }
-    int bakeShaders(const char *path) { return d3d::bakeShaders(path); }
+    void preUpload(const std::shared_ptr<const Texture> &texture) { backend().preUpload(texture); }
+    bool rendererStarting() { return backend().startingNow(); }
+    int bakeShaders(const char *path) { return d3d::bakeShaders(path); } // (the build's step: Direct3D 12's shaders)
 }
 
 // (Roadmap P3, step S1) The Direct3D 12 backend as nr_backend.h's interface: today's nr::d3d calls behind it.
@@ -7513,7 +7520,8 @@ namespace nr
         };
     }
 
-    Backend &backend()
+    // (The backend in use is chosen in nr_backend.cpp: TF_GFX_API.)
+    Backend &d3d12Backend()
     {
         static D3d12Backend b;
         return b;
@@ -7522,6 +7530,6 @@ namespace nr
 
 namespace nr::gfx
 {
-    // (P3 S3) The device in use: Direct3D 12 today.
-    Device &device() { return nr::d3d::d3d12Device(); }
+    // (P3 S3) The Direct3D 12 device (the one in use is chosen in nr_backend.cpp: TF_GFX_API).
+    Device &deviceD3d12() { return nr::d3d::d3d12Device(); }
 }

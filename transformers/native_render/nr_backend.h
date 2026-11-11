@@ -1,8 +1,9 @@
 // The native renderer's graphics backend (docs/RENDERER_BACKEND.md): the API-neutral types the frame builder hands the
 // device (a draw's blend, depth test and colour writes, the formats), and the backend's outer calls as one interface -
 // the frame's entry, the pictures to the window, the settings, the timing figures (section 2 of the document). The
-// frame's recording itself goes through gfx::Device (nr_device.h). Direct3D 12 (nr_d3d.cpp) is the one backend today;
-// the callers still use its nr::d3d functions, which this interface forwards to.
+// frame's recording itself goes through gfx::Device (nr_device.h). Direct3D 12 (nr_d3d.cpp) is the default backend and
+// forwards to its nr::d3d functions; the Vulkan one (vulkan/nr_vulkan.cpp, built with TF_VULKAN, in development) is
+// chosen with TF_GFX_API=vulkan (nr_backend.cpp).
 #pragma once
 
 #include <cstdint>
@@ -105,6 +106,8 @@ namespace nr
         virtual void preUpload(const std::shared_ptr<const Texture> &texture) = 0;
 
         // ---- pictures to the window (window thread) ----
+        // `pixels` (RGBA8, `rowPitch` bytes a row) stays valid and unchanged - newer pictures are published elsewhere -
+        // until pictureShown(index), which gives the picture back once its upload has returned.
         virtual bool latestPicture(const uint8_t *&pixels, uint32_t &rowPitch, int &index, uint64_t &serial, d3d::SharedPicture &meta) = 0;
         virtual void pictureShown(int index) = 0;
         virtual void setSharedPictures(bool on) = 0;
@@ -135,6 +138,11 @@ namespace nr
         virtual double pacerDelayMs() = 0;
     };
 
-    // The backend in use (Direct3D 12 today: nr_d3d.cpp).
+    // The backend in use (nr_backend.cpp: Direct3D 12; Vulkan with TF_VULKAN and TF_GFX_API=vulkan).
     Backend &backend();
+    // True when the backend this build would use is one of its native ones (Direct3D 12 where it is built, or Vulkan
+    // when TF_VULKAN is on and TF_GFX_API=vulkan). It says the chosen backend is built in, not that its device is ready:
+    // prepare() may still fail, and the emulated GS then draws. Read it after settings.ini is loaded (the first answer
+    // is kept).
+    bool nativeBackendChosen();
 }

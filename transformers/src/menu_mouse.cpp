@@ -40,6 +40,7 @@
 #include "port_ext.h"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -50,6 +51,7 @@
 
 #include "raylib.h"
 #include "runtime/ps2_sony_pad.h"
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 // profiler.cpp (Windows): the window's own clicks and wheel since the last call, and the cursor hidden for a controller
 // (TODO 175).
@@ -106,12 +108,12 @@ namespace menu_mouse
         constexpr uint32_t kBaseUpdate = 0x001A0C20u; // (the ring's own slot 16; the others call it)
         OwnScreen g_own[] = {
             {kBaseUpdate, 0x006BD8F0u, "taScreenPrGRing", Kind::Ring, nullptr},
-            {0x003F6E90u, 0x006BD880u, "taScreenPrGRingCharacterSelect", Kind::Ring, nullptr},
-            {0x004F1720u, 0x006C4410u, "taScreenPrGRingLevelSelect", Kind::Ring, nullptr},
-            {0x004EEA00u, 0x006C4360u, "taScreenPrGWarpGate", Kind::Ring, nullptr},
-            {0x004E3C70u, 0x006C3E40u, "taScreenPrGRingMiniconSelect", Kind::Ring, nullptr},
-            {0x004E5D10u, 0x006C3ED0u, "taScreenPrGRingMiniconButtonSelect", Kind::Grid, nullptr},
-            {0x003F4A50u, 0x006BD810u, "taScreenPrGHQComm", Kind::Confirm, nullptr},
+            {TF_GA(0x003F6E90u), 0x006BD880u, "taScreenPrGRingCharacterSelect", Kind::Ring, nullptr},
+            {TF_GA(0x004F1720u), 0x006C4410u, "taScreenPrGRingLevelSelect", Kind::Ring, nullptr},
+            {TF_GA(0x004EEA00u), 0x006C4360u, "taScreenPrGWarpGate", Kind::Ring, nullptr},
+            {TF_GA(0x004E3C70u), 0x006C3E40u, "taScreenPrGRingMiniconSelect", Kind::Ring, nullptr},
+            {TF_GA(0x004E5D10u), 0x006C3ED0u, "taScreenPrGRingMiniconButtonSelect", Kind::Grid, nullptr},
+            {TF_GA(0x003F4A50u), 0x006BD810u, "taScreenPrGHQComm", Kind::Confirm, nullptr},
             {0x0033B690u, 0x006B77C0u, "taScreenPrGTitle", Kind::Title, nullptr},
         };
         constexpr uint64_t kOwnStale = 6u; // game frames an update may be missed (it can yield inside 0x1A0C20)
@@ -321,7 +323,7 @@ namespace menu_mouse
         return started;
     }
 
-    void windowFrame(int windowWidth, int windowHeight)
+    void windowFrame(int windowWidth, int windowHeight, bool overlayOpen)
     {
         if (windowWidth <= 0 || windowHeight <= 0)
             return;
@@ -329,6 +331,27 @@ namespace menu_mouse
         // comes back when the mouse moves (profiler.cpp's window procedure).
         if (padUsedNow())
             tfHideCursorForPad();
+        // (TODO 286 a) The F1 overlay (or the debugger) up: the window's clicks and wheel are the overlay's, never the game
+        // menu's under it - they were also handed to the pause menu, the HQ's screens and the front end, which pressed their
+        // buttons through the overlay. Taken and dropped while it is up, and for a quarter of a second after it closes: the
+        // click on an overlay button that closes it arrives in the frame it closed.
+        static auto overlaySeen = std::chrono::steady_clock::time_point{};
+        const auto nowOverlay = std::chrono::steady_clock::now();
+        if (overlayOpen)
+            overlaySeen = nowOverlay;
+        if (overlayOpen || nowOverlay - overlaySeen < std::chrono::milliseconds(250))
+        {
+            int dropLeft = 0, dropRight = 0;
+            float dropWheel = 0.0f;
+            tfTakeMenuMouse(dropLeft, dropRight, dropWheel);
+            g_u.store(-1.0f, std::memory_order_relaxed);
+            g_v.store(-1.0f, std::memory_order_relaxed);
+            static const bool log = std::getenv("TF_OVERLAY_INPUT_LOG") && *std::getenv("TF_OVERLAY_INPUT_LOG") == '1';
+            if (log && (dropLeft > 0 || dropRight > 0 || dropWheel != 0.0f))
+                std::fprintf(stderr, "[menu mouse] the overlay %s: %d left / %d right clicks, wheel %.2f kept from the game\n",
+                             overlayOpen ? "is up" : "just closed", dropLeft, dropRight, dropWheel);
+            return;
+        }
         // (TODO 175) The clicks and wheel of the window's messages: raylib's pressed / wheel are its last poll's only, and
         // the runtime polls several times a picture - a click between them was lost.
         int clicksLeft = 0, clicksRight = 0;

@@ -15,8 +15,10 @@ namespace menu_mouse
     void addSettings();
     // Wraps the HQ screens' updates (overrides.cpp, after decomp::install).
     void install(PS2Runtime &runtime);
-    // The window thread, once a window frame (main.cpp): the cursor and the buttons as they are.
-    void windowFrame(int windowWidth, int windowHeight);
+    // The window thread, once a window frame (main.cpp): the cursor and the buttons as they are. `overlayOpen`: the F1
+    // overlay or the debugger is up (TODO 286 a): the game's menus get no click, wheel or pointing then, nor for a moment
+    // after it closes (the click that closed it).
+    void windowFrame(int windowWidth, int windowHeight, bool overlayOpen = false);
     // While true the window keeps the cursor (main.cpp: the mouse is not captured).
     bool wantsCursor();
     // Once a game frame (mod_menu::frame): `paused` - the level is paused.

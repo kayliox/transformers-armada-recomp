@@ -4,8 +4,8 @@
 
 ### The setup says my disc is not supported
 
-Only **Transformers (USA)**, `SLUS-20668`, works. The European release (`SLES`) and the Japanese release do not
-work yet. Make sure the file is a full `.iso` image of the disc, not a compressed or partial copy.
+**Transformers (USA)**, `SLUS-20668`, works, and the European release, `SLES-52388`, experimentally. The Japanese
+release does not work yet. Make sure the file is a full `.iso` image of the disc, not a compressed or partial copy.
 
 ### "cmake not found" or "python not found" right after the setup installed it
 
@@ -45,6 +45,8 @@ Click into the game window first. **Esc** gives the mouse back to Windows.
 - DualSense, DualShock 4 and Xbox controllers should work right away. Others work through Steam Input.
 - If Steam Input shows your PlayStation controller as an Xbox controller, set **F1 > Display > Button prompts**
   to **PlayStation**.
+- If your robot walks, your car steers or the view turns on its own (stick drift), set **F1 > Controls > Left / Right
+  stick dead zone** to a larger size. Auto already covers how far your sticks rest from the centre when you let go.
 - If Steam and the game both read a Sony controller, set **F1 > Controls > Controller support** (under Advanced)
   so only one of them does.
 

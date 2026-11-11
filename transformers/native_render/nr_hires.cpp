@@ -12,6 +12,7 @@
 // ../converted/textures beside it. TF_HIRES=0 turns replacement off.
 #include "dev_tree.h"
 #include "nr_types.h"
+#include "nr_backend.h"
 #include "nr_prompt_style.h"
 
 #include "raylib.h"
@@ -776,7 +777,7 @@ namespace nr
                 return false;
             }
             const uint64_t srcTime = static_cast<uint64_t>(fs::last_write_time(png, ec).time_since_epoch().count());
-            const uint32_t cap = d3d::largeImageCap();
+            const uint32_t cap = backend().largeImageCap();
             const fs::path root = bcOn() ? cacheRoot() : fs::path();
             const fs::path cached = root.empty() ? fs::path() : crisp.empty() ? root / (*chosen + ".bc7") : root / ("crisp_" + set) / (*chosen + ".bc7");
             if (!crisp.empty())

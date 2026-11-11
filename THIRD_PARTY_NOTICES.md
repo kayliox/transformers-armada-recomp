@@ -21,6 +21,19 @@ It uses the components below. Each keeps its own licence.
 | [SMAA](https://github.com/iryoku/smaa) | Jorge Jimenez and others | MIT-style (see its `LICENSE.txt`) | Anti-aliasing (`transformers/native_render/ext/smaa`) |
 | [FFmpeg](https://ffmpeg.org/) | The FFmpeg developers | LGPL-2.1 or later | Movie playback. Shared libraries (DLLs) downloaded during the build and placed beside the game. Source: <https://ffmpeg.org/download.html> |
 
+## Built into the game with the Vulkan backend
+
+Only in a build made with `build.ps1 -Vulkan` (`-DTF_VULKAN=ON`); the Vulkan backend is off by default while it is in
+development.
+
+| Component | Author | Licence | How it is used |
+|---|---|---|---|
+| [SDL3](https://github.com/libsdl-org/SDL) | Sam Lantinga and the SDL contributors | zlib | The Vulkan backend's window (`release-3.4.18`, fetched, built static) |
+| [volk](https://github.com/zeux/volk) | Arseny Kapoulkine | MIT | Loads the system's Vulkan at run time (`vulkan-sdk-1.4.363.0`, fetched) |
+| [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) | The Khronos Group | Apache-2.0 or MIT | The Vulkan API's headers (`vulkan-sdk-1.4.363.0`, fetched) |
+| [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) | Advanced Micro Devices | MIT | Video memory sub-allocation (`v3.4.0`, header only, fetched) |
+| [DirectX Shader Compiler](https://github.com/microsoft/DirectXShaderCompiler) | Microsoft and the LLVM contributors | University of Illinois/NCSA and MIT (the release's `LICENSE-LLVM.txt`, `LICENCE-MIT.txt`) | `dxcompiler.dll` from the v1.9.2609 release (downloaded during the build with its SHA-256, placed beside the game): compiles the shaders to SPIR-V at start |
+
 ## Build tools
 
 | Component | Author | Licence | How it is used |

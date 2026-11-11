@@ -12,6 +12,8 @@
   pixels apart at blade edges).
 - Linux: OpenGL goes through Mesa's Zink driver when the usual driver lacks a feature the GPU renderer needs (AMD,
   the Steam Deck). `TF_ZINK=0` turns this off.
+- Native renderer: the optional Vulkan backend (in development, off by default) compiles with the current backend
+  interface, and the CPU picture hand-over keeps each picture as the window reads it until the window has uploaded it.
 - Linux: the mouse in the menus, the F1 menu's typing and scrolling, Xbox-controller vibration and the HD movies work
   as on Windows.
 - Linux: the game finds its files and memory card saves whatever the case of their names, as on Windows, and the
@@ -44,21 +46,68 @@
 - The game window no longer uploads an unused placeholder picture on every frame while the native renderer is on.
   On Linux and Steam Deck it did this 60–90 times a second, so this saves a little CPU work.
 - Linux and Steam Deck: the native renderer uses less CPU and battery. Its Direct3D 12 layer (vkd3d) no longer wakes
-  a helper thread at every draw (on a Steam Deck at 60 frames a second: 12% less CPU, about 1.2 W less), and the
+  a helper thread at every draw (on a Steam Deck at 60 frames a second: about 11% less CPU, about 1.2 W less), and the
   finished picture is copied to the window in one piece instead of row by row (half the time).
 - The native sound mixer does the same work with fewer steps (the sound is bit for bit the same): a little less CPU,
   most on handhelds such as the Steam Deck.
 - F1 > Display > Frame rate limit now includes 45: on a 90 Hz screen such as the Steam Deck OLED's each picture is
   then shown for two refreshes. A 45 limit is also no longer turned into 60 at the start of a session.
 - Linux and Steam Deck: the native renderer shows each picture as it is handed over, as on Windows, instead of
-  waiting for a VBlank: a 45 limit now gives 45 frames a second (it read 38-39), nothing skipped, and the picture is
-  uploaded straight from the renderer's read-back - the render thread's setup halves (1.15 ms -> 0.57 ms) and the
-  power at 45 drops a little (8.98 W -> 8.13 W).
+  waiting for a VBlank: a 45 limit now gives 45 frames a second in steady play (it read 38-39); a loading window may
+  still repeat or drop a picture, and the picture is uploaded straight from the renderer's read-back - the render
+  thread's setup halves (1.15 ms -> 0.57 ms) and the power at 45 drops a little (8.98 W -> 8.13 W).
 - F1: the Windows-worded "Quit game" page is no longer in the menu on Linux and the Steam Deck (the game's own main
   menu has QUIT GAME).
 - Linux and Steam Deck: "Finishing HD textures" no longer stays on screen after the HD set is finished, including
   sets made before this fix, and "HD textures ready" no longer comes back at every start once the set is finished.
   `make_hd_textures.sh` checks the set's images once, as the Windows maker does (0.4.7's checks too).
+
+## 0.5.1
+
+**New**
+- The European disc (SLES-52388) is supported, as an experimental option: the setup accepts it and marks it as
+  experimental. It plays in all five of its languages (F1 > Gameplay > Language, text and voices), and its 50 Hz
+  mode now runs at the right speed. Thanks to TheBrousse, who maintains it.
+
+## 0.5.0
+
+**New**
+- F1 > Graphics > Advanced has Smooth textures (on by default): characters and water no longer look blocky when
+  the game's own textures are drawn at high resolutions. Thanks to galaxyawesome.
+- F1 > Controls has "Invert mouse up / down". The game's own Invert Y option now only turns the controller stick
+  around, so a save that had it on no longer turns the mouse upside down.
+
+**Changed**
+- Quit game is now a button at the bottom right of F1, and the top right shows the game's own frame rate.
+
+**Fixed**
+- When the frame rate stepped down because the PC could not keep up, the game froze for a moment at each step,
+  which could look like the jet bike or the camera jumping. The steps no longer freeze the game.
+- With F1 open, mouse clicks no longer reach the game's menus behind it.
+
+## 0.4.9
+
+**New**
+- "Match screen" now also fills screens narrower than 16:9, such as 16:10 (1920x1200), 3:2 and 4:3, instead of
+  showing bars above and below.
+- The stick dead zones in F1 > Controls have an Auto choice, now the default: it measures where each stick rests
+  when you do not touch it, so a worn stick no longer moves you on its own. Thanks to TheBrousse.
+- F1 > About has "Make a report", which puts your logs, your settings and a short summary of your PC into one
+  zip file to send with a bug report (no saves and no game files), and "Open logs folder". F1 > Saves has
+  "Open saves folder".
+
+**Changed**
+- VSync is now off by default, so the frame rate is no longer held at your screen's refresh rate. The picture may
+  tear; turn VSync on in F1 > Graphics if you prefer. If you turned VSync on before, it stays on. On FreeSync and
+  G-Sync screens the game still stays just under the screen's top rate.
+
+**Fixed**
+- On some Intel integrated graphics the game window stayed black from start to end. It now notices this and
+  shows the game another way. Thanks to TheBrousse.
+- Changing VSync or the frame rate limit while in the HQ now takes effect at once. Before, the HQ kept its old
+  frame rate until you left it.
+- Exclusive full screen now fills the whole screen. On some screens it was a few lines short.
+- A level loaded from a state that was saved at 30 frames a second now runs at your frame rate.
 
 ## 0.4.8
 

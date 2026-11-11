@@ -11,7 +11,9 @@
 // same ticks, the GS picture beside it). TF_NATIVE_TRACE=<n>: the layout of the first n geometry sets.
 // TF_NATIVE_DUMP=1: each saved frame's draws, as text beside the picture (runs\native_<tick>.txt).
 #include "nr_types.h"
+#include "nr_backend.h"
 #include "nr_install.h"
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 #include "hd_progress.h"
 #include "nr_frame_texture_policy.h"
 #include "view_turn.h"
@@ -994,7 +996,7 @@ namespace nr
             static uint64_t lastScan = 0;
             if (tick < lastScan + 30u)
                 return;
-            const uint64_t budget = d3d::largeImageBudget(), used = d3d::largeImageBytes();
+            const uint64_t budget = backend().largeImageBudget(), used = backend().largeImageBytes();
             if (budget == UINT64_MAX || used <= budget)
                 return;
             lastScan = tick;
@@ -4779,7 +4781,7 @@ namespace nr
         // stretches long after, saw every pass with the last pass's block (its 4 patches drawn 80 times, the others not
         // at all). The block copied while it still stands - before the next allocation, the next flush or the frame's end -
         // into the frame (Frame::rainBlocks), and nr_rain.cpp draws each pass's batches from its copy. TF_NATIVE_RAIN=0: not.
-        constexpr uint32_t kListAlloc = 0x00221CC0u, kListAllocFromRain = 0x005656F4u; // (the call in LoadContext + 8)
+        constexpr uint32_t kListAlloc = 0x00221CC0u, kListAllocFromRain = TF_GA(0x005656F4u); // (the call in LoadContext + 8)
         constexpr uint32_t kListFlush = 0x0023AB70u, kListFlush2 = 0x0023AA90u;
         PS2Runtime::RecompiledFunction g_listAlloc = nullptr, g_listFlush = nullptr, g_listFlush2 = nullptr;
         uint32_t g_rainPending = 0u; // (the block of the pass not yet copied: its data's guest address)
@@ -5122,7 +5124,7 @@ namespace nr
                                      static_cast<unsigned long long>(tick), flatDrawsMin, flatDrawsMax, flatMovie ? ", a movie played" : "");
                     flatBefore = flat;
                 }
-                const bool emulate = (emu2D && !g_frame.has3D) || !d3d::drawsPictures(); // (the device lost: the GS draws again)
+                const bool emulate = (emu2D && !g_frame.has3D) || !backend().drawsPictures(); // (the device lost: the GS draws again)
                 if (emulate != ps2_host_display::emulatedDrawing())
                 {
                     ps2_host_display::setEmulatedDrawing(emulate);
@@ -6267,17 +6269,20 @@ namespace nr
             s.help = "Native (DX12, preview): the game drawn by the PC renderer (Direct3D 12) - more frames, sharper "
                      "pictures; menus and movies too, the PS2 graphics chip left with nothing to draw. Emulated: the PS2's "
                      "graphics chip emulated, as before. Takes a restart.";
-#if defined(_WIN32) || defined(TF_NATIVE_RENDERER)
-            s.choices = {{"emulated", "Emulated (PS2)"}, {"native", "Native (DX12, preview)"}};
-            s.defaultValue = "native"; // (TODO 163: the port's renderer; main.cpp sets TF_RENDERER=native when nothing chose)
-#else
-            s.choices = {{"emulated", "Emulated (PS2)"}}; // (no native renderer in this Linux build: nr_none.cpp, main.cpp)
-            s.defaultValue = "emulated";
-#endif
+            if (nr::nativeBackendChosen())
+            {
+                s.choices = {{"emulated", "Emulated (PS2)"}, {"native", "Native (DX12, preview)"}};
+                s.defaultValue = "native"; // (TODO 163: the port's renderer; main.cpp sets TF_RENDERER=native when nothing chose)
+            }
+            else
+            {
+                s.choices = {{"emulated", "Emulated (PS2)"}}; // (no native backend built, or TF_GFX_API names none here: nr_none.cpp)
+                s.defaultValue = "emulated";
+            }
             s.apply = [](const std::string &) { return false; }; // (takes a restart)
             ps2_settings::add(s);
-            const char *chosen = std::getenv("TF_RENDERER");
-            if (chosen && std::string(chosen) == "native" && !std::getenv("TF_NATIVE_RENDER"))
+            const std::string chosen = ps2_settings::choice("TF_RENDERER");
+            if (chosen == "native" && !std::getenv("TF_NATIVE_RENDER"))
             {
                 const char *vars[][2] = {{"TF_NATIVE_RENDER", "1"}, {"TF_NATIVE_LIVE", "1"}, {"TF_NATIVE_ONLY", "1"}};
                 for (const auto &v : vars)
@@ -6305,7 +6310,7 @@ namespace nr
             s.choices = {{"0", "Off"}, {"1", "FXAA"}, {"2", "SMAA 1x"}};
             s.defaultValue = "1";
             s.apply = [](const std::string &value) {
-                d3d::setAntiAliasing(value == "0" ? 0 : value == "2" ? 2 : 1);
+                backend().setAntiAliasing(value == "0" ? 0 : value == "2" ? 2 : 1);
                 return true;
             };
             s.available = []() {
@@ -6452,7 +6457,7 @@ namespace nr
             s.choices = {{"0", "Off"}, {"1", "On (1.5x)"}};
             s.defaultValue = "0";
             s.apply = [](const std::string &value) {
-                d3d::setSupersampling(value == "1");
+                backend().setSupersampling(value == "1");
                 return true;
             };
             s.available = []() {
@@ -6638,7 +6643,7 @@ namespace nr
         // pairs of the same frames, the GS's shot and the native one)
         if (std::getenv("TF_NATIVE_LOOSE_COMPARE") && *std::getenv("TF_NATIVE_LOOSE_COMPARE") == '1')
             ps2_host_display::setGifObserverAlways(true);
-        d3d::prepare();
+        backend().prepare();
         startLivePicture();
     }
 

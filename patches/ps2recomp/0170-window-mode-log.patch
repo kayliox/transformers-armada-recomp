@@ -1,0 +1,64 @@
+Subject: [PATCH] Runtime: every display mode change in the log (TODO 282 follow-up)
+
+A line when the mode changes (from -> to), one when exclusive full screen gives the window its own size and
+place back, and the window as it settled ten frames later (size, place, the screen, exclusive / borderless /
+no frame / on top). A player's switch out of exclusive full screen left nothing in the log before.
+
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -95,9 +95,35 @@ static int g_lastFullMode = 1;
+ static bool g_exclusiveFrameOff = false;
+ static int g_beforeExclusive[4] = {0, 0, 0, 0}; // x, y, width, height
+ 
++// (TODO 282 follow-up) Every display mode change in the log: the mode asked for and where it comes from, then what
++// the window became once it settled (a few frames later: the window's size reaches raylib through its events). The
++// log of a player's switch out of exclusive full screen said nothing before.
++static int g_modeLogFrames = 0;
++static const char *displayModeName(int mode)
++{
++    return mode == 2 ? "exclusive full screen" : (mode == 1 ? "borderless full screen" : "a window");
++}
++static void logWindowNow(const char *what)
++{
++    const Vector2 at = GetWindowPosition();
++    const int monitor = GetCurrentMonitor();
++    std::cerr << "[window] " << what << ": " << GetScreenWidth() << "x" << GetScreenHeight() << " at " << static_cast<int>(at.x) << ","
++              << static_cast<int>(at.y) << " on a screen of " << GetMonitorWidth(monitor) << "x" << GetMonitorHeight(monitor)
++              << (IsWindowFullscreen() ? ", exclusive" : "") << (IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE) ? ", borderless" : "")
++              << (IsWindowState(FLAG_WINDOW_UNDECORATED) ? ", no frame" : "") << (IsWindowState(FLAG_WINDOW_TOPMOST) ? ", on top" : "")
++              << std::endl;
++}
++
+ static void setDisplayMode(int mode)
+ {
+     mode = std::clamp(mode, 0, 2);
++    static bool firstCall = true;
++    if (mode != g_displayMode || firstCall)
++    {
++        firstCall = false;
++        std::cerr << "[window] display mode: " << displayModeName(g_displayMode) << " -> " << displayModeName(mode) << std::endl;
++        g_modeLogFrames = 10;
++    }
+     if (IsWindowFullscreen() && mode != 2)
+     {
+         ToggleFullscreen();
+@@ -109,6 +135,9 @@ static void setDisplayMode(int mode)
+             {
+                 SetWindowSize(g_beforeExclusive[2], g_beforeExclusive[3]);
+                 SetWindowPosition(g_beforeExclusive[0], g_beforeExclusive[1]);
++                std::cerr << "[window] left exclusive full screen: the frame back, the window's own " << g_beforeExclusive[2] << "x"
++                          << g_beforeExclusive[3] << " at " << g_beforeExclusive[0] << "," << g_beforeExclusive[1] << " given back"
++                          << std::endl;
+             }
+         }
+     }
+@@ -3790,6 +3819,8 @@ void PS2Runtime::run()
+         }
+         if (fpsCounter.shown != g_fpsShown.load())
+             fpsCounter = FpsCounter{g_fpsShown.load()};
++        if (g_modeLogFrames > 0 && --g_modeLogFrames == 0)
++            logWindowNow(("now " + std::string(displayModeName(g_displayMode))).c_str());
+         if (IsKeyPressed(KEY_F7))
+             ps2_gpu::toggleView();
+         if (IsKeyPressed(KEY_F11))

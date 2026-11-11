@@ -24,6 +24,9 @@ namespace nr
     // N8 item 5: the distance-based mip levels shifted toward the finer ones, in levels (-1: matched to the picture's
     // height, 0: the PS2's; nr_d3d.cpp). From any thread.
     void setTextureSharpness(float shift);
+    // Issue #17: a texture magnified on screen filtered by the draw's MMAG even where the GS's distance rule picks MMIN
+    // (true, the default), or the PS2's choice (false; nr_d3d.cpp). From any thread.
+    void setTextureSmoothing(bool on);
     // (TODO 165 / 161) The frames the drawing left out because it was behind, since the start (nr_thread.cpp): the rate
     // governor (overrides.cpp) takes a lasting share of them as the PC unable to hold the rate.
     unsigned long long framesLeftOutBehind();

@@ -41,6 +41,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 namespace revisit_music
 {
@@ -63,16 +64,16 @@ namespace revisit_music
         constexpr uint32_t kFire = 0x002B5C50u;
         PS2Runtime::RecompiledFunction g_fire = nullptr;
         // (with it, TODO 199: Starscream's hits and his slot 20, which marks him dead and fires CS_DefeatedStarscream)
-        constexpr uint32_t kTakeDamage = 0x00297C70u, kStarscreamDead = 0x0048A1A0u, kStarscreamVtable = 0x006C07F0u;
+        constexpr uint32_t kTakeDamage = 0x00297C70u, kStarscreamDead = TF_GA(0x0048A1A0u), kStarscreamVtable = 0x006C07F0u;
         PS2Runtime::RecompiledFunction g_takeDamage = nullptr, g_starscreamDead = nullptr;
         // (TF_HIT_STARSCREAM=<damage>, with TF_EVENT_TRACE: when his intro ends (TA_AUTOSAVE) Starscream takes one hit of
         // that much through his own hit slot 7 (0x48A880), as a player's shot lands - the one-hit-kills test without aiming)
-        constexpr uint32_t kStarscreamHit = 0x0048A880u;
+        constexpr uint32_t kStarscreamHit = TF_GA(0x0048A880u);
         PS2Runtime::RecompiledFunction g_starscreamHit = nullptr;
         uint32_t g_starscream = 0u;
         float g_hitAmount = 0.0f;
         uint64_t g_hitDelay = 0u, g_autosaveTick = 0u; // (amount@ticks: the hit that many VBlanks after the intro's end)
-        constexpr uint32_t kStarscreamUpdate = 0x0048D7D0u;
+        constexpr uint32_t kStarscreamUpdate = TF_GA(0x0048D7D0u);
         PS2Runtime::RecompiledFunction g_starscreamUpdate = nullptr;
         uint32_t g_lastFlags = 0u; float g_lastHealth = -2.0f; int g_flagLines = 0;
         bool g_on = true;

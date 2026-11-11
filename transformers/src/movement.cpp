@@ -31,12 +31,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 namespace movement
 {
     namespace
     {
-        constexpr uint32_t kPickDesiredSpeed = 0x00476700u;
+        constexpr uint32_t kPickDesiredSpeed = TF_GA(0x00476700u);
         constexpr uint32_t kRecords = 0x00717430u + 0x60u; // func_0034F2B0's database, func_004A57D0's records
         constexpr uint32_t kRecordSize = 0x240u;            // (record = kRecords + id * 0x240, id = context +0x18)
         float g_runThreshold = 0.85f;
@@ -189,7 +190,7 @@ namespace movement
         // depleted", vblank 10457, with god mode on). On Cybertron the level has it anyway. So the cheat
         // cannot work anywhere it would change something: the test here answers the level's own value only.
         // TF_PLANET_GRAVITY_ANYWHERE=1: the cheat as the game has it (to see the breakage).
-        constexpr uint32_t kPlanetGravity = 0x004C7EF0u;
+        constexpr uint32_t kPlanetGravity = TF_GA(0x004C7EF0u);
         void planetGravity(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
         {
             const uint32_t environment = getRegU32(ctx, 4);
@@ -207,7 +208,7 @@ namespace movement
         // The controller getter identifies the human player without scanning memory. The camera's
         // script changes later, and also calls a mounted jet bike a vehicle. Only the transformer's
         // car/transform states select this curve; the bike keeps robot response (as in carstick2).
-        constexpr uint32_t kControllerGetter = 0x0034B040u, kAxisGetter = 0x00197DC0u, kReadPad = 0x0013A898u;
+        constexpr uint32_t kControllerGetter = TF_GA(0x0034B040u), kAxisGetter = 0x00197DC0u, kReadPad = 0x0013A898u;
         PS2Runtime::RecompiledFunction g_controllerGetter = nullptr, g_axisGetter = nullptr, g_readPad = nullptr;
         uint32_t g_controller = 0u, g_axisX = 0u, g_axisY = 0u;
         std::chrono::steady_clock::time_point g_controllerSeen{};

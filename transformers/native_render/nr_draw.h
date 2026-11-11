@@ -25,9 +25,11 @@ namespace nr::draw
     gfx::Compare compareOfZtst(uint32_t ztst);
 
     // TEX1 (LCM bit 0, MXL 2-4, MMAG 5, MMIN 6-8, L 19-20, K 32-43: signed, 7.4 fixed point) as the pixel shader's sampleGs
-    // takes it; `sharpShift` moves the distance-based levels (LCM 0) toward the finer ones (the sharp-textures setting).
+    // takes it; `sharpShift` moves the distance-based levels (LCM 0) toward the finer ones (the sharp-textures setting);
+    // `smoothMagnified` (lod.x 2, the smooth-textures setting) has a texture magnified on screen take MMAG's filter even
+    // where the GS's distance rule picks MMIN (issue #17).
     // TF_NATIVE_TEX1=0: left as they are (the anisotropic filter over the whole mip chain, as before).
-    void tex1Constants(uint64_t tex1, float sharpShift, float *lod, float *lodf);
+    void tex1Constants(uint64_t tex1, float sharpShift, bool smoothMagnified, float *lod, float *lodf);
 
     // The box of a mesh's vertices (the core's clipping: a mesh wholly inside needs none).
     void boundsOf(const Mesh &mesh, float lo[3], float hi[3]);

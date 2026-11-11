@@ -8,6 +8,7 @@
 // draws on the game's thread as before.
 #include "nr_types.h"
 #include "nr_frame.h" // (frame::g_bloom: TF_NATIVE_SHOTGLOW, TODO 108)
+#include "nr_backend.h"
 #include "nr_shader.h"
 #include "nr_n5.h"
 #include "view_turn.h"
@@ -201,7 +202,7 @@ namespace nr
             static const bool gpuOn = !(std::getenv("TF_GRASS_GPU") && *std::getenv("TF_GRASS_GPU") == '0');
             static int gpuCheck = std::getenv("TF_GRASS_GPU_CHECK") ? std::atoi(std::getenv("TF_GRASS_GPU_CHECK")) : 0;
             static const bool posesVertices = !(std::getenv("TF_POSES_VERTICES") && *std::getenv("TF_POSES_VERTICES") == '0');
-            const bool gpu = gpuOn && d3d::grassGpuReady() && !(tf::port::posePictures() && posesVertices);
+            const bool gpu = gpuOn && backend().grassGpuReady() && !(tf::port::posePictures() && posesVertices);
             bool checkThis = false;
             for (Draw &d : frame.draws)
             {
@@ -1230,8 +1231,8 @@ namespace nr
                              static_cast<unsigned long long>(f.tick), static_cast<unsigned long long>(st.withB), static_cast<unsigned long long>(st.without),
                              static_cast<unsigned long long>(st.checked), 100.0 * st.near[0] / n, 100.0 * st.near[1] / n, 100.0 * st.near[2] / n,
                              100.0 * st.moved / n, static_cast<unsigned long long>(st.bIsA), static_cast<unsigned long long>(st.bOther), static_cast<unsigned long long>(st.carried), static_cast<unsigned long long>(st.notPose), static_cast<unsigned long long>(st.shared), static_cast<unsigned long long>(st.frames), static_cast<unsigned long long>(st.pictures),
-                             st.cameraDelta.size(), static_cast<double>(f.fieldBMoment), st.perPictureMs, d3d::gpuPictureMs(), d3d::gpuExtraMs(),
-                             d3d::cpuPictureMs(), st.frameBaseMs, static_cast<unsigned long long>(st.probesKept), static_cast<unsigned long long>(st.probesFailed));
+                             st.cameraDelta.size(), static_cast<double>(f.fieldBMoment), st.perPictureMs, backend().gpuPictureMs(), backend().gpuExtraMs(),
+                             backend().cpuPictureMs(), st.frameBaseMs, static_cast<unsigned long long>(st.probesKept), static_cast<unsigned long long>(st.probesFailed));
                 std::fprintf(stderr, "[n9] camera cuts (frames shown as they are): %llu, %llu of them the camera's jump; blends: %llu draws, a part shorter by over 0.01/0.1/1%%: %llu/%llu/%llu, at most %.3f%% (along the turn; %llu turns over 60 degrees not blended; a straight blend: %llu over 1%%, at most %.3f%%)\n",
                              static_cast<unsigned long long>(st.cuts), static_cast<unsigned long long>(st.cutsByTurn),
                              static_cast<unsigned long long>(st.shrinkDraws), static_cast<unsigned long long>(st.shrinkOver[0]),
@@ -1387,8 +1388,8 @@ namespace nr
                 if (!f.variableRefresh && std::fabs(ratio - std::round(ratio)) > 0.05)
                     return false;
                 const double spanMs = static_cast<double>(span) / 1.0e6;
-                const double gpuFirst = d3d::gpuPictureMs(), gpuExtra = d3d::gpuExtraMs() > 0.0 ? d3d::gpuExtraMs() : gpuFirst;
-                const double cpuExtra = d3d::cpuPictureMs() > 0.0 ? d3d::cpuPictureMs() : 0.3;
+                const double gpuFirst = backend().gpuPictureMs(), gpuExtra = backend().gpuExtraMs() > 0.0 ? backend().gpuExtraMs() : gpuFirst;
+                const double cpuExtra = backend().cpuPictureMs() > 0.0 ? backend().cpuPictureMs() : 0.3;
                 const double nGpu = gpuExtra > 0.0 ? 1.0 + (0.8 * spanMs - gpuFirst) / gpuExtra : 16.0;
                 // (the render thread: an extra picture here is the frame's recording run again - next to nothing on the
                 // processor - so up to 90% of the frame's time, as the menus' pictures: the frame's own work already within it)
@@ -1426,18 +1427,18 @@ namespace nr
                     static const bool probeOff = std::getenv("TF_POSES_PROBE") && *std::getenv("TF_POSES_PROBE") == '0';
                     const auto now = std::chrono::steady_clock::now();
                     if (next.time_since_epoch().count() == 0)
-                        next = now + std::chrono::seconds(4), waitSince = now, waitMark = d3d::slotWaitMs();
+                        next = now + std::chrono::seconds(4), waitSince = now, waitMark = backend().slotWaitMs();
                     if (now - waitSince > std::chrono::seconds(2))
                     {
-                        if (d3d::slotWaitMs() - waitMark > 30.0 && proven > 0 && !probing)
+                        if (backend().slotWaitMs() - waitMark > 30.0 && proven > 0 && !probing)
                             proven = 0, backoff = std::min(64.0, backoff * 2.0), next = now + std::chrono::milliseconds(static_cast<int64_t>(backoff * 1000.0));
-                        waitMark = d3d::slotWaitMs();
+                        waitMark = backend().slotWaitMs();
                         waitSince = now;
                     }
                     const int cpuCap = static_cast<int>(std::floor(nCpu));
                     if (probing)
                     {
-                        const double waited = d3d::slotWaitMs() - probeWait, later = d3d::pacerDelayMs() - probeDelay;
+                        const double waited = backend().slotWaitMs() - probeWait, later = backend().pacerDelayMs() - probeDelay;
                         const double allowed = spanMs / 2.0 + 2.0;
                         if (waited > 20.0 || later > allowed || now >= until)
                         {
@@ -1458,8 +1459,8 @@ namespace nr
                     else if (!probeOff && n < probeN && fit >= probeN && cpuCap >= probeN && proven < probeN && now >= next)
                     {
                         probing = true;
-                        probeWait = d3d::slotWaitMs();
-                        probeDelay = d3d::pacerDelayMs();
+                        probeWait = backend().slotWaitMs();
+                        probeDelay = backend().pacerDelayMs();
                         until = now + std::chrono::seconds(2);
                         n = probeN;
                     }
@@ -1498,14 +1499,14 @@ namespace nr
                 f.pictureNs = static_cast<int64_t>(pictureNs);
                 f.vblanksOnRefresh = !f.variableRefresh;
                 const auto start = std::chrono::steady_clock::now();
-                d3d::render(f, shot);
-                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() - d3d::replayWaitMs();
+                backend().render(f, shot);
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() - backend().replayWaitMs();
                 f.periodNs = keepPeriod;
                 f.vblanksOnRefresh = keepOnRefresh;
                 f.pictureNs = 0;
                 f.pictures.clear();
                 f.turnWaits = false;
-                const double base = st.preMs + ms - static_cast<double>(n - 1) * d3d::cpuPictureMs();
+                const double base = st.preMs + ms - static_cast<double>(n - 1) * backend().cpuPictureMs();
                 st.singleMs = st.singleMs <= 0.0 ? base : 0.95 * st.singleMs + 0.05 * base;
                 ++frames;
                 made += static_cast<uint64_t>(n);
@@ -1570,12 +1571,12 @@ namespace nr
                         }
                     }
                     const auto oneStart = std::chrono::steady_clock::now();
-                    d3d::render(f, shot);
+                    backend().render(f, shot);
                     if (!flatFrame)
                     {
                         // (the render thread's time for a frame of one picture, less its waits for the GPU)
                         const double ms = st.preMs + std::max(0.0, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - oneStart).count() -
-                                                                       d3d::replayWaitMs());
+                                                                       backend().replayWaitMs());
                         st.singleMs = st.singleMs <= 0.0 ? ms : 0.95 * st.singleMs + 0.05 * ms;
                     }
                     if (flatFrame)
@@ -1607,7 +1608,7 @@ namespace nr
                 static const double menuShare = std::getenv("TF_MENU_GPU_SHARE") ? std::clamp(std::atof(std::getenv("TF_MENU_GPU_SHARE")), 0.05, 1.0) : 0.95;
                 const double gpuShare = flatBlend ? menuShare : 0.8;
                 const double cpuNeeded = st.perPictureMs / cpuShare * 1.0e6;
-                double needed = std::max(st.perPictureMs / cpuShare, d3d::gpuPictureMs() / gpuShare) * 1.0e6;
+                double needed = std::max(st.perPictureMs / cpuShare, backend().gpuPictureMs() / gpuShare) * 1.0e6;
                 double capNs = 0.0; // (the caps' part of `needed`: no try goes under it)
                 // (TODO 161: the frame rate cap is the pictures' - with the fixed logic rate - so no closer than it)
                 if (const int cap = tf::port::pictureCap(); cap > 0)
@@ -1621,8 +1622,8 @@ namespace nr
                 if (replay)
                 {
                     const double spanMs = static_cast<double>(span) / 1.0e6;
-                    const double gpuFirst = d3d::gpuPictureMs(), gpuExtra = d3d::gpuExtraMs() > 0.0 ? d3d::gpuExtraMs() : gpuFirst;
-                    const double cpuExtra = d3d::cpuPictureMs() > 0.0 ? d3d::cpuPictureMs() : 0.3;
+                    const double gpuFirst = backend().gpuPictureMs(), gpuExtra = backend().gpuExtraMs() > 0.0 ? backend().gpuExtraMs() : gpuFirst;
+                    const double cpuExtra = backend().cpuPictureMs() > 0.0 ? backend().cpuPictureMs() : 0.3;
                     const double nGpu = gpuExtra > 0.0 ? 1.0 + (0.8 * spanMs - gpuFirst) / gpuExtra : 16.0;
                     const double nCpu = 1.0 + (0.6 * spanMs - st.frameBaseMs) / cpuExtra;
                     // A graphics card with little to do lowers its clock, and its time a picture grows with it (the other
@@ -1640,7 +1641,7 @@ namespace nr
                     const double fit = refresh > 0.0 ? static_cast<double>(span) / refresh : 16.0; // (pictures the refreshes allow)
                     if (now - st.waitSince > std::chrono::seconds(2))
                     {
-                        const double waited = d3d::slotWaitMs() - st.waitMark;
+                        const double waited = backend().slotWaitMs() - st.waitMark;
                         if (waited > 30.0 && st.proven > 0.0 && !st.probing)
                         {
                             st.proven = 0.0;
@@ -1648,7 +1649,7 @@ namespace nr
                             st.nextProbe = now + std::chrono::milliseconds(static_cast<int64_t>(st.probeBackoff * 1000.0));
                             std::fprintf(stderr, "[n9] pictures between frames: the GPU fell behind (waited %.0f ms in 2 s) - back to its timestamps' count\n", waited);
                         }
-                        st.waitMark = d3d::slotWaitMs();
+                        st.waitMark = backend().slotWaitMs();
                         st.waitSince = now;
                     }
                     const double nGpuNow = std::max(nGpu, st.proven);
@@ -1657,8 +1658,8 @@ namespace nr
                     st.probeForced = false;
                     if (st.probing)
                     {
-                        const double waited = d3d::slotWaitMs() - st.probeWait;
-                        const double later = d3d::pacerDelayMs() - st.probeDelay;
+                        const double waited = backend().slotWaitMs() - st.probeWait;
+                        const double later = backend().pacerDelayMs() - st.probeDelay;
                         // (the delay grows by up to a picture's spacing by itself: the frame's first picture is an earlier moment)
                         const double laterAllowed = static_cast<double>(span) / st.probeN / 1.0e6 + 2.0;
                         if (waited > 20.0 || later > laterAllowed || now >= st.probeUntil)
@@ -1693,8 +1694,8 @@ namespace nr
                         // (on a fixed refresh: the pictures a frame one refresh fewer between them takes)
                         st.probing = true;
                         st.probeN = target;
-                        st.probeWait = d3d::slotWaitMs();
-                        st.probeDelay = d3d::pacerDelayMs();
+                        st.probeWait = backend().slotWaitMs();
+                        st.probeDelay = backend().pacerDelayMs();
                         st.probeUntil = now + std::chrono::seconds(2);
                         n = st.probeN;
                         st.probeForced = true;
@@ -1731,7 +1732,7 @@ namespace nr
                         { return refreshes >= 1 && refresh * refreshes >= std::max(cpuNeeded, capNs) * 0.98; };
                         if (now - st.flatWaitSince > std::chrono::seconds(2))
                         {
-                            if (d3d::slotWaitMs() - st.flatWaitMark > kFlatBehindMs && st.flatProven > 0 && !st.flatProbing)
+                            if (backend().slotWaitMs() - st.flatWaitMark > kFlatBehindMs && st.flatProven > 0 && !st.flatProbing)
                             {
                                 std::fprintf(stderr, "[tf] menus: the graphics card fell behind at a picture every %d refresh(es) - back to its measured time\n",
                                              st.flatProven);
@@ -1739,12 +1740,12 @@ namespace nr
                                 st.flatBackoff = std::min(64.0, st.flatBackoff * 2.0);
                                 st.flatNextProbe = now + std::chrono::milliseconds(static_cast<int64_t>(st.flatBackoff * 1000.0));
                             }
-                            st.flatWaitMark = d3d::slotWaitMs();
+                            st.flatWaitMark = backend().slotWaitMs();
                             st.flatWaitSince = now;
                         }
                         if (st.flatProbing)
                         {
-                            const double waited = d3d::slotWaitMs() - st.flatProbeWait, later = d3d::pacerDelayMs() - st.flatProbeDelay;
+                            const double waited = backend().slotWaitMs() - st.flatProbeWait, later = backend().pacerDelayMs() - st.flatProbeDelay;
                             const double laterAllowed = refresh * st.flatProbeRefreshes / 1.0e6 + 2.0;
                             if (waited > kFlatWaitMs || later > laterAllowed || now >= st.flatProbeUntil)
                             {
@@ -1759,7 +1760,7 @@ namespace nr
                                 {
                                     ++told;
                                     std::fprintf(stderr, "[tf] menus: a picture every %d refresh(es) tried - %s (the graphics card %.2f ms a picture; waited %.0f ms, delay %+.1f ms)\n",
-                                                 st.flatProbeRefreshes, kept ? "kept" : "given up", d3d::gpuPictureMs(), waited, later);
+                                                 st.flatProbeRefreshes, kept ? "kept" : "given up", backend().gpuPictureMs(), waited, later);
                                 }
                             }
                         }
@@ -1769,8 +1770,8 @@ namespace nr
                         {
                             st.flatProbing = true;
                             st.flatProbeRefreshes = std::min(want, st.refreshes) - 1;
-                            st.flatProbeWait = d3d::slotWaitMs();
-                            st.flatProbeDelay = d3d::pacerDelayMs();
+                            st.flatProbeWait = backend().slotWaitMs();
+                            st.flatProbeDelay = backend().pacerDelayMs();
                             st.flatProbeUntil = now + std::chrono::seconds(2);
                         }
                         if (st.flatNextProbe.time_since_epoch().count() == 0)
@@ -1800,7 +1801,7 @@ namespace nr
                             toldRefreshes = st.refreshes;
                             std::fprintf(stderr, "[tf] menus: a picture every %d refresh(es) of %.2f ms (the render thread needs %.2f ms a picture, "
                                          "the graphics card %.2f; a picture may take 90%% of the thread's time and %.0f%% of the card's)\n",
-                                         st.refreshes, refresh / 1.0e6, st.perPictureMs, d3d::gpuPictureMs(), gpuShare * 100.0);
+                                         st.refreshes, refresh / 1.0e6, st.perPictureMs, backend().gpuPictureMs(), gpuShare * 100.0);
                         }
                     }
                 }
@@ -1920,14 +1921,14 @@ namespace nr
                     f.pictureNs = static_cast<int64_t>(pictureNs);
                     f.vblanksOnRefresh = !f.variableRefresh;
                     const auto start = std::chrono::steady_clock::now();
-                    d3d::render(f, shot);
+                    backend().render(f, shot);
                     // (less the waits for the extra pictures' turns - the GPU's time, counted by gpuExtraMs: d3d553)
-                    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() - d3d::replayWaitMs();
+                    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() - backend().replayWaitMs();
                     f.periodNs = keepPeriod;
                     f.vblanksOnRefresh = keepOnRefresh;
                     f.pictureNs = 0;
                     f.pictures.clear();
-                    const double base = st.preMs + ms - static_cast<double>(moments.size() - 1u) * d3d::cpuPictureMs();
+                    const double base = st.preMs + ms - static_cast<double>(moments.size() - 1u) * backend().cpuPictureMs();
                     st.frameBaseMs = st.frameBaseMs <= 0.0 ? base : (base > st.frameBaseMs ? 0.7 * st.frameBaseMs + 0.3 * base : 0.97 * st.frameBaseMs + 0.03 * base);
                     st.perPictureMs = ms / static_cast<double>(moments.size());
                     return;
@@ -1940,7 +1941,7 @@ namespace nr
                     f.turnWaits = false;
                 }
                 const auto start = std::chrono::steady_clock::now();
-                const double slotWaitBefore = d3d::slotWaitMs();
+                const double slotWaitBefore = backend().slotWaitMs();
                 const int64_t keepDue = f.dueNs, keepPeriod = f.periodNs;
                 const bool keepOnRefresh = f.vblanksOnRefresh;
                 const bool shotsEach = shotMoments > 0;
@@ -1971,7 +1972,7 @@ namespace nr
                             name = dot == std::string::npos ? name + suffix : name.substr(0, dot) + suffix + name.substr(dot);
                         }
                     }
-                    d3d::render(f, name);
+                    backend().render(f, name);
                     ++st.pictures;
                 }
                 if (flatBlend)
@@ -1989,7 +1990,7 @@ namespace nr
                                      "the render thread %.2f ms a picture, the GPU %.2f; %d refreshes a picture\n",
                                      static_cast<unsigned long long>(f.tick), static_cast<unsigned long long>(st.flatFrames),
                                      static_cast<unsigned long long>(st.flatPictures), static_cast<unsigned long long>(st.flatUnmatched),
-                                     st.perPictureMs, d3d::gpuPictureMs(), st.refreshes);
+                                     st.perPictureMs, backend().gpuPictureMs(), st.refreshes);
                         st.flatFrames = st.flatPictures = st.flatUnmatched = 0;
                     }
                 }
@@ -2003,7 +2004,7 @@ namespace nr
                 // is drawn right after the one before, so each waits for the GPU to free the slot two pictures back: counted
                 // here the menus' render thread measured 2-5 ms a picture on the RX 5700 XT, 1-3 without them.)
                 const double ms = std::max(0.0, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() -
-                                                    (d3d::slotWaitMs() - slotWaitBefore)) /
+                                                    (backend().slotWaitMs() - slotWaitBefore)) /
                                   static_cast<double>(moments.size());
                 st.perPictureMs = st.perPictureMs <= 0.0 ? ms : (ms > st.perPictureMs ? 0.7 * st.perPictureMs + 0.3 * ms : 0.97 * st.perPictureMs + 0.03 * ms);
             }
@@ -2063,7 +2064,7 @@ namespace nr
             if (keepAll)
             {
                 f.droppedDrawn = true;
-                d3d::render(f, std::string());
+                backend().render(f, std::string());
                 if (f.dueNs != 0)
                     poses::g_poses.prevDue = f.dueNs;
                 return;
@@ -2123,7 +2124,7 @@ namespace nr
             f.superseded = std::move(superseded);
             f.superseded.push_back(largest);
             if (kept)
-                d3d::render(f, std::string());
+                backend().render(f, std::string());
             // (the next frame's pictures between frames span from this one's moment: the pictures before it are the ones
             // left out - posed from the frame before's pose they would run the time on slower)
             if (f.dueNs != 0)
@@ -2161,7 +2162,7 @@ namespace nr
                     const float s = static_cast<float>(std::atof(list.substr(at, end - at).c_str()));
                     frame::g_clarity.store(s > 0.0f ? 1 : 0, std::memory_order_relaxed);
                     frame::setClarityStrength(s);
-                    d3d::render(job.frame, stem + "_cs" + std::to_string(n) + ext);
+                    backend().render(job.frame, stem + "_cs" + std::to_string(n) + ext);
                     at = end + 1;
                 }
                 frame::g_clarity.store(was, std::memory_order_relaxed);
@@ -2188,7 +2189,7 @@ namespace nr
                         const float s = static_cast<float>(std::atof(list.substr(at, end - at).c_str()));
                         frame::g_tone.store(s > 0.0f ? 1 : 0, std::memory_order_relaxed);
                         frame::setToneStrength(s);
-                        d3d::render(job.frame, stem + "_ts" + std::to_string(n) + ext);
+                        backend().render(job.frame, stem + "_ts" + std::to_string(n) + ext);
                         at = end + 1;
                     }
                 }
@@ -2196,7 +2197,7 @@ namespace nr
                     for (int m = 0; m < 2; ++m)
                     {
                         frame::g_tone.store(m, std::memory_order_relaxed);
-                        d3d::render(job.frame, stem + "_t" + std::to_string(m) + ext);
+                        backend().render(job.frame, stem + "_t" + std::to_string(m) + ext);
                     }
                 frame::g_tone.store(was, std::memory_order_relaxed);
                 frame::setToneStrength(wasStrength);
@@ -2215,7 +2216,7 @@ namespace nr
                 if (list.find(',') != std::string::npos)
                 {
                     frame::g_bloom.store(0, std::memory_order_relaxed);
-                    d3d::render(job.frame, stem + "_g0" + ext);
+                    backend().render(job.frame, stem + "_g0" + ext);
                     size_t at = 0;
                     for (int n = 0; at <= list.size(); ++n)
                     {
@@ -2224,7 +2225,7 @@ namespace nr
                             end = list.size();
                         frame::g_bloom.store(1, std::memory_order_relaxed);
                         frame::setBloomStrength(static_cast<float>(std::atof(list.substr(at, end - at).c_str())));
-                        d3d::render(job.frame, stem + "_gs" + std::to_string(n) + ext);
+                        backend().render(job.frame, stem + "_gs" + std::to_string(n) + ext);
                         at = end + 1;
                     }
                 }
@@ -2232,7 +2233,7 @@ namespace nr
                     for (int m = 0; m < 3; ++m)
                     {
                         frame::g_bloom.store(m, std::memory_order_relaxed);
-                        d3d::render(job.frame, stem + "_g" + std::to_string(m) + ext);
+                        backend().render(job.frame, stem + "_g" + std::to_string(m) + ext);
                     }
                 frame::g_bloom.store(was, std::memory_order_relaxed);
                 frame::setBloomStrength(wasStrength);
@@ -2243,11 +2244,11 @@ namespace nr
                 const size_t dot = job.shot.rfind('.');
                 const std::string stem = dot == std::string::npos ? job.shot : job.shot.substr(0, dot);
                 const std::string ext = dot == std::string::npos ? std::string(".bmp") : job.shot.substr(dot);
-                d3d::setSpeedupsForced(0);
-                d3d::render(job.frame, stem + "_a" + ext);
-                d3d::setSpeedupsForced(1);
-                d3d::render(job.frame, stem + "_b" + ext);
-                d3d::setSpeedupsForced(-1);
+                backend().setSpeedupsForced(0);
+                backend().render(job.frame, stem + "_a" + ext);
+                backend().setSpeedupsForced(1);
+                backend().render(job.frame, stem + "_b" + ext);
+                backend().setSpeedupsForced(-1);
             }
             else
                 poses::render(job.frame, job.shot);
@@ -2346,7 +2347,7 @@ namespace nr
                     if (latePick)
                     {
                         lock.unlock();
-                        g_latePickMs += d3d::waitForFrameSlot();
+                        g_latePickMs += backend().waitForFrameSlot();
                         lock.lock();
                     }
                     batch.swap(g_ready);
@@ -2491,7 +2492,7 @@ namespace nr
                 return;
             }
             growGrass(frame);
-            d3d::render(frame, shot);
+            backend().render(frame, shot);
             return;
         }
         std::unique_lock<std::mutex> lock(g_mutex);

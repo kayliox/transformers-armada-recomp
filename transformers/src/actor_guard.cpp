@@ -40,6 +40,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 std::string ps2xRecentDispatches(); // (the runtime: the thread's last guest dispatches)
 
@@ -47,9 +48,9 @@ namespace actor_guard
 {
     namespace
     {
-        constexpr uint32_t kChildWalk = 0x003DB890u;   // func_003DB890 (taActorEvenSimpler, its children's vfunc_03)
+        constexpr uint32_t kChildWalk = TF_GA(0x003DB890u);   // func_003DB890 (taActorEvenSimpler, its children's vfunc_03)
         constexpr uint32_t kSetActor = 0x002A64B0u;    // taCreatureBase slot 49: creature +0x24 = actor
-        constexpr uint32_t kDeletePools = 0x005262F0u; // the pool manager: every pool's actors deleted (a level's end)
+        constexpr uint32_t kDeletePools = TF_GA(0x005262F0u); // the pool manager: every pool's actors deleted (a level's end)
         constexpr uint32_t kPoolManager = 0x006CFBD8u; // gp-0x3518: pools at +0xC + 4 * type bit (64)
         constexpr uint32_t kSharedPool = 0x006CFBE0u;  // gp-0x3510: the pool the manager leaves alone
         constexpr uint32_t kVtSlot49 = 8u + 4u * 49u;  // (vtables: type_info, 0, then the slots)
@@ -181,17 +182,17 @@ namespace actor_guard
                                 setWord(rdram, at, 0u);
                         };
                         clear(creature + 0x24u);
-                        if (own == 0x002AC420u || own == 0x005BE7E0u) // taCreatureAI (and the manned turret, one of them)
+                        if (own == 0x002AC420u || own == TF_GA(0x005BE7E0u)) // taCreatureAI (and the manned turret, one of them)
                             clear(creature + 0xF4u);
-                        if (own == 0x005BE7E0u)
+                        if (own == TF_GA(0x005BE7E0u))
                         {
                             clear(creature + 0x110u);
                             if (const uint32_t sub = word(rdram, creature + 0x3Cu))
                                 clear(sub + 0x10u);
                         }
-                        if (own == 0x004A0000u || own == 0x004E8FB0u) // taCreatureBossUnicron, taSidekickCreature
+                        if (own == TF_GA(0x004A0000u) || own == TF_GA(0x004E8FB0u)) // taCreatureBossUnicron, taSidekickCreature
                             clear(creature + 0x38u);
-                        if (own == 0x0034A250u) // taTransformerCreature
+                        if (own == TF_GA(0x0034A250u)) // taTransformerCreature
                             clear(creature + 0x54u);
                     }
                     it = g_held.erase(it);
@@ -256,7 +257,7 @@ namespace actor_guard
         // 0, the call went to address 0 and the EE stopped on the warp's loading screen. A creature or component that is
         // no longer an object (not in main memory, no vtable whose slot 0xB4 is code): the command is left out and the
         // action handed to the manager as the function ends (a tail call - the function keeps nothing).
-        constexpr uint32_t kSimpleCommandRun = 0x00391280u, kActionManagerDone = 0x00395940u, kActionManager = 0x00726B50u;
+        constexpr uint32_t kSimpleCommandRun = TF_GA(0x00391280u), kActionManagerDone = TF_GA(0x00395940u), kActionManager = 0x00726B50u;
         PS2Runtime::RecompiledFunction g_simpleCommandRun = nullptr;
         uint32_t g_commandsSkipped = 0u;
         bool componentValid(const uint8_t *rdram, uint32_t action)
@@ -302,7 +303,7 @@ namespace actor_guard
         // at 0x0FECDFD0, its logic at 0x0FECDFB0 (vtable word 0xBD9A7DBD), the block in the free list of 0x0FECE24C. A logic
         // that is no longer an object (not in main memory, no vtable whose slot 4 is a function the game has) is taken as
         // none: the update returns 0, as for a projectile without one.
-        constexpr uint32_t kProjectileUpdate = 0x003D5CA0u;
+        constexpr uint32_t kProjectileUpdate = TF_GA(0x003D5CA0u);
         PS2Runtime::RecompiledFunction g_projectileUpdate = nullptr;
         uint32_t g_projectilesSkipped = 0u;
         void projectileUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

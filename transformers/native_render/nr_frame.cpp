@@ -37,6 +37,10 @@ namespace nr
     // (log2(lines / 448): the GS's distance-based choice made for the PS2's 448 lines), 0 the PS2's, above 0 that many.
     std::atomic<float> g_texSharp{-1.0f};
     void setTextureSharpness(float shift) { g_texSharp.store(shift, std::memory_order_relaxed); }
+    // Issue #17 (smooth textures): a texture magnified on screen takes the draw's MMAG filter even where the GS's
+    // distance rule picks MMIN (nr_d3d.cpp sampleGs). On by default; off: the PS2's choice.
+    std::atomic<bool> g_texSmooth{true};
+    void setTextureSmoothing(bool on) { g_texSmooth.store(on, std::memory_order_relaxed); }
 }
 
 namespace nr::frame
@@ -102,7 +106,7 @@ namespace nr::frame
     {
         using Constants = draw::Constants;               // (the layout the shaders read: nr_draw.h)
         using PictureConstants = draw::PictureConstants; // (a picture's: the shader's b1)
-        using d3d::qualityPreset;
+        int qualityPreset() { return backend().qualityPreset(); } // (the backend in use: nr_backend.cpp)
         uint32_t writeMaskOf(uint32_t fbmsk) { return draw::writeMaskOf(fbmsk); } // (nr_draw.h)
 
         // A mesh as the frame builder keeps it: the device's mesh (its buffers), or where a mesh of this frame's alone went
@@ -620,7 +624,10 @@ namespace nr::frame
             return g.pictureH > 448u ? std::log2(static_cast<float>(g.pictureH) / 448.0f) : 0.0f;
         }
 
-        void tex1Constants(uint64_t tex1, float *lod, float *lodf) { draw::tex1Constants(tex1, texSharpShift(), lod, lodf); } // (nr_draw.h)
+        void tex1Constants(uint64_t tex1, float *lod, float *lodf)
+        {
+            draw::tex1Constants(tex1, texSharpShift(), g_texSmooth.load(std::memory_order_relaxed), lod, lodf); // (nr_draw.h)
+        }
 
 
         // (P3 S3) The frame builder's textures asked of the device's later upload (uploadTextureLater), by the texture's

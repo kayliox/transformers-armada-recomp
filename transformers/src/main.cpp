@@ -17,6 +17,7 @@
 #include "hd_movies.h"
 #include "hd_progress.h"
 #include "mod_menu.h"
+#include "nr_backend.h"
 #include "nr_install.h"
 #include "menu_mouse.h"
 #include "playrec.h"
@@ -26,6 +27,7 @@
 #include "discord_presence.h"
 #include "updates.h"
 #include "self_log.h"
+#include "install_layout.h"
 #if defined(PS2X_ENABLE_DEBUG_UI)
 #include "ps2_debug_panel.h"
 #endif
@@ -88,6 +90,11 @@ namespace
             }
         }
         const fs::path here = fs::current_path(e);
+        // (TODO 279) The new folder layout, when the folder above is marked for it: settings.ini there is the one in
+        // use, and none is made here.
+        install_layout::find();
+        if (!install_layout::settingsFile().empty())
+            return;
         if (!fs::exists(here / "settings.ini", e))
             for (const fs::path &example : {here / "overlay" / "settings.example.ini", here / "settings.example.ini"})
                 if (fs::exists(example, e) && fs::copy_file(example, here / "settings.ini", e))
@@ -136,8 +143,16 @@ namespace
                           static_cast<int>(origin.y) + (GetMonitorHeight(monitor) - height) / 2);
     }
 
+    // The release this build is for (transformers/CMakeLists.txt, from its config's game.json).
+#if defined(TF_ELF_NAME)
+    constexpr const char *kElfName = TF_ELF_NAME;
+    constexpr uint32_t kElfCrc32 = TF_ELF_CRC32;
+    constexpr const char *kGameSerial = TF_GAME_SERIAL;
+#else
     constexpr const char *kElfName = "SLUS_206.68";
     constexpr uint32_t kElfCrc32 = 0x74C982C0u;
+    constexpr const char *kGameSerial = "SLUS-20668";
+#endif
 
     uint32_t crc32File(const fs::path &path)
     {
@@ -316,6 +331,8 @@ int main(int argc, char *argv[])
     // The environment the game was started with (before settings.ini fills it): what the updater and
     // a start again get (updates.h, TODO 104).
     updates::noteLaunchEnvironment();
+    // (TODO 279) The places of the new folder layout that are there, as the switches the game already has.
+    install_layout::apply();
     // A play recording's replay (TF_PLAY_REPLAY, playrec.h): its recorded settings into the environment, settings.ini
     // left out, hidden, silent, turbo.
     playrec::prepareReplay();
@@ -345,18 +362,24 @@ int main(int argc, char *argv[])
     // (TODO 163) The renderer the settings choose by default: the native one (N1, the port's own - Emulated stays a
     // choice). Set before anything reads TF_RENDERER (the scale below, the native renderer's install, VU1's); a
     // settings.ini line or a variable already set wins.
-#if defined(_WIN32)
-    if (!std::getenv("TF_RENDERER"))
+    if (!nr::nativeBackendChosen())
     {
-        _putenv_s("TF_RENDERER", "native");
-    }
-#elif defined(TF_NATIVE_RENDERER)
-    if (!std::getenv("TF_RENDERER")) // (Linux with vkd3d: the native renderer as on Windows)
-        setenv("TF_RENDERER", "native", 1);
+        // No native backend built or selected (nr_none.cpp: TF_GFX_API unset, or a backend this build does not have):
+        // always the emulated one, whatever settings.ini says.
+#if defined(_WIN32)
+        _putenv_s("TF_RENDERER", "emulated");
 #else
-    // Linux has no native renderer in this build (nr_none.cpp): always the emulated one, whatever settings.ini says.
-    setenv("TF_RENDERER", "emulated", 1);
+        setenv("TF_RENDERER", "emulated", 1);
 #endif
+    }
+    else if (!std::getenv("TF_RENDERER"))
+    {
+#if defined(_WIN32)
+        _putenv_s("TF_RENDERER", "native");
+#else
+        setenv("TF_RENDERER", "native", 1);
+#endif
+    }
     // A scripted test run's start screens said in the environment, so a play recording keeps them (start_screens.h).
     start_screens::noteScriptedRun();
     // Play recording on (TF_PLAY_RECORDING / TF_PLAY_RECORD): VIF1 on the game's thread for the session (playrec.h).
@@ -466,7 +489,7 @@ int main(int argc, char *argv[])
         {
             std::cerr << "Warning: " << elfPath.string() << " has CRC32 " << std::hex << crc
                       << ", expected " << kElfCrc32 << std::dec
-                      << ". This build only supports Transformers (USA, SLUS-20668)." << std::endl;
+                      << ". This build is for Transformers " << kGameSerial << "." << std::endl;
         }
 
         PS2Runtime runtime;
@@ -489,7 +512,8 @@ int main(int argc, char *argv[])
                 playrec::draw(); // (the REC mark and its messages: playrec.h)
                 panel->draw(rt);
                 // The panels need the cursor: the game only gets the mouse while both are hidden.
-                menu_mouse::windowFrame(GetScreenWidth(), GetScreenHeight()); // (the pause menu's cursor: menu_mouse.h)
+                // (the pause menu's cursor: menu_mouse.h; none of the clicks while F1 or the debugger is up, TODO 286)
+                menu_mouse::windowFrame(GetScreenWidth(), GetScreenHeight(), panel->isVisible() || mod_menu::isOpen());
                 ps2_host_input::setMouseCaptureAllowed(!panel->isVisible() && !mod_menu::isOpen() && !menu_mouse::wantsCursor());
             },
             [](PS2Runtime &, void *userData)

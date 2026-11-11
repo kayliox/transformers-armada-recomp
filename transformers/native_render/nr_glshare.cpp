@@ -7,8 +7,10 @@
 
 #include "nr_glshare.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 namespace nr::glshare
 {
@@ -39,6 +41,8 @@ namespace nr::glshare
             void(APIENTRY *memoryObjectParameteriv)(GLuint, GLenum, const GLint *) = nullptr;
             void(APIENTRY *importMemoryWin32Handle)(GLuint, GLuint64, GLenum, void *) = nullptr;
             void(APIENTRY *texStorageMem2D)(GLenum, GLsizei, GLenum, GLsizei, GLsizei, GLuint, GLuint64) = nullptr;
+            void(APIENTRY *getTexImage)(GLenum, GLint, GLenum, GLenum, void *) = nullptr;
+            void(APIENTRY *pixelStorei)(GLenum, GLint) = nullptr;
         } gl;
 
         bool g_checked = false, g_available = false;
@@ -91,6 +95,8 @@ namespace nr::glshare
         bool ok = load(gl.getStringi, "glGetStringi") && load(gl.getIntegerv, "glGetIntegerv") && load(gl.getError, "glGetError") &&
                   load(gl.genTextures, "glGenTextures") && load(gl.deleteTextures, "glDeleteTextures") &&
                   load(gl.bindTexture, "glBindTexture") && load(gl.texParameteri, "glTexParameteri");
+        load(gl.getTexImage, "glGetTexImage"); // (the read-back check: readBack)
+        load(gl.pixelStorei, "glPixelStorei");
         const bool memory = ok && hasExtension("GL_EXT_memory_object") && hasExtension("GL_EXT_memory_object_win32");
         ok = memory && load(gl.createMemoryObjects, "glCreateMemoryObjectsEXT") && load(gl.deleteMemoryObjects, "glDeleteMemoryObjectsEXT") &&
              load(gl.memoryObjectParameteriv, "glMemoryObjectParameterivEXT") &&
@@ -134,6 +140,32 @@ namespace nr::glshare
         }
         memory = mem;
         return tex;
+    }
+
+    bool readBack(unsigned texture, uint32_t width, uint32_t height, unsigned &maxColour, unsigned &maxAlpha)
+    {
+        maxColour = maxAlpha = 0u;
+        if (!available() || !texture || !gl.getTexImage || width == 0u || height == 0u)
+            return false;
+        while (gl.getError() != 0u)
+        {
+        }
+        std::vector<unsigned char> pixels(static_cast<size_t>(width) * height * 4u);
+        GLint bound = 0;
+        gl.getIntegerv(kTextureBinding2D, &bound);
+        if (gl.pixelStorei)
+            gl.pixelStorei(0x0D05 /* GL_PACK_ALIGNMENT */, 4);
+        gl.bindTexture(kTexture2D, texture);
+        gl.getTexImage(kTexture2D, 0, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, pixels.data());
+        gl.bindTexture(kTexture2D, static_cast<GLuint>(bound));
+        if (gl.getError() != 0u)
+            return false;
+        for (size_t i = 0; i < pixels.size(); i += 4)
+        {
+            maxColour = std::max<unsigned>(maxColour, std::max({pixels[i], pixels[i + 1], pixels[i + 2]}));
+            maxAlpha = std::max<unsigned>(maxAlpha, pixels[i + 3]);
+        }
+        return true;
     }
 
     void release(unsigned texture, unsigned memory)

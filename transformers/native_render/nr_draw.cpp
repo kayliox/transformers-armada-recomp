@@ -66,13 +66,13 @@ namespace nr::draw
         return ztst == 0u ? gfx::Compare::Never : ztst == 1u ? gfx::Compare::Always : ztst == 2u ? gfx::Compare::GreaterEqual : gfx::Compare::Greater;
     }
 
-    void tex1Constants(uint64_t tex1, float sharpShift, float *lod, float *lodf)
+    void tex1Constants(uint64_t tex1, float sharpShift, bool smoothMagnified, float *lod, float *lodf)
     {
         static const bool off = std::getenv("TF_NATIVE_TEX1") && *std::getenv("TF_NATIVE_TEX1") == '0';
         if (off)
             return;
         const uint32_t mmin = static_cast<uint32_t>(tex1 >> 6) & 7u;
-        lod[0] = 1.0f;
+        lod[0] = smoothMagnified ? 2.0f : 1.0f;
         lod[1] = static_cast<float>(static_cast<int32_t>(static_cast<uint32_t>(tex1 >> 32) << 20) >> 20) / 16.0f;
         lod[2] = static_cast<float>(1u << ((tex1 >> 19) & 3u));
         lod[3] = static_cast<float>(std::min<uint32_t>(static_cast<uint32_t>(tex1 >> 2) & 7u, 6u));

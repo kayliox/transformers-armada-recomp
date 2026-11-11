@@ -1,20 +1,65 @@
 """Minimal PS2 ELF loader and R5900 control-flow decoder shared by the tools."""
 
 import json
+import os
 import struct
 import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-GAME_JSON = ROOT / "config" / "game.json"
+
+# The release being built (build.ps1 sets TF_GAME_VERSION from the disc): the USA release's
+# settings are in config/, every other release's in config/versions/<serial>/.
+DEFAULT_VERSION = "SLUS-20668"
+
+
+def game_version():
+    return os.environ.get("TF_GAME_VERSION") or DEFAULT_VERSION
+
+
+def config_dir(version=None):
+    v = version or game_version()
+    return ROOT / "config" if v == DEFAULT_VERSION else ROOT / "config" / "versions" / v
+
+
+def known_versions():
+    """Every release with a config: {serial: elf_name}."""
+    found = {DEFAULT_VERSION: json.loads((ROOT / "config" / "game.json").read_text())["elf_name"]}
+    for p in sorted((ROOT / "config" / "versions").glob("*/game.json")):
+        found[p.parent.name] = json.loads(p.read_text())["elf_name"]
+    return found
+
+
+GAME_JSON = config_dir() / "game.json"
 
 JR_RA = 0x03E00008
 
 
-def load_game_config():
-    cfg = json.loads(GAME_JSON.read_text())
+def load_game_config(version=None):
+    cfg = json.loads((config_dir(version) / "game.json").read_text())
     cfg["code_regions"] = [(int(a, 16), int(b, 16)) for a, b in cfg["code_regions"]]
+    cfg["code_shift"] = [(int(a, 16), int(b, 16), d) for a, b, d in cfg.get("code_shift", [])]
     return cfg
+
+
+def release_file(name, version=None):
+    """A release's own config file (config/versions/<serial>/<name>), else the USA release's: another release uses
+    the USA overrides.toml and scratchpad_hot.txt with their code addresses moved by code_address()."""
+    own = config_dir(version) / name
+    return own if own.exists() else config_dir(DEFAULT_VERSION) / name
+
+
+def code_address(usa, cfg):
+    """A code address of the USA release, as the release of cfg has it (game.json "code_shift": [first, last, delta]
+    ranges of the USA main code region; src/game_version.h holds the same steps for the C++). None when it lies
+    between two ranges, where the releases' code differs and the address needs checking by hand."""
+    shifts = cfg.get("code_shift")
+    if not shifts or usa < shifts[0][0] or usa > shifts[-1][1]:
+        return usa
+    for lo, hi, d in shifts:
+        if lo <= usa <= hi:
+            return usa + d
+    return None
 
 
 class Elf:

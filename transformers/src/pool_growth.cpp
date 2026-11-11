@@ -40,17 +40,18 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 namespace pool_growth
 {
     namespace
     {
-        constexpr uint32_t kParticleBuffersMake = 0x0036A6D0u;
-        constexpr uint32_t kImpactManagerCtor = 0x0040C8A0u, kImpactManagerCtorEnd = 0x0040F4A0u;
-        constexpr uint32_t kImpactCtor = 0x0040F9B0u;
+        constexpr uint32_t kParticleBuffersMake = TF_GA(0x0036A6D0u);
+        constexpr uint32_t kImpactManagerCtor = TF_GA(0x0040C8A0u), kImpactManagerCtorEnd = TF_GA(0x0040F4A0u);
+        constexpr uint32_t kImpactCtor = TF_GA(0x0040F9B0u);
         constexpr uint32_t kLoopStep = 0x26730001u; // (addiu s3, s3, 1)
-        constexpr uint32_t kDisplayBlocksCreate = 0x005A8080u;
-        constexpr uint32_t kCreatureListsShutdown = 0x003771B0u;
+        constexpr uint32_t kDisplayBlocksCreate = TF_GA(0x005A8080u);
+        constexpr uint32_t kCreatureListsShutdown = TF_GA(0x003771B0u);
         constexpr uint32_t kCreatureListGame = 500u; // (the game's static elements, each vector)
         constexpr uint32_t kCreatureItems = 0x00726700u, kCreatureEntries = 0x00726710u; // (MSL vectors: capacity, count, data)
         constexpr uint32_t kCreatureListMagic = 0x34554C43u;                             // ("CLU4")
@@ -91,7 +92,7 @@ namespace pool_growth
             }
             ++g_impactMade;
             static const bool census = std::getenv("TF_POOL_CENSUS") && *std::getenv("TF_POOL_CENSUS") == '1';
-            if (census && ra == 0x0040C9FCu && g_impactCalls == 0u && g_impactLoops > 1u)
+            if (census && ra == TF_GA(0x0040C9FCu) && g_impactCalls == 0u && g_impactLoops > 1u)
                 std::fprintf(stderr, "[tf:census] surface impacts made: %llu in %llu loops (the impact manager before this one)\n",
                              static_cast<unsigned long long>(g_impactMade - 1u), static_cast<unsigned long long>(g_impactLoops - 1u));
             if (++g_impactCalls % static_cast<uint32_t>(factor()) != 0u)

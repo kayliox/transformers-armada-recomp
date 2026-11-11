@@ -5,6 +5,7 @@
 *.img
 game/
 SLUS_206.68
+SLES_523.88
 
 # Everything derived from the game executable
 work/

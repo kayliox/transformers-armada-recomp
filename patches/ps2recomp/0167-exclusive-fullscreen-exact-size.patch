@@ -1,0 +1,67 @@
+Subject: [PATCH] Runtime: exclusive full screen at the screen's exact size (TODO 282)
+
+The window was sized to the screen while it still had its frame, and Windows keeps a framed window inside
+the desktop's work area: on a 1920x1200 screen it came out 1920x1181, exclusive full screen was entered at
+that size and the picture was 19 rows short of the screen. The frame is taken off before the window is
+sized; its own size and place are kept and given back when exclusive full screen is left.
+PS2X_EXCLUSIVE_FRAME=1: as before. A line in the log says the size it got.
+
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -87,11 +87,31 @@
+ static int g_displayMode = 0;
+ static int g_lastFullMode = 1;
+ 
++// (TODO 282) Exclusive full screen at the screen's exact size. The window was sized to the screen while it still had
++// its frame, and Windows does not let a framed window be taller than the desktop's work area: on a 1920x1200 screen
++// it came out 1920x1181, exclusive full screen was entered at that size and the picture was 19 rows short of the
++// screen (a player's 16:10 screen, a band at the top; "[window] ... 1920x1181" in his log after each restart). The
++// frame is taken off first now; the window's own size and place are kept here and given back when it leaves.
++static bool g_exclusiveFrameOff = false;
++static int g_beforeExclusive[4] = {0, 0, 0, 0}; // x, y, width, height
++
+ static void setDisplayMode(int mode)
+ {
+     mode = std::clamp(mode, 0, 2);
+     if (IsWindowFullscreen() && mode != 2)
++    {
+         ToggleFullscreen();
++        if (g_exclusiveFrameOff)
++        {
++            g_exclusiveFrameOff = false;
++            ClearWindowState(FLAG_WINDOW_UNDECORATED);
++            if (g_beforeExclusive[2] > 0 && g_beforeExclusive[3] > 0)
++            {
++                SetWindowSize(g_beforeExclusive[2], g_beforeExclusive[3]);
++                SetWindowPosition(g_beforeExclusive[0], g_beforeExclusive[1]);
++            }
++        }
++    }
+     if (mode == 2)
+     {
+         if (IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE))
+@@ -99,8 +119,22 @@
+         if (!IsWindowFullscreen())
+         {
+             const int monitor = GetCurrentMonitor();
+-            SetWindowSize(GetMonitorWidth(monitor), GetMonitorHeight(monitor));
++            const int width = GetMonitorWidth(monitor), height = GetMonitorHeight(monitor);
++            static const bool keepFrame = std::getenv("PS2X_EXCLUSIVE_FRAME") && *std::getenv("PS2X_EXCLUSIVE_FRAME") == '1';
++            if (!keepFrame && !IsWindowState(FLAG_WINDOW_UNDECORATED))
++            {
++                const Vector2 at = GetWindowPosition();
++                g_beforeExclusive[0] = static_cast<int>(at.x);
++                g_beforeExclusive[1] = static_cast<int>(at.y);
++                g_beforeExclusive[2] = GetScreenWidth();
++                g_beforeExclusive[3] = GetScreenHeight();
++                SetWindowState(FLAG_WINDOW_UNDECORATED);
++                g_exclusiveFrameOff = true;
++            }
++            SetWindowSize(width, height);
+             ToggleFullscreen();
++            std::cerr << "[window] exclusive full screen: " << GetScreenWidth() << "x" << GetScreenHeight() << " on a screen of "
++                      << width << "x" << height << (keepFrame ? " (PS2X_EXCLUSIVE_FRAME=1: the frame kept, as before)" : "") << std::endl;
+         }
+     }
+     else
