@@ -2446,6 +2446,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                                              D3DCOMPILE_IEEE_STRICTNESS);
                     if (!code)
                     {
+#if defined(__linux__)
                         std::fprintf(stderr, "[native render] grass on the GPU: shader %s%s failed\n", entries[k], g_exact ? " (divisions in double)" : "");
                         if (!g_exact)
                             return false;
@@ -2456,6 +2457,10 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                         g_exact = false;
                         k = -1;
                         continue;
+#else
+                        std::fprintf(stderr, "[native render] grass on the GPU: shader %s failed\n", entries[k]);
+                        return false;
+#endif
                     }
                     D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
                     cd.pRootSignature = g_root;
