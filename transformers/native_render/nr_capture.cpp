@@ -6484,6 +6484,29 @@ namespace nr
             s.unavailableHelp = "Only for the native renderer (Display: Renderer).";
             ps2_settings::add(s);
         }
+        // Its sharpening (TF_NATIVE_SHARPEN, live): Auto sharpens only below render scale 100%, where the enlarged picture
+        // comes out soft - nothing changes at 100%. Drawn in the FXAA pass (the edge filter's default).
+        {
+            ps2_settings::Setting s;
+            s.key = "TF_NATIVE_SHARPEN";
+            s.section = "Graphics";
+            s.label = "Sharpening (native renderer)";
+            s.order = 56;
+            s.help = "Native renderer: brings back the detail a render scale under 100% softens, at almost no cost. "
+                     "Auto: only below 100%. Works with the FXAA edge filter.";
+            s.choices = {{"auto", "Auto"}, {"0", "Off"}, {"1", "On"}};
+            s.defaultValue = "auto";
+            s.apply = [](const std::string &value) {
+                frame::setSharpen(value == "0" ? 0 : value == "auto" ? 1 : 2);
+                return true;
+            };
+            s.available = []() {
+                const char *on = std::getenv("TF_NATIVE_RENDER");
+                return ps2_settings::choice("TF_RENDERER") == "native" || (on && *on && *on != '0');
+            };
+            s.unavailableHelp = "Only for the native renderer (Display: Renderer).";
+            ps2_settings::add(s);
+        }
         // Its quality preset (TF_NATIVE_QUALITY, a restart; TODO 94): Automatic picks from the graphics card's memory.
         {
             ps2_settings::Setting s;

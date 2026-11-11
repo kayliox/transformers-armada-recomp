@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -151,6 +152,28 @@ namespace nr::frame
         return v;
     }
     inline void setRenderScale(int percent) { g_renderScale.store(std::clamp(percent, 25, 100), std::memory_order_relaxed); }
+    // The sharpening (TF_NATIVE_SHARPEN, the F1 setting, live): 0 off, 1 auto (the default: only below render scale 100%,
+    // where the picture is enlarged and comes out soft), 2 on. Drawn by the FXAA pass (TF_NATIVE_AA's default), as the
+    // amount CAS takes: 0 none - the pass's result as before.
+    inline std::atomic<int> g_sharpen{-1};
+    inline int sharpenMode()
+    {
+        int v = g_sharpen.load(std::memory_order_relaxed);
+        if (v < 0)
+        {
+            const char *e = std::getenv("TF_NATIVE_SHARPEN");
+            int expected = -1;
+            g_sharpen.compare_exchange_strong(expected, !e || !*e || std::strcmp(e, "auto") == 0 ? 1 : *e == '0' ? 0 : 2);
+            v = g_sharpen.load(std::memory_order_relaxed);
+        }
+        return v;
+    }
+    inline void setSharpen(int mode) { g_sharpen.store(std::clamp(mode, 0, 2), std::memory_order_relaxed); }
+    inline float sharpenAmount()
+    {
+        const int mode = sharpenMode();
+        return mode == 2 || (mode == 1 && renderScale() < 100) ? 0.5f : 0.0f;
+    }
 
     // ---- The game textures' mip chains (the frame builder's, and the D3D12 device's own uploads) ----
     void halveLevel(const uint32_t *src, uint32_t pw, uint32_t ph, uint32_t *dst);

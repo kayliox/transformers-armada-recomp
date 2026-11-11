@@ -1033,7 +1033,7 @@ namespace nr::frame
                 std::getenv("TF_NATIVE_AA_EDGE") ? static_cast<float>(std::atof(std::getenv("TF_NATIVE_AA_EDGE"))) : 0.125f,
                 std::getenv("TF_NATIVE_AA_EDGEMIN") ? static_cast<float>(std::atof(std::getenv("TF_NATIVE_AA_EDGEMIN"))) : 0.0625f};
             const float k[8] = {1.0f / static_cast<float>(g.aaW), 1.0f / static_cast<float>(g.aaH), static_cast<float>(g.aaW),
-                                static_cast<float>(g.aaH), tune[0], tune[1], tune[2], 0.0f};
+                                static_cast<float>(g.aaH), tune[0], tune[1], tune[2], sharpenAmount()}; // (w: TF_NATIVE_SHARPEN)
             std::memcpy(cs.cpu, k, sizeof(k));
             dev.bindDrawConstants(cs);
             dev.bindTextures(sourceView, gfx::kKeepTexture, gfx::kKeepTexture);

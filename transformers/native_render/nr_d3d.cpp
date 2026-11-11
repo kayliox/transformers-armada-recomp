@@ -1005,7 +1005,7 @@ float4 clarityPs(float4 pos : SV_Position) : SV_Target
 cbuffer Aa : register(b0)
 {
     float4 aaFrame; // 1 / width, 1 / height, width, height
-    float4 aaTune;  // x: sub-pixel amount, y: edge threshold, z: its minimum
+    float4 aaTune;  // x: sub-pixel amount, y: edge threshold, z: its minimum, w: the sharpening (0: none)
 };
 Texture2D<float4> aaSource : register(t0);
 SamplerState aaLinear : register(s1);
@@ -1040,7 +1040,27 @@ float4 aaTap(float2 p)
 
 static const float kAaStep[12] = {1.0, 1.0, 1.0, 1.0, 1.0, 1.5, 2.0, 2.0, 2.0, 2.0, 4.0, 8.0};
 
-float4 aaPs(AaOut i) : SV_Target
+float3 aaLoadOff(int2 c, int2 off)
+{
+    return aaSource.Load(int3(clamp(c + off, int2(0, 0), int2(aaFrame.zw) - 1), 0)).rgb;
+}
+
+// The sharpening (TF_NATIVE_SHARPEN): contrast-adaptive, after AMD FidelityFX CAS (MIT) - the centre and its four
+// neighbours in the picture before FXAA; the less contrast there is around a pixel the more it is sharpened, so edges
+// do not ring. Added to the FXAA result as the difference it makes to the centre.
+float3 aaSharpen(int2 c, float3 col, float sharp)
+{
+    const float3 n = aaLoadOff(c, int2(0, -1)), w = aaLoadOff(c, int2(-1, 0)), e = aaLoadOff(c, int2(0, 0));
+    const float3 east = aaLoadOff(c, int2(1, 0)), s = aaLoadOff(c, int2(0, 1));
+    const float3 mn = min(min(min(n, w), min(east, s)), e);
+    const float3 mx = max(max(max(n, w), max(east, s)), e);
+    const float3 amp = sqrt(saturate(min(mn, 2.0 - mx) / max(mx, 1.0 / 256.0)));
+    const float3 k = amp * (-1.0 / lerp(8.0, 5.0, saturate(sharp)));
+    const float3 sharpened = (n * k + w * k + east * k + s * k + e) / (1.0 + 4.0 * k);
+    return saturate(col + (sharpened - e));
+}
+
+float4 aaFxaa(AaOut i)
 {
     const float2 rcp = aaFrame.xy;
     const int2 c = int2(i.pos.xy);
@@ -1127,6 +1147,14 @@ float4 aaPs(AaOut i) : SV_Target
     else
         posM.x += pixelOffsetSubpix * lengthSign;
     return float4(aaTap(posM).rgb, rgbyM.a);
+}
+
+float4 aaPs(AaOut i) : SV_Target
+{
+    float4 o = aaFxaa(i);
+    if (aaTune.w > 0.0) // (0, the default at render scale 100%: the FXAA result as it was)
+        o.rgb = aaSharpen(int2(i.pos.xy), o.rgb, aaTune.w);
+    return o;
 }
 )";
 
