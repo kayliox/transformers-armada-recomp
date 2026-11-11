@@ -371,11 +371,13 @@ namespace
             float tv = width != 0u ? pixelAspect * (640.0f / static_cast<float>(width)) * 0.93f : 1.0f;
             // The PAL release in its 50 Hz mode (tvStandard 1 at 0x6CDD38, pal60 0 at 0x6CF658) draws its taller PAL
             // pixels: a 4:3 picture's pixel aspect is 0.727934 at width 512, 0.846 by the measure above - under the
-            // 16:9 threshold. Measured against its own 4:3 instead.
+            // 16:9 threshold. Measured against its own 4:3 instead. (European disc only: the USA one has no 50 Hz mode.)
+#if defined(TF_GAME_PAL)
             uint32_t standard = 0u;
             std::memcpy(&standard, rdram + 0x006CDD38u, sizeof(standard));
             if (standard == 1u && rdram[0x006CF658u] == 0u)
                 tv /= 0.727934f * 1.25f * 0.93f;
+#endif
             // (TODO 282: narrower than 16:9 the widescreen mode's value goes up to the 4:3 TV's own - 0.75 / k, 1 at
             // 4:3 - so there it is told by the shape's own value, with the widescreen picture on)
             const float k = ultrawide::wideFactor();
@@ -385,6 +387,9 @@ namespace
             // pixel aspect apart, and a frame read between them took the PAL release's 640x480 width with its
             // 512x448 aspect for 16:9 - the 4:3 picture flipped to 16:9 and back for a frame, again and again, at the
             // 50 / 60 Hz menu and its 60 Hz test (seen on the screen, 2026-11-10). (A movie's 4:3 at once, above.)
+            // European disc only: the USA disc has no such menu, and there it delayed every change of shape by three
+            // frames (kayliox on PR #15).
+#if defined(TF_GAME_PAL)
             static float measured = 0.0f, settled = 0.0f;
             static int same = 0;
             same = aspect == measured ? same + 1 : 1;
@@ -392,6 +397,7 @@ namespace
             if (same >= 3 || settled == 0.0f)
                 settled = aspect;
             aspect = settled;
+#endif
         }
         static float shown = 0.0f;
         if (aspect != shown)
