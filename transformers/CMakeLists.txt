@@ -19,6 +19,8 @@ file(GLOB_RECURSE TF_DECOMP_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DI
 file(GLOB TF_NATIVE_RENDER_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/native_render/*.cpp")
 # (The large images' BC7 encoder, TODO 94: bc7enc, MIT / public domain - native_render/ext/bc7enc/README.txt.)
 list(APPEND TF_NATIVE_RENDER_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/native_render/ext/bc7enc/bc7enc.cpp")
+# (TODO 290 (17): its BC7 decoder too, same commit - a PCSX2 pack's DDS images read)
+list(APPEND TF_NATIVE_RENDER_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/native_render/ext/bc7enc/bc7decomp.cpp")
 # Direct3D 12 and its GL interop are Windows' alone; elsewhere nr_none.cpp stands in. On Linux TF_VKD3D_DIR (a static
 # vkd3d 2.1 or newer, Wine's Direct3D 12 on Vulkan) brings nr_d3d.cpp back: nr_none.cpp then stubs only the GL interop.
 if(WIN32)
@@ -172,8 +174,7 @@ endif()
 # The Vulkan backend (native_render/vulkan/, chosen at start with TF_GFX_API=vulkan; Direct3D 12 stays the default)
 # and its SDL3 window. The Vulkan headers, the volk loader (it loads the system's Vulkan at run time: no Vulkan SDK
 # needed to build) and SDL3 (static) are fetched like raylib. Off by default while it is in development (on, every build
-# fetches ~310 MB more and ships dxcompiler.dll): -DTF_VULKAN=ON, or build.ps1 -Vulkan. Off: Direct3D 12 alone, nothing
-# fetched.
+# fetches ~310 MB more): -DTF_VULKAN=ON, or build.ps1 -Vulkan. Off: Direct3D 12 alone, nothing fetched.
 option(TF_VULKAN "Build the Vulkan backend (TF_GFX_API=vulkan) and its SDL3 window" OFF)
 if(TF_VULKAN)
     include(FetchContent)
@@ -205,8 +206,8 @@ if(TF_VULKAN)
         GIT_SHALLOW TRUE
         SOURCE_SUBDIR not-a-cmake-project)
     FetchContent_MakeAvailable(tf_vulkan_headers tf_volk tf_sdl3 tf_vma)
-    # The shader compiler for SPIR-V: DXC's release (its dxcompiler.dll beside the game, loaded at run time; the same HLSL
-    # as Direct3D 12's, compiled at start as D3DCompile does there). The Windows SDK's DXC has no SPIR-V; this one does.
+    # The shader compiler for SPIR-V, used by the build only: DXC's release (its dxcompiler.dll, loaded by the bake below;
+    # the same HLSL as Direct3D 12's). The Windows SDK's DXC has no SPIR-V; this one does. Nothing of it ships.
     if(WIN32)
         FetchContent_Declare(tf_dxc
             URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/dxc_2026_09_29.zip
@@ -218,33 +219,61 @@ if(TF_VULKAN)
     add_library(tf_volk STATIC "${tf_volk_SOURCE_DIR}/volk.c")
     target_include_directories(tf_volk PRIVATE "${tf_volk_SOURCE_DIR}" "${tf_vulkan_headers_SOURCE_DIR}/include")
     target_compile_definitions(tf_volk PRIVATE VK_NO_PROTOTYPES)
-    # The HLSL the backend compiles: Direct3D 12's own string literals, taken from nr_d3d.cpp into a header at build time
-    # (made again when nr_d3d.cpp changes), so both backends draw with one source until the HLSL moves into files of its own.
+    # The HLSL the backend draws with: Direct3D 12's own string literals, taken from nr_d3d.cpp into a header at build time
+    # (looked at again when nr_d3d.cpp changes, written only when its shaders did), so both backends draw with one source
+    # until the HLSL moves into files of its own. Its own target: the bake and the backend both wait for it.
     set(TF_VK_GEN "${CMAKE_CURRENT_BINARY_DIR}/tf_vulkan_gen")
     add_custom_command(OUTPUT "${TF_VK_GEN}/nr_hlsl_sources.h"
         COMMAND ${CMAKE_COMMAND} "-DSRC=${CMAKE_CURRENT_SOURCE_DIR}/native_render/nr_d3d.cpp" "-DOUT=${TF_VK_GEN}/nr_hlsl_sources.h"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/extract_hlsl.cmake"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/native_render/nr_d3d.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/extract_hlsl.cmake"
         COMMENT "Vulkan backend: the HLSL from nr_d3d.cpp")
+    add_custom_target(tf_vulkan_hlsl DEPENDS "${TF_VK_GEN}/nr_hlsl_sources.h")
+    # The SPIR-V built into the game (native_render/vulkan/nr_vulkan_shaders.h): a small program of the build's own
+    # (bake_spirv.cpp, never shipped) loads the fetched DXC's dxcompiler.dll and compiles every shader the backend makes,
+    # the pixel shader's 64 variants included, into a table of SPIR-V words (nr_spirv_baked.cpp) - again whenever the HLSL
+    # or the bake changes (its program is then built again). So the game needs no shader compiler and no dxcompiler.dll.
+    # Without a compiler for this system (DXC is fetched for Windows only so far) the table is empty and the backend says
+    # so at start.
+    set(TF_VK_BAKED "${TF_VK_GEN}/nr_spirv_baked.cpp")
+    if(WIN32)
+        add_executable(tf_vulkan_bake
+            "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/bake_spirv.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/nr_vulkan_dxc.cpp")
+        target_include_directories(tf_vulkan_bake PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/native_render"
+                                   "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan" "${TF_VK_GEN}" "${tf_dxc_SOURCE_DIR}/inc")
+        target_compile_features(tf_vulkan_bake PRIVATE cxx_std_20)
+        # (its own folder: not beside the game)
+        set_target_properties(tf_vulkan_bake PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tf_vulkan_bake")
+        add_dependencies(tf_vulkan_bake tf_vulkan_hlsl)
+        add_custom_command(OUTPUT "${TF_VK_BAKED}"
+            COMMAND tf_vulkan_bake "${tf_dxc_SOURCE_DIR}/bin/x64/dxcompiler.dll" "${TF_VK_BAKED}"
+            DEPENDS tf_vulkan_bake
+            COMMENT "Vulkan backend: its shaders compiled to SPIR-V (every variant)")
+    elseif(NOT EXISTS "${TF_VK_BAKED}")
+        file(WRITE "${TF_VK_BAKED}" "// No SPIR-V: no shader compiler for this system yet (transformers/CMakeLists.txt).
+#include \"nr_vulkan_shaders.h\"
+namespace nr::vulkan::shaders
+{
+    const Baked kBaked[] = {{0ull, nullptr, 0u}};
+    const size_t kBakedCount = 0;
+}
+")
+    endif()
     # The backend is a library of its own (native_render/vulkan/ is outside the native_render/*.cpp glob above): SDL3's
     # and Vulkan's include folders and defines stay on its files. Linked straight to the game target, SDL3's include
     # folders went onto every one of the game's command lines (even through $<LINK_ONLY:...>), and switching between a
     # build with and without this compiled all of the game's code again.
     add_library(tf_vulkan_backend STATIC
         "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/nr_vulkan.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/nr_vulkan_dxc.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/nr_vulkan_vma.cpp"
-        "${TF_VK_GEN}/nr_hlsl_sources.h")
-    target_include_directories(tf_vulkan_backend PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/native_render" "${tf_volk_SOURCE_DIR}"
+        "${TF_VK_BAKED}")
+    add_dependencies(tf_vulkan_backend tf_vulkan_hlsl)
+    target_include_directories(tf_vulkan_backend PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/native_render"
+                               "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan" "${tf_volk_SOURCE_DIR}"
                                "${tf_vulkan_headers_SOURCE_DIR}/include" "${tf_vma_SOURCE_DIR}/include" "${TF_VK_GEN}")
     target_compile_definitions(tf_vulkan_backend PRIVATE TF_VULKAN=1 VK_NO_PROTOTYPES VMA_STATIC_VULKAN_FUNCTIONS=0
                                VMA_DYNAMIC_VULKAN_FUNCTIONS=1)
-    if(WIN32)
-        target_include_directories(tf_vulkan_backend PRIVATE "${tf_dxc_SOURCE_DIR}/inc")
-        add_custom_command(TARGET TransformersRecomp POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${tf_dxc_SOURCE_DIR}/bin/x64/dxcompiler.dll" "$<TARGET_FILE_DIR:TransformersRecomp>"
-            COMMENT "Vulkan backend: dxcompiler.dll beside the game")
-    endif()
     target_compile_features(tf_vulkan_backend PRIVATE cxx_std_20)
     target_link_libraries(tf_vulkan_backend PRIVATE tf_volk SDL3::SDL3-static)
     target_link_libraries(TransformersRecomp PRIVATE tf_vulkan_backend)

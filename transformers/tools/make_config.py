@@ -68,7 +68,13 @@ def translate_overrides(overrides, cfg, elf):
         if value >> 26 in (2, 3):  # j / jal: the target moves too
             value = (value & 0xFC000000) | (move((value & 0x3FFFFFF) << 2, "a patched call's target") >> 2)
         original = elf.word(a)
-        if not same_registers(original, value):
+        if "replaces" in p:
+            # (a patch that moves instructions around - another register written - names the word it replaces:
+            # checked as it is, which also proves the address moved right)
+            if original != int(p["replaces"], 16):
+                sys.exit(f"make_config: patch USA 0x{usa:08X} -> 0x{a:08X}: {cfg['elf_name']} has 0x{original:08X} there, "
+                         f"not the 0x{int(p['replaces'], 16):08X} the patch replaces")
+        elif not same_registers(original, value):
             sys.exit(f"make_config: patch USA 0x{usa:08X} -> 0x{a:08X}: {cfg['elf_name']} has 0x{original:08X} there, "
                      f"not an instruction the patch 0x{value:08X} replaces (different registers)")
         moved.append({"address": f"0x{a:x}", "value": f"0x{value:08x}"})

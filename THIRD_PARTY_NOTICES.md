@@ -32,7 +32,6 @@ development.
 | [volk](https://github.com/zeux/volk) | Arseny Kapoulkine | MIT | Loads the system's Vulkan at run time (`vulkan-sdk-1.4.363.0`, fetched) |
 | [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) | The Khronos Group | Apache-2.0 or MIT | The Vulkan API's headers (`vulkan-sdk-1.4.363.0`, fetched) |
 | [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) | Advanced Micro Devices | MIT | Video memory sub-allocation (`v3.4.0`, header only, fetched) |
-| [DirectX Shader Compiler](https://github.com/microsoft/DirectXShaderCompiler) | Microsoft and the LLVM contributors | University of Illinois/NCSA and MIT (the release's `LICENSE-LLVM.txt`, `LICENCE-MIT.txt`) | `dxcompiler.dll` from the v1.9.2609 release (downloaded during the build with its SHA-256, placed beside the game): compiles the shaders to SPIR-V at start |
 
 ## Build tools
 
@@ -42,6 +41,7 @@ development.
 | [rabbitizer](https://github.com/Decompollaborate/rabbitizer) | Decompollaborate | MIT | MIPS instruction decoding (recompiler) |
 | [libdwarf](https://github.com/davea42/libdwarf-code) | David Anderson and others | LGPL-2.1 (library) | Debug information (recompiler) |
 | [nlohmann/json](https://github.com/nlohmann/json) | Niels Lohmann | MIT | JSON (analyzer) |
+| [DirectX Shader Compiler](https://github.com/microsoft/DirectXShaderCompiler) | Microsoft and the LLVM contributors | University of Illinois/NCSA and MIT (the release's `LICENSE-LLVM.txt`, `LICENCE-MIT.txt`) | Compiles the Vulkan backend's shaders to SPIR-V during a `-Vulkan` build (`dxcompiler.dll` from the v1.9.2609 release, downloaded with its SHA-256; not placed beside the game) |
 
 ## Made on your PC by the setup
 

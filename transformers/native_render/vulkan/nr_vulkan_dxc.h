@@ -1,5 +1,5 @@
-// nr_vulkan_dxc.h - HLSL to SPIR-V with DXC's library (dxcompiler.dll beside the game, loaded at run time), for the
-// Vulkan backend: the Direct3D 12 backend's HLSL as it is, compiled at start as D3DCompile compiles it there.
+// nr_vulkan_dxc.h - HLSL to SPIR-V with DXC's library, for the build's SPIR-V bake (bake_spirv.cpp): the Direct3D 12
+// backend's HLSL as it is, compiled as D3DCompile compiles it there. Not part of the game: it runs only at build time.
 #pragma once
 
 #include <cstddef>
@@ -10,11 +10,10 @@
 
 namespace nr::vulkan::dxc
 {
-    // The compiler loaded (once); false: none (why says what is missing).
-    bool available(std::string &why);
-    // `source` (size bytes, HLSL) compiled for `entry` at `profile` (vs_6_0, ps_6_0, gs_6_0) with the defines, as SPIR-V
-    // for Vulkan 1.1 with Direct3D's buffer layout and the backend's bindings (b0.. at 0, t0.. at 10, s0.. at 20). False:
-    // errors holds the compiler's message. Any thread (one compile at a time).
+    // DXC's library loaded from that file (dxcompiler.dll of the release the build fetched); false: why says what failed.
+    bool load(const char *library, std::string &why);
+    // `source` (size bytes, HLSL) compiled for `entry` at `profile` (vs_6_0, ps_6_0, gs_6_0) with the defines and
+    // nr_vulkan_shaders.h's switches. False: errors holds the compiler's message. One compile at a time.
     bool compile(const char *source, size_t size, const char *entry, const char *profile,
                  const std::vector<std::pair<std::string, std::string>> &defines, std::vector<uint32_t> &spirv, std::string &errors);
 }

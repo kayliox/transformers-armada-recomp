@@ -714,16 +714,15 @@ def main():
     ap.add_argument("--keys-only", action="store_true",
                     help="only the key-prompt sets again (after the layout changed: fast; reuses text_ps5)")
     args = ap.parse_args()
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from jsonfile import read_json, write_json  # (the fonts' manifest read and written safely)
     if args.keys_only and not (args.archives and args.converted):
         # (the game, after the player changed the layout: the folders the full run used, from its manifest)
-        try:
-            with open(os.path.join(args.out, "manifest.json"), encoding="utf-8") as f:
-                src = json.load(f).get("sources", {})
+        src = read_json(os.path.join(args.out, "manifest.json"), {}, "the sharp fonts' manifest (manifest.json)").get("sources", {})
+        if isinstance(src, dict):
             args.archives = args.archives or src.get("archives")
             args.converted = args.converted or src.get("converted")
             args.upscaled = args.upscaled or src.get("upscaled")
-        except (OSError, ValueError):
-            pass
     if not (args.archives and args.converted):
         sys.exit("--archives and --converted are needed (or --keys-only after a full run)")
 
@@ -956,16 +955,12 @@ def main():
                            "upscaled": os.path.abspath(args.upscaled) if args.upscaled else None}
     if args.keys_only:
         # (the rest of the manifest is the full run's)
-        try:
-            with open(os.path.join(args.out, "manifest.json"), encoding="utf-8") as f:
-                old = json.load(f)
+        old = read_json(os.path.join(args.out, "manifest.json"), {}, "the sharp fonts' manifest (manifest.json)")
+        if old:
             old["controls"] = manifest["controls"]
             manifest = old
-        except (OSError, ValueError):
-            pass
     os.makedirs(args.out, exist_ok=True)
-    with open(os.path.join(args.out, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=1)
+    write_json(os.path.join(args.out, "manifest.json"), manifest, indent=1)
     print(f"wrote {args.out}")
 
 

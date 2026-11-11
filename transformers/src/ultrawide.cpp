@@ -76,6 +76,17 @@ namespace ultrawide
         constexpr uint32_t kTanCall = TF_GA(0x0042E3BCu);                                  // ecoQuadtree::Render
         constexpr uint32_t kAspectInBuildFrustum = 0x0020AC04u;
         constexpr uint32_t kAspectInCameraFrustum = 0x001F4BB0u;
+        // The sun (TODO 108: "the glare and lens flare placed right at 21:9"). The sun's quad and its lens flare
+        // (taSun's draw 0x409610: 0x409300 and 0x408A10) are billboards made from the camera's axes (the rendering
+        // info's rows +0x180 right / +0x190 up) times size x tan(fov/2) (+0x1B4, from the widened field of view): wider
+        // than 16:9 the horizontal comes out right and the vertical the shape times too tall - the glare a tall oval
+        // reaching far up and down. While taSun draws, the up row is divided by the shape. The sun's place was right
+        // all along (its quad sits at the camera + 2000 x the sun's direction, drawn by the projection; the visibility
+        // test's spot, 0x20B3D0, measured on it - TF_NATIVE_OCCLOG). The shape is 1 at 16:9 (and the FOV slider alone
+        // widens both axes alike), so 16:9 is untouched. TF_SUN_OLD=1: as before.
+        constexpr uint32_t kSunDraw = TF_GA(0x00409610u);
+        constexpr uint32_t kRenderingInfoNow = 0x006CF330u; // the current taRenderingInfo (data: the same in PAL)
+        constexpr uint32_t kRenderingInfoUp = 0x190u;
 
         template <size_t N>
         bool contains(const uint32_t (&list)[N], uint32_t value)
@@ -193,6 +204,59 @@ namespace ultrawide
                 ctx->f[0] *= k;
         }
 
+        bool sunOld()
+        {
+            static const bool old = [] { const char *e = std::getenv("TF_SUN_OLD"); return e && *e == '1'; }();
+            return old;
+        }
+
+        // The up row while taSun draws (above): divided on the way in, put back on the way out. A draw that stops for
+        // the scheduler before it is done returns here early and finishes later on its own: then the row is put back
+        // at the next draw, unless the rendering info was made again meanwhile (each frame).
+        PS2Runtime::RecompiledFunction g_sunDraw = nullptr;
+        struct SunRow
+        {
+            uint32_t at = 0;
+            float row[3] = {};
+            float divided[3] = {};
+            bool pending = false;
+        } g_sunRow;
+        void sunRowRestore(uint8_t *rdram)
+        {
+            if (!g_sunRow.pending)
+                return;
+            g_sunRow.pending = false;
+            // (only while it still holds what was written: a rendering info made again since keeps its own)
+            uint8_t *p = getMemPtr(rdram, g_sunRow.at);
+            if (p && std::memcmp(p, g_sunRow.divided, sizeof(g_sunRow.divided)) == 0)
+                std::memcpy(p, g_sunRow.row, sizeof(g_sunRow.row));
+        }
+
+        void sunDrawHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t returnAddress = GPR_U32(ctx, 31);
+            sunRowRestore(rdram);
+            const float shape = wideK();
+            if (shape != 1.0f && !sunOld())
+            {
+                uint32_t info = 0;
+                if (const uint8_t *now = getMemPtr(rdram, kRenderingInfoNow))
+                    std::memcpy(&info, now, sizeof(info));
+                if (uint8_t *p = info ? getMemPtr(rdram, info + kRenderingInfoUp) : nullptr)
+                {
+                    g_sunRow.at = info + kRenderingInfoUp;
+                    std::memcpy(g_sunRow.row, p, sizeof(g_sunRow.row));
+                    g_sunRow.pending = true;
+                    for (int i = 0; i < 3; ++i)
+                        g_sunRow.divided[i] = g_sunRow.row[i] / shape;
+                    std::memcpy(p, g_sunRow.divided, sizeof(g_sunRow.divided));
+                }
+            }
+            g_sunDraw(rdram, ctx, runtime);
+            if (ctx->pc == returnAddress)
+                sunRowRestore(rdram);
+        }
+
         void displayInfoHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t returnAddress = GPR_U32(ctx, 31);
@@ -280,6 +344,7 @@ namespace ultrawide
         hook(runtime, kGetDisplayModeInfo, g_displayInfo, displayInfoHook);
         hook(runtime, kCameraSpaceFrustum, g_cameraFrustum, cameraFrustumHook);
         hook(runtime, kBuildFrustum, g_buildFrustum, buildFrustumHook);
+        hook(runtime, kSunDraw, g_sunDraw, sunDrawHook);
     }
 
     void setInHq(bool inHq) { g_inHq.store(inHq, std::memory_order_relaxed); }

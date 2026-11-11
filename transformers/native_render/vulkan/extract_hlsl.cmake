@@ -29,4 +29,12 @@ foreach(name kShader kProbeShader kCloudShader kBloomShader kToneShader kClarity
     string(APPEND out "    inline constexpr char ${name}[] = ${initializer};\n")
 endforeach()
 string(APPEND out "}\n")
+# (written only when it differs: a change to nr_d3d.cpp outside its shaders leaves the header - and so the SPIR-V bake and
+# the backend's files - as they were)
+if(EXISTS "${OUT}")
+    file(READ "${OUT}" old)
+    if(old STREQUAL out)
+        return()
+    endif()
+endif()
 file(WRITE "${OUT}" "${out}")

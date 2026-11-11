@@ -225,7 +225,20 @@ namespace nr
             if (backend().waitPicture(g_takenSerial.load(std::memory_order_relaxed),
                                  std::chrono::duration_cast<std::chrono::nanoseconds>(until.time_since_epoch()).count(), lastNs))
                 return 1;
-            if (lastNs == 0 || nowNs() - lastNs > 100000000ll)
+            // (How long without a picture counts as none coming: 100 ms, or three of the recent intervals between them where
+            // the renderer is slower than that - on a low-end PC in full screen it hands over one every 140-200 ms, and at
+            // 100 ms the window dropped back to its own redraws every other picture. A second at most. Unchanged at 30
+            // pictures a second and above: three intervals are then 100 ms or less. PR #18, TheBrousse.)
+            static int64_t seenNs = 0, intervalNs = 0;
+            if (lastNs != 0 && lastNs != seenNs)
+            {
+                const int64_t d = seenNs != 0 ? lastNs - seenNs : 0;
+                if (d > 0 && d < 1000000000ll)
+                    intervalNs = intervalNs == 0 ? d : (intervalNs * 7 + d) / 8;
+                seenNs = lastNs;
+            }
+            const int64_t noneAfterNs = std::clamp<int64_t>(3 * intervalNs, 100000000ll, 1000000000ll);
+            if (lastNs == 0 || nowNs() - lastNs > noneAfterNs)
             {
                 g_pacedLive.store(false, std::memory_order_relaxed);
                 return -1;
@@ -262,7 +275,11 @@ namespace nr
             }
             uint32_t w = 0, h = 0;
             static bool has3D = false;
+#if defined(__linux__)
             backend().setWindowSize(GetRenderWidth(), GetRenderHeight()); // (the picture drawn at the size shown in the window)
+#else
+            backend().setWindowLines(GetRenderHeight()); // (the picture drawn at the window's own lines)
+#endif
             // The shared textures, on the first frame (the window's GL context is current here).
             static int share = 0;
             if (share == 0)
@@ -286,11 +303,15 @@ namespace nr
             static int sharedShown = -1;
             static uint32_t sharedW = 0, sharedH = 0;
             d3d::SharedPicture sp;
-            const uint64_t serialBefore = serial;
-            bool fresh = false;
+#if defined(__linux__)
             const uint8_t *src = nullptr;
             uint32_t pitch = 0;
             int readback = -1;
+#else
+            static std::vector<uint32_t> pixels;
+#endif
+            const uint64_t serialBefore = serial;
+            bool fresh = false;
             if (share == 1 && backend().latestShared(sp, serial) && sp.index >= 0 && sp.index < d3d::kSharedPictures)
             {
                 fresh = true;
@@ -361,12 +382,13 @@ namespace nr
                 else
                     backend().sharedHeld(sharedShown); // (not imported: the one still shown stays held - latestShared marked the new one)
             }
+            // (TODO 284) The picture taken, as the shared path marks it: the paced hand-over (paceWait) waits for one
+            // newer than this. Unmarked, every wait found the CPU hand-over's picture "new" again - the window drew
+            // as fast as it could and counted each draw: the FPS counter read 600-1500 (TF_NATIVE_SHARE=0, Proton, the
+            // Intel fallback). (PR #18, TheBrousse: and marked fresh, so it is paced and logged as a shared picture is, below.)
+#if defined(__linux__)
             else if (share != 1 && backend().latestPicture(src, pitch, readback, serial, sp))
             {
-                // (TODO 284) The picture taken, as the shared path marks it: the paced hand-over (paceWait) waits for one
-                // newer than this. Unmarked, every wait found the CPU hand-over's picture "new" again - the window drew
-                // as fast as it could and counted each draw: the FPS counter read 600-1500 (TF_NATIVE_SHARE=0, Proton, the
-                // Intel fallback).
                 fresh = true;
                 g_takenSerial.store(serial, std::memory_order_relaxed);
                 w = sp.width;
@@ -397,6 +419,24 @@ namespace nr
                 // (The upload has its copy: the readback is the renderer's again.)
                 backend().pictureShown(readback);
             }
+#else
+            else if (share != 1 && backend().latestPicture(pixels, w, h, serial, has3D))
+            {
+                fresh = true;
+                g_takenSerial.store(serial, std::memory_order_relaxed);
+                if (shown.id == 0u || shown.width != static_cast<int>(w) || shown.height != static_cast<int>(h))
+                {
+                    if (shown.id != 0u)
+                        UnloadTexture(shown);
+                    Image image{pixels.data(), static_cast<int>(w), static_cast<int>(h), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                    shown = LoadTextureFromImage(image);
+                    SetTextureFilter(shown, TEXTURE_FILTER_BILINEAR);
+                    std::fprintf(stderr, "[native render] live picture: %ux%u\n", w, h);
+                }
+                else
+                    UpdateTexture(shown, pixels.data());
+            }
+#endif
             // (No new native picture for a while - a movie, a screen the native renderer does not draw
             // yet: the GS's is shown, not a stale one.)
             static auto lastNew = std::chrono::steady_clock::time_point{};
@@ -542,6 +582,7 @@ namespace nr
                 height = static_cast<int>(sharedH);
                 return true;
             }
+#if defined(__linux__)
             // (N9: the CPU hand-over too is shown as each picture is handed over, not at the next VBlank - the
             // window's pacer waits for the serial, and while no picture comes the 100 ms rule takes it back.)
             {
@@ -562,6 +603,23 @@ namespace nr
                 else if (pacingLogOn())
                     ++g_pacing.repeats;
             }
+#else
+            // The CPU hand-over's picture: paced and logged as a shared one (shown when it is handed over). (PR #18, TheBrousse)
+            {
+                const uint64_t skipped = serialBefore != 0u && serial > serialBefore + 1u ? serial - serialBefore - 1u : 0u;
+                if (fresh && g_pacerOn)
+                {
+                    g_pendingShown = true;
+                    g_pendingPicture = d3d::SharedPicture{};
+                    g_pendingSkipped = skipped;
+                }
+                else if (fresh)
+                    noteShown(d3d::SharedPicture{}, skipped);
+                else if (pacingLogOn())
+                    ++g_pacing.repeats;
+                g_pacedLive.store(true, std::memory_order_relaxed);
+            }
+#endif
             texture = shown.id;
             width = shown.width;
             height = shown.height;

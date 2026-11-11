@@ -131,6 +131,18 @@ Some bugs are in the original game on the PlayStation 2 too. This version fixes 
   "fall when dropped" instruction, so they stay in mid-air when the ship lets them go. Rare on the PS2 too. Here the
   passengers keep that instruction through the cutscene, so they land and fight.
 
+## Differences from the PS2
+
+A few things behave differently from the original on purpose. Each one can be turned off:
+
+- **Transforming fades the vehicle's engine out over 0.15 seconds.** On the PS2 the engine stops dead.
+  `TF_ENGINE_SOFT_STOP=0` in settings.ini gives the cut back.
+- **Textures stay smooth up close.** The PS2 shows hard, blocky texels there. F1 > Graphics > Smooth textures, Off.
+- **The game starts in its 16:9 mode.** The PS2 starts in 4:3. The game's own Options > Widescreen switches it off.
+- **A light touch of the stick walks, a third of the stick runs.** F1 > Controls > Stick response, Off.
+- **Moving the mouse up looks up,** whatever a save's Invert Y option says (that option is the controller's).
+  F1 > Controls > Invert mouse up / down.
+
 ## Requirements
 
 - Windows 10 or 11, 64-bit.

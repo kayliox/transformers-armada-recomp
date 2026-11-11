@@ -106,10 +106,14 @@ namespace nr
         virtual void preUpload(const std::shared_ptr<const Texture> &texture) = 0;
 
         // ---- pictures to the window (window thread) ----
+#if defined(__linux__)
         // `pixels` (RGBA8, `rowPitch` bytes a row) stays valid and unchanged - newer pictures are published elsewhere -
         // until pictureShown(index), which gives the picture back once its upload has returned.
         virtual bool latestPicture(const uint8_t *&pixels, uint32_t &rowPitch, int &index, uint64_t &serial, d3d::SharedPicture &meta) = 0;
         virtual void pictureShown(int index) = 0;
+#else
+        virtual bool latestPicture(std::vector<uint32_t> &pixels, uint32_t &width, uint32_t &height, uint64_t &serial, bool &has3D) = 0;
+#endif
         virtual void setSharedPictures(bool on) = 0;
         virtual bool latestShared(d3d::SharedPicture &out, uint64_t &serial) = 0;
         virtual void sharedHeld(int index) = 0;
@@ -117,7 +121,11 @@ namespace nr
         virtual int pacingMode() = 0;
 
         // ---- settings (any thread, from the next frame) ----
+#if defined(__linux__)
         virtual void setWindowSize(int width, int height) = 0;
+#else
+        virtual void setWindowLines(int lines) = 0;
+#endif
         virtual void setAntiAliasing(int mode) = 0;
         virtual void setSupersampling(bool on) = 0;
         virtual void setSpeedupsForced(int on) = 0;

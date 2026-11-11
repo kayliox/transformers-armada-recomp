@@ -111,7 +111,10 @@ function SetStatus([string]$State) {
         } catch {}
     }
     $st.updated = (Get-Date).ToUniversalTime().ToString("s")
-    [System.IO.File]::WriteAllText($StatusFile, ($st | ConvertTo-Json))  # (UTF-8 without a BOM: the game reads it)
+    # (UTF-8 without a BOM: the game reads it. Written beside it and put in place in one step: never left half-written)
+    $tmp = "$StatusFile.tmp"
+    [System.IO.File]::WriteAllText($tmp, ($st | ConvertTo-Json))
+    for ($i = 0; $i -lt 20; $i++) { try { Move-Item -LiteralPath $tmp -Destination $StatusFile -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 100 } }
 }
 # One maker at a time: the setup's, Play.bat's or the game's. hd_textures\.upscaling holds its process id while it runs;
 # Windows deletes the file when it ends (a closed window too).

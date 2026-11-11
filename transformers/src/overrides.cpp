@@ -3410,12 +3410,17 @@ namespace
         return !ladder;
     }
 
+#if defined(__linux__)
     // A cap between 30 and 60 (45, half a 90 Hz screen's refresh) decides the pictures as any
     // other: one a frame. The picture lock's 60 would pull the game up to it and the in-between
     // pictures would double the VBlanks; TF_MOMENTS=1 needs those fields, so they stay then, and
     // TF_IN_BETWEEN keeps its own choice.
+    bool g_capBelow60 = false; // (applyCapBelow60's picture rules are in force: the cap has not left 30-60 yet)
     void applyCapBelow60()
     {
+        if (g_capBelow60)
+            return; // (an unrelated settings change while the cap stays below 60: the state is already set)
+        g_capBelow60 = true;
         g_pictureLock = 0;
         g_lockShown.store(0);
         g_fastGameFallback = false;
@@ -3427,6 +3432,42 @@ namespace
         if (!(inBetween && *inBetween))
             g_inBetween = momentsOn;
     }
+
+    // The cap left 30-60 at a settings change: the pictures' start-up rules for the new rate, so the fast rate's
+    // fallback and its in-between pictures come back without a restart. TF_MOMENTS and TF_IN_BETWEEN keep the
+    // choices they set; it is not run for any settings change that leaves the cap in force.
+    void leaveCapBelow60()
+    {
+        if (!g_capBelow60)
+            return;
+        g_capBelow60 = false;
+        const char *lock = std::getenv("TF_FPS_LOCK");
+        const char *rateSet = std::getenv("TF_FRAME_RATE");
+        const char *gpuEnv = std::getenv("PS2X_GPU");
+        const char *nativeEnv = std::getenv("PS2X_GPU_NATIVE");
+        const bool nativePath = !(gpuEnv && *gpuEnv == '0') && !(nativeEnv && *nativeEnv == '0');
+        const bool refresh = (lock && *lock) ? std::strcmp(lock, "refresh") == 0 : !(rateSet && *rateSet) && nativePath;
+        const bool fastGame = (followRates() || (rateSet && *rateSet)) && g_frameRate > 60;
+        const char *moments = std::getenv("TF_MOMENTS");
+        g_moments.store(moments && *moments ? *moments != '0' : (refresh && !fastGame));
+        g_momentsShown.store(g_moments.load());
+        const char *inBetween = std::getenv("TF_IN_BETWEEN");
+        if (!(inBetween && *inBetween))
+        {
+            g_fastGameFallback = fastGame && g_frameRate / 2 >= 60;
+            g_inBetween = fastGame ? g_fastGameFallback : true;
+        }
+        // (the pictures' lock the start-up gives this rate: TF_FPS_LOCK=60/120 or the default refresh locks them at
+        // 60, a fast rate leaves them out - entering 30-60 cleared it, so a 60-45-60 change would otherwise run the
+        // in-between pictures instead of the lock the start-up had)
+        const int pictures = refresh ? 120 : (lock && *lock ? std::atoi(lock) : (rateSet && *rateSet ? 0 : 120));
+        if (!fastGame && g_frameRate > 30 && (pictures == 60 || pictures == 120))
+        {
+            g_pictureLock = pictures;
+            g_lockShown.store(g_pictureLock);
+        }
+    }
+#endif
 
     std::atomic<bool> g_vrrSteady{false};
     // (TODO 35: the time the level spent at each rate - `[tf] frame rates: ...` every 30 s and when the ladder starts again)
@@ -4524,10 +4565,18 @@ namespace
             return;
         // (TODO 161 a: the cap caps pictures; TODO 217: with the cap deciding the rates, a picture lock no longer means 60)
         g_frameRate = g_pictureLock != 0 && !followRates() ? 60 : g_logicRate.load() > 0 ? g_logicRate.load() : g_rateSetting;
-        // (The cap between 30 and 60 chosen live sets the pictures as it does at start-up: no picture lock, no in-between pictures
-        // unless the environment asks for them.)
-        if (cap >= 0 && followRates() && g_frameRate > 30 && g_frameRate < 60)
-            applyCapBelow60();
+#if defined(__linux__)
+        // (The cap between 30 and 60 chosen live sets the pictures as it does at start-up: no picture lock, no in-between
+        // pictures unless the environment asks for them. Leaving it puts the start-up's fast-rate fallback and in-between
+        // pictures back; any other settings change leaves that state alone.)
+        if (cap >= 0)
+        {
+            if (followRates() && g_frameRate > 30 && g_frameRate < 60)
+                applyCapBelow60();
+            else
+                leaveCapBelow60();
+        }
+#endif
         std::fprintf(stderr, "[tf] settings: %d frames a second, %s\n", g_frameRate,
                      g_moments.load() ? "pictures at the screen's refresh"
                                       : (g_pictureLock != 0 ? (g_pictureLock == 120 ? "120 pictures" : "60 pictures") : "unlocked"));
@@ -7685,8 +7734,12 @@ namespace
             c.help = "The most pictures a second the game draws. It draws as many as your PC can, up to this. With VSync on, also "
                      "no more than the screen's refresh; with VSync off, Unlimited means as many as your PC can draw. The game "
                      "itself always moves at its true speed, whatever is drawn.";
+#if defined(__linux__)
             // (45: half a 90 Hz handheld's refresh - the Steam Deck OLED's battery choice, each picture two refreshes)
             c.choices = {{"30", "30"}, {"45", "45"}, {"60", "60"}, {"90", "90"}, {"120", "120"}, {"144", "144"}, {"165", "165"}, {"240", "240"}, {"0", "Unlimited"}};
+#else
+            c.choices = {{"30", "30"}, {"60", "60"}, {"90", "90"}, {"120", "120"}, {"144", "144"}, {"165", "165"}, {"240", "240"}, {"0", "Unlimited"}};
+#endif
             c.defaultValue = "240";
             c.available = []() { return followRates(); };
             c.unavailableHelp = "TF_RATE_LADDER=1 is set: the frame-rate ladder decides the rates (Game frame rate, Frame pacing).";
@@ -9315,12 +9368,14 @@ namespace
             // settings.ini from an older version (TF_FPS_LOCK=60 / 120 / refresh, the default "refresh" too) no longer
             // pulls the levels and the HQ down to 60 (a player at a 165 cap stayed at 60).
             const bool fastGame = (followRates() || (rateSet && *rateSet)) && g_frameRate > 60;
+#if defined(__linux__)
             // (A cap between 30 and 60 - 45, half a 90 Hz handheld's refresh - decides the pictures too: the picture
             // lock would pull it up to 60 and the in-between pictures would double its VBlanks.)
             const bool capBelow60 = followRates() && g_frameRate > 30 && g_frameRate < 60;
             if (capBelow60)
                 applyCapBelow60();
             else
+#endif
             {
                 g_moments.store(momentsEnv && *momentsEnv ? *momentsEnv != '0' : (refresh && !fastGame));
                 g_momentsShown.store(g_moments.load());
@@ -9332,7 +9387,11 @@ namespace
                     g_inBetween = g_fastGameFallback;
                 }
             }
+#if defined(__linux__)
             if ((fastGame || capBelow60) && (pictures == 60 || pictures == 120))
+#else
+            if (fastGame && (pictures == 60 || pictures == 120))
+#endif
                 std::fprintf(stderr, "[tf] %s%d: levels at %d frames, a picture each (the picture lock TF_FPS_LOCK left out)\n",
                              rateSet && *rateSet ? "TF_FRAME_RATE=" : "the frame rate cap ", g_frameRate, g_frameRate);
             else if (g_frameRate > 30 && (pictures == 60 || pictures == 120))

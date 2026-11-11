@@ -1,6 +1,6 @@
-// nr_picture_mailbox.h - the CPU hand-over's mailbox (TF_VK_ALONE), in a header of its own so
+// nr_picture_mailbox.h - Linux's CPU hand-over mailbox (TF_VK_ALONE), in a header of its own so
 // tests/vulkan_picture_tests.cpp can exercise the backend's actual lease without the Vulkan SDK; nr_vulkan.cpp is its
-// production user.
+// production user (the Windows build keeps fe11's vector publication in nr_vulkan.cpp).
 #pragma once
 
 #include <chrono>

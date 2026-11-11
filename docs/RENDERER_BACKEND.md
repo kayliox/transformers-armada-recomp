@@ -43,10 +43,10 @@ and `gfx::device()` are defined there; the Direct3D 12 backend's own are `d3d12B
 | `waitForFrameSlot()` | render thread | Wait until the next frame slot is free; returns the ms waited. |
 | `render(frame, shotPath)` | render thread | Draw the frame (section 3). With `shotPath`, also save the picture as a BMP. |
 | `preUpload(texture)` | any | A game texture made ahead, handed to the uploader at the next frame. |
-| `latestPicture(pixels, rowPitch, index, serial, meta)`, `pictureShown(index)` | window thread | The next CPU picture, in the order the pictures were handed over: the hand-over's mapped read-back itself, held (not read back into again) until the window calls `pictureShown` after its upload. |
+| `latestPicture(pixels, rowPitch, index, serial, meta)`, `pictureShown(index)` | window thread | Linux only: the next CPU picture, in the order the pictures were handed over: the hand-over's mapped read-back itself, held (not read back into again) until the window calls `pictureShown` after its upload. Windows keeps 0.6's `latestPicture(pixels, width, height, serial, has3D)`, which copies the newest picture into a vector. |
 | `setSharedPictures(on)`, `latestShared(picture, serial)`, `sharedHeld(index)` | window thread | The newest picture as a texture the window imports, and which one the window still holds. |
 | `waitPicture(serial, untilNs, lastNs)`, `pacingMode()` | window thread | The pacer: wait for the next picture by its due time. |
-| `setWindowSize`, `setAntiAliasing`, `setSupersampling`, `setSpeedupsForced` | any | Settings, used from the next frame. |
+| `setWindowSize(w, h)` (Linux) / `setWindowLines(h)` (Windows: what 0.6 and earlier use) | any | Settings, used from the next frame. |
 | `largeImageCap`, `largeImageBudget`, `largeImageBytes`, `adapterMemoryMB`, `qualityPreset` | any | The HD textures' video-memory budget and the quality preset. |
 | `gpuPictureMs`, `gpuExtraMs`, `cpuPictureMs`, `replayWaitMs`, `slotWaitMs`, `pacerDelayMs` | render or window thread | Timing figures for the frame pacer and the stats lines. |
 
@@ -298,10 +298,11 @@ The native picture reaches the window in one of two ways, chosen at start:
   `kSharedPictures` (24) shareable `RGBA8` textures with NT handles. The window imports them into OpenGL with
   `GL_EXT_memory_object_win32` (`nr_glshare.cpp`) and draws the one handed over (`latestShared`). The backend never draws
   into a texture the window holds (`sharedHeld`) or the newest one handed over.
-- **CPU pixels**: the picture is read back and the window uploads it straight from the mapped read-back
+- **CPU pixels**: the picture is read back and the window uploads it: on Linux straight from the mapped read-back
   (`latestPicture`, then `pictureShown`), one hand-over of four in turn so a newer picture never replaces one
-  waiting; it is presented as it is handed over, paced like the shared textures. This is the path on Linux, the
-  fallback when the import fails (for example under Wine/Proton), and with `TF_NATIVE_SHARE=0`.
+  waiting, presented as it is handed over, paced like the shared textures; on Windows as 0.6 does, the newest
+  picture copied into a vector. This is the path on Linux, the fallback when the import fails (for example under
+  Wine/Proton), and with `TF_NATIVE_SHARE=0`.
 
 The pacer (`pace::` in `nr_d3d.cpp`, `waitPicture` on the window's side) hands each picture over at its due time
 (`PictureOut::dueNs`) plus a delay that follows the GPU's times, so pictures reach the screen evenly.
@@ -356,11 +357,15 @@ and `nr_glshare.cpp`, and calls `nr::d3d` directly. Changing it is part of the S
   when switching between a build with and without it). Off (`-DTF_VULKAN=OFF`, the default) builds Direct3D 12 alone and
   fetches nothing.
   Its draws also fetch the Vulkan Memory Allocator (`v3.4.0`, its header) and, on Windows, DXC's release (`v1.9.2609`,
-  checked by its SHA-256): its `dxcompiler.dll` is copied beside the game after each build and loaded at start, and the
-  backend compiles the same HLSL to SPIR-V there, as `D3DCompile` does for Direct3D 12 (the Windows SDK's DXC has no
-  SPIR-V). Until the HLSL moves into files of its own, the build takes it from `nr_d3d.cpp`'s string literals into a
-  generated header (`native_render/vulkan/extract_hlsl.cmake`, run again when `nr_d3d.cpp` changes), so both backends
-  draw with one source. For the same pixels as `D3DCompile`'s, DXC is given `-HV 2018` (the language as D3DCompile
+  checked by its SHA-256; the Windows SDK's DXC has no SPIR-V), which only the build uses: a small program of the build's
+  own (`native_render/vulkan/bake_spirv.cpp`, target `tf_vulkan_bake`) loads its `dxcompiler.dll` and compiles every
+  shader the backend makes, the pixel shader's 64 variants included, into a table of SPIR-V words built into the game
+  (`nr_spirv_baked.cpp` in the build folder, read through `nr_vulkan_shaders.h`). CMake runs it again whenever the HLSL
+  changes, so every build path (build.ps1, `cmake --build`, the IDE) has it, and the game needs no shader compiler and no
+  `dxcompiler.dll`. Each shader is found by a key over DXC's switches, the HLSL, entry point, profile and defines, so a
+  shader the bake's list lacks is reported at start rather than taken stale. Until the HLSL moves into files of its own,
+  the build takes it from `nr_d3d.cpp`'s string literals into a generated header (`native_render/vulkan/extract_hlsl.cmake`,
+  looked at again when `nr_d3d.cpp` changes and written only when its shaders did), so both backends draw with one source. For the same pixels as `D3DCompile`'s, DXC is given `-HV 2018` (the language as D3DCompile
   reads it), `ddx`/`ddy` as `ddx_coarse`/`ddy_coarse` (D3DCompile's meaning of them), and Vulkan 1.3 as its target, so
   that `discard` demotes the pixel to a helper as Direct3D's does rather than ending it (`OpKill` left its 2 x 2
   neighbours' derivatives - their texture levels - undefined).

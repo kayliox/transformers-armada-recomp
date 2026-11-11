@@ -43,14 +43,22 @@ namespace nr
             double waitForFrameSlot() override { return 0.0; }
             void render(const Frame &, const std::string &) override {}
             void preUpload(const std::shared_ptr<const Texture> &) override {}
+#if defined(__linux__)
             bool latestPicture(const uint8_t *&, uint32_t &, int &, uint64_t &, d3d::SharedPicture &) override { return false; }
             void pictureShown(int) override {}
+#else
+            bool latestPicture(std::vector<uint32_t> &, uint32_t &, uint32_t &, uint64_t &, bool &) override { return false; }
+#endif
             void setSharedPictures(bool) override {}
             bool latestShared(d3d::SharedPicture &, uint64_t &) override { return false; }
             void sharedHeld(int) override {}
             bool waitPicture(uint64_t, int64_t, int64_t &) override { return false; }
             int pacingMode() override { return 0; }
+#if defined(__linux__)
             void setWindowSize(int, int) override {}
+#else
+            void setWindowLines(int) override {}
+#endif
             void setAntiAliasing(int) override {}
             void setSupersampling(bool) override {}
             void setSpeedupsForced(int) override {}

@@ -35,6 +35,9 @@ import time
 
 from PIL import Image, ImageStat
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from jsonfile import read_json, write_json  # noqa: E402  (the tools' JSON files read and written safely)
+
 # The level's textures (geometry, forest, rocks, sky, the eco system's shared ones). Characters measured within
 # 1.5% (left out: their HD images were checked one by one, TODO 57); the UI holds redrawn art on purpose.
 DEFAULT_PREFIXES = ["TFA/LEVELS/", "TFA2/ECOTEXTURES/", "TFA2/SKY/"]
@@ -191,20 +194,15 @@ def match_file(rel, path, native, backup, ledger, prefixes=None, threshold=0.05,
 
 
 def load_ledger(backup):
-    path = os.path.join(backup, "colour_gains.json")
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as fp:
-            return json.load(fp)
-    return {}
+    """The ledger; empty when it is missing - or empty or damaged (a maker stopped while it wrote it: a player's
+    update then stopped here every time). Without it every image is matched again from its original in the backup
+    folder (match_file: an image with a backup and no entry is one of ours), never a gain on a gain."""
+    return read_json(os.path.join(backup, "colour_gains.json"), {}, "the colour-match ledger (colour_gains.json)")
 
 
 def save_ledger(backup, ledger):
     os.makedirs(backup, exist_ok=True)
-    path = os.path.join(backup, "colour_gains.json")
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fp:
-        json.dump(ledger, fp, indent=0, sort_keys=True)
-    os.replace(tmp, path)
+    write_json(os.path.join(backup, "colour_gains.json"), ledger, indent=0, sort_keys=True)
 
 
 def main():
@@ -247,11 +245,7 @@ def main():
     # The ledger (in the backup folder): per corrected image the gains it got and the file it became (size, mtime). An
     # image that is still that file is matched again from its original (the backup) - so a run again gives the same
     # result, never a gain on a gain; an image the upscaler made again since (another file) is a new original.
-    ledger_path = os.path.join(backup, "colour_gains.json")
-    ledger = {}
-    if os.path.exists(ledger_path):
-        with open(ledger_path, encoding="utf-8") as fp:
-            ledger = json.load(fp)
+    ledger = load_ledger(backup)
 
     rows, per_group = [], {}
     written = 0
@@ -280,9 +274,7 @@ def main():
                 written += 1
             rows.append(row)
     if not a.dry_run:
-        os.makedirs(backup, exist_ok=True)
-        with open(ledger_path, "w", encoding="utf-8") as fp:
-            json.dump(ledger, fp, indent=0, sort_keys=True)
+        save_ledger(backup, ledger)
 
     def med(v):
         v = sorted(v)
@@ -295,10 +287,9 @@ def main():
               f"median {med(gs['before']):+.1%} before, {med(gs['after']):+.1%} after")
     print(f"match_colour: {written} images {'to write' if a.dry_run else 'written'}")
     if a.report:
-        with open(a.report, "w", encoding="utf-8") as fp:
-            json.dump({"threshold": a.threshold, "groups": {k: {"images": v["images"], "corrected": v["corrected"], "written": v["written"],
-                       "median_before": med(v["before"]), "median_after": med(v["after"])} for k, v in per_group.items()},
-                       "images": rows}, fp, indent=1)
+        write_json(a.report, {"threshold": a.threshold, "groups": {k: {"images": v["images"], "corrected": v["corrected"], "written": v["written"],
+                   "median_before": med(v["before"]), "median_after": med(v["after"])} for k, v in per_group.items()},
+                   "images": rows}, indent=1)
     return 0
 
 

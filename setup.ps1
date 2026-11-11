@@ -54,7 +54,10 @@ function Fail($msg) { Write-Host "`nsetup: $msg" -ForegroundColor Red; exit 1 }
 if ($Hooks) { . $Hooks }
 
 # --- the remembered choices ---------------------------------------------------------------------
-$state = if (Test-Path $StateFile) { Get-Content $StateFile -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
+# (an empty or damaged .setup.json - a write cut off - is taken as missing: give the disc path again if it asks)
+$state = $null
+if (Test-Path $StateFile) { try { $state = Get-Content $StateFile -Raw | ConvertFrom-Json } catch {} }
+if (-not $state) { $state = [pscustomobject]@{} }
 if (-not $state.PSObject.Properties["Iso"]) { $state | Add-Member Iso "" }
 if ($Iso) {
     if (-not (Test-Path -LiteralPath $Iso -PathType Leaf)) { Fail "no such file: $Iso" }
@@ -87,31 +90,29 @@ $missing = @(Get-MissingPrerequisites)
 if ($missing.Count -gt 0) {
     $how = Get-PrerequisiteInstall
     if (-not $InstallPrerequisites) {
-        $lines = $missing | ForEach-Object { "  - $($how[$_][0]):  $($how[$_][1])" }
+        $manual = Get-PrerequisiteManualSteps
+        $lines = $missing | ForEach-Object { "  - $($how[$_][0]):  $($how[$_][1])`n    or by hand: $($manual[$_])" }
         Fail ("missing:`n" + ($lines -join "`n") + "`nInstall them (or run setup.ps1 -InstallPrerequisites), open a NEW PowerShell, run setup.ps1 again.")
     }
-    foreach ($m in $missing) {
-        # Visual Studio already there without its C++ tools: winget would add nothing ("already installed"),
-        # so its own installer adds them to that install instead (issue #2).
-        $noCpp = if ($m -eq "vs") { @(Get-VsWithoutCpp) } else { @() }
-        if ($noCpp.Count -gt 0) {
-            Step "Adding the C++ tools and the Windows SDK to $($noCpp[0]) (Windows asks for permission)"
-            $code = Install-VsCppTools $noCpp[0]
-            Write-Host "Visual Studio's installer finished (exit code $code)."
-            continue
+    # Each one installed (winget, or Visual Studio's own installer for an install without its C++ tools) and checked
+    # again at once; what is still missing comes back with the reason and the exact steps to take by hand.
+    Write-PrerequisiteEvidence "missing: $($missing -join ', ')"
+    $result = Install-MissingPrerequisites $missing
+    if ($result.Still.Count -gt 0) {
+        Write-PrerequisiteEvidence "after the installs"
+        $names = ($result.Still | ForEach-Object { $how[$_][0] }) -join ", "
+        $text = "these tools are still missing: $names`n" + ($result.Report -join "`n")
+        if ($result.Restart) { $text += "`nRestart the PC, then run the setup again." }
+        elseif ($result.Retry) {
+            # ("prerequisites installed" is the phrase the setup program (tfa-setup.exe) looks for to run this script once
+            # more with a fresh PATH - only when the installers said they succeeded)
+            $text = "prerequisites installed, but not found yet: $($result.Still -join ', ')`n" + ($result.Report -join "`n") +
+                "`nIf the setup stops here again: restart the PC and run the setup again."
+        } else {
+            $text += "`nThen run the setup again: finished steps are kept."
         }
-        Step "Installing $($how[$m][0])"
-        Invoke-Native { & cmd /c $how[$m][1] } | Out-Null   # (its exit code: the check after it decides)
-    }
-    # (what was just installed, found without a new PowerShell)
-    Update-PathFromRegistry
-    $still = @(Get-MissingPrerequisites)
-    if ($still.Count -gt 0) {
-        $hint = ""
-        if ($still -contains "vs") {
-            $hint = "`nIf it keeps saying vs: open the Visual Studio Installer from the Start menu, press Modify on your Visual Studio (or Build Tools), tick `"Desktop development with C++`" (with a Windows 10 or 11 SDK on the right) and install it (about 7 GB of free space needed). The installer's logs are the dd_*.log files in $env:TEMP."
-        }
-        Fail ("prerequisites installed, but not found yet: $($still -join ', '). Open a NEW PowerShell (or restart the PC after the Visual Studio install) and run setup.ps1 again.$hint")
+        if ($result.Still -contains "vs") { $text += "`n(Visual Studio's installer keeps its logs as dd_*.log files in $env:TEMP.)" }
+        Fail $text
     }
 }
 $Python = Find-Python
@@ -142,8 +143,15 @@ if (-not (Test-Path (Join-Path $Port "PS2Recomp\CMakeLists.txt"))) {
 Step "Building the game (build.ps1)"
 $buildArgs = @{}
 if (-not $haveGame) { $buildArgs.Iso = $state.Iso }
-& (Join-Path $Port "build.ps1") @buildArgs
-if (-not $?) { Fail "the build failed (see above)" }
+try {
+    & (Join-Path $Port "build.ps1") @buildArgs
+    if (-not $?) { Fail "the build failed (see above)" }
+} catch {
+    # (a program built on this PC taken by an antivirus: build.ps1 says so in words a player can act on)
+    $m = [regex]::Match("$_", "Your antivirus blocked (\S+?\.exe)\.")
+    if ($m.Success) { Write-AntivirusEvidence $m.Groups[1].Value $Port; Fail "$_" }
+    throw
+}
 
 # --- 3. the HD textures ----------------------------------------------------------------------------
 if ($SkipHdTextures) {

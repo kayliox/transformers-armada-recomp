@@ -73,12 +73,12 @@ namespace graphics_driver
                 const bool test = std::getenv("TF_DRIVER_WARN_TEST") && *std::getenv("TF_DRIVER_WARN_TEST") == '1';
                 if (test || (out.vendor == 0x8086u && out.known && out.version[0] < 31u))
                 {
-                    char text[512];
+                    char text[768];
                     std::snprintf(text, sizeof(text),
                                   "Your graphics driver is very old (%s, version %u.%u.%u.%u). Intel's drivers from before 2023 "
-                                  "draw this game wrong: menus as outlines, coloured boxes around the HUD, noise. Update it with "
-                                  "Intel's Driver & Support Assistant: " INTEL_DSA " - Windows' Device Manager may say the best "
-                                  "driver is already installed even when a much newer one exists.",
+                                  "draw this game wrong: menus as outlines, garbled pictures and noise. Update it with Intel's "
+                                  "Driver & Support Assistant (Windows' Device Manager may say the best driver is already "
+                                  "installed even when a much newer one exists):\n" INTEL_DSA,
                                   out.name.empty() ? "unknown card" : out.name.c_str(), out.version[0], out.version[1], out.version[2],
                                   out.version[3]);
                     out.warning = text;
@@ -172,7 +172,20 @@ namespace graphics_driver
         }
         // A plain Windows message box: Windows draws it, not the graphics driver, so it reads clean even where the
         // driver breaks the game's own picture and its F1 menu (TODO 290: the title as outlines, F1 garbled).
-        const std::string text = i.warning + "\n\nOpen Intel's Driver & Support Assistant page now?";
+        // (A game started with its window hidden - a launcher's or a test's STARTUPINFO SW_HIDE - would have the box hidden
+        // too: Windows applies that to the process's first ShowWindow. A throwaway window takes it first; tested on the
+        // T480s, where the box otherwise never showed and the game waited for it.)
+        if (HWND dummy = CreateWindowExA(0, "STATIC", "", 0, 0, 0, 0, 0, nullptr, nullptr, GetModuleHandleA(nullptr), nullptr))
+        {
+            ShowWindow(dummy, SW_HIDE);
+            DestroyWindow(dummy);
+        }
+        // (The link without "https://www.": the box is narrow and splits a long word mid-way - seen on the Vostro,
+        // "detect.ht" / "ml". Yes opens it anyway.)
+        std::string text = i.warning;
+        if (const size_t at = text.find("https://www."); at != std::string::npos)
+            text.erase(at, 12);
+        text += "\n\nOpen Intel's Driver & Support Assistant page now?";
         wchar_t wtext[2048] = {};
         MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wtext, 2047);
         if (MessageBoxW(nullptr, wtext, L"Transformers - update your graphics driver",

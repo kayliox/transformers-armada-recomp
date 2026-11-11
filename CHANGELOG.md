@@ -33,6 +33,9 @@
 - Linux: the VSync setting (F1 > Graphics) works there too (Off: the pictures go to the screen at once).
 
 **Fixed**
+- Windows: the port's Linux-only choices (the 45 limit, the picture lock for 31-59 limits, the paced four-picture
+  hand-over and the picture size fitted to the window's width) no longer apply there: Windows keeps 0.6's behavior.
+- Linux: choosing 45 and then 240 no longer leaves the fast-rate fallback off until a restart.
 - Linux: public builds link the 0.6.0 ultrawide hooks without the private decompilation bridge.
 - The first level (Amazon Basin) no longer stops with "Generic fatal error" on Linux: a C library function the game
   uses behaved differently there.
@@ -64,6 +67,55 @@
 - Linux and Steam Deck: "Finishing HD textures" no longer stays on screen after the HD set is finished, including
   sets made before this fix, and "HD textures ready" no longer comes back at every start once the set is finished.
   `make_hd_textures.sh` checks the set's images once, as the Windows maker does (0.4.7's checks too).
+
+## 0.6.4
+
+**Changed**
+- Sounds now fade out with the PS2 sound chip's own curves instead of straight lines, so menu clicks, impacts,
+  engines and the dropship end as they do on the console.
+- More of the game runs from the decompiled code (built on the decomp's latest version).
+
+**Fixed**
+- On ultrawide screens the sun's glare is round again instead of a tall oval.
+
+## 0.6.3
+
+**Fixed**
+- Updates no longer stop at the HD textures with "upscale_textures.py failed with exit code 1" when one of their
+  record files was left empty (for example after the window was closed or the graphics driver restarted while they
+  were being made): the file is made again. Those files are now always written whole or not at all.
+
+## 0.6.2
+
+**New**
+- On built-in graphics, F1 > Graphics > "I have HD textures (PCSX2 pack)" uses a PCSX2 texture pack you already
+  have: pick its folder, restart, and the game uses its textures. The pack is used where it is, not copied.
+- F1 > Controls > Mouse in the game: turn it off to play with a controller without the mouse moving the camera or
+  pressing buttons.
+
+**Changed**
+- When you transform, the vehicle's engine now fades out over a moment instead of stopping dead (on the PS2 it
+  cuts off). Set TF_ENGINE_SOFT_STOP=0 in settings.ini for the original cut. The README now lists what differs from
+  the PS2 on purpose, and how to turn each one off.
+- The FPS counter on built-in graphics now shows the real number of new pictures, so it can read lower than before.
+  The game itself is not slower: it now shows more frames.
+- The old-driver warning reads more clearly, and its link fits on one line.
+
+**Fixed**
+- Built-in graphics (Intel and others): no more coloured boxes around HUD pieces and see-through effects, and no
+  more flicker on effects such as an opening warp gate, while textures load.
+- Built-in graphics: the window no longer redraws the same picture over and over. In full screen on slow laptops
+  the game runs faster (about 16% more frames on a ThinkPad T480s). Thanks to TheBrousse.
+- The setup no longer stops with "prerequisites installed, but not found yet". It installs each tool and checks it
+  at once, it no longer trusts Windows' "already installed" for Python or the Visual Studio Build Tools, it says
+  clearly when Windows asked for permission and nobody answered, and it says which file your antivirus blocked.
+  Its log now records what it found, so problems can be solved quickly.
+
+## 0.6.1
+
+**Fixed**
+- 0.6.0 could not be installed with the European disc: the setup stopped while building the game. Thanks to
+  TheBrousse for the fix.
 
 ## 0.6.0
 

@@ -514,13 +514,12 @@ impl Job {
             let _ = tx.send(Msg::Detail(STEP_TOOLS, "installing Git (winget)".into()));
             // (winget's exit code does not decide: "already installed, no newer version" is an error
             // code too - a player's setup stopped on it. The check after it decides.)
-            let r = self.exec("winget", &["install", "--id", "Git.Git", "-e", "--accept-package-agreements", "--accept-source-agreements"], None, &path_env, tx, STEP_TOOLS, &log);
+            let r = self.exec("winget", &["install", "--id", "Git.Git", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements",
+                "--disable-interactivity"], None, &path_env, tx, STEP_TOOLS, &log);
             path_env = with_git_dir(&fresh_path(&path_env));
             if !has(&path_env, "git") {
                 return Err(match r {
-                    Err(e) => format!("{e}
-
-Git could not be installed or found. Install Git from git-scm.com and run the setup again."),
+                    Err(e) => format!("{e}\n\n{}", git_failure_text(&e)),
                     Ok(()) => "Git was installed but is not found: restart the setup".into(),
                 });
             }
@@ -765,8 +764,11 @@ fn follow_log(log_path: &Path, start_at: u64, step: usize, tx: &Sender<Msg>, tai
         } else {
             // (TODO 290) A step quiet for a while after an installer started: Windows' permission prompt is most
             // likely waiting, perhaps only as a flashing button in the taskbar.
-            let last = tail.lock().unwrap().last().map(|l| l.to_ascii_lowercase()).unwrap_or_default();
-            if !hinted && quiet_since.elapsed().as_secs() >= 20 && (last.contains("starting package install") || last.contains("winget install")) {
+            // (the last few lines: winget ends with "The installer will request to run as administrator. Expect a
+            // prompt." after "Starting package install..." - on the ThinkPad test only the last line was looked at and
+            // the hint never came, while Windows' question sat unanswered until it closed itself)
+            let recent = tail.lock().unwrap().iter().rev().take(3).map(|l| l.to_ascii_lowercase()).collect::<Vec<_>>().join("\n");
+            if !hinted && quiet_since.elapsed().as_secs() >= 20 && waiting_for_permission(&recent) {
                 hinted = true;
                 let _ = tx.send(Msg::Detail(current, "Windows may be asking for permission to install: if a shield button flashes in the taskbar, click it and choose Yes".into()));
             }
@@ -1312,6 +1314,33 @@ fn write_bmp(path: &str, image: &egui::ColorImage) -> std::io::Result<()> {
         out.resize(start + row, 0);
     }
     std::fs::write(path, out)
+}
+
+/// Whether a step's last lines say an installer is waiting for Windows' permission (winget's own words).
+fn waiting_for_permission(recent_lower: &str) -> bool {
+    recent_lower.contains("starting package install")
+        || recent_lower.contains("expect a prompt")
+        || recent_lower.contains("request to run as administrator")
+        || recent_lower.contains("winget install")
+        || recent_lower.contains("asks for permission") // (setup.ps1's own steps: the Build Tools, Visual Studio's installer)
+}
+
+/// What to do when Git could not be installed, from what winget said (`e`: its last lines, or why it did not start).
+fn git_failure_text(e: &str) -> String {
+    let lower = e.to_ascii_lowercase();
+    let by_hand = "Or install Git by hand: https://git-scm.com/download/win (keep the default choices), then run the setup again.";
+    // (exit code 2: Git's installer when Windows' question was declined or closed itself unanswered - the ThinkPad test)
+    let cancelled = lower.contains("you cancelled the installation")
+        || lower.lines().any(|l| l.trim_end().ends_with("exit code: 2") || l.trim_end().ends_with("exit code: 1223") || l.trim_end().ends_with("exit code: 1602"));
+    if cancelled {
+        format!("Windows asked for permission to install Git and nobody answered (or No was chosen). The question may show only as \
+                 a flashing shield button in the taskbar, and it closes by itself after about 2 minutes. Run the setup again and click Yes.\n{by_hand}")
+    } else if lower.contains("winget could not be started") {
+        format!("winget (Windows' package manager) is not on this PC, so the setup cannot install the tools for you. Install or \
+                 update 'App Installer' from the Microsoft Store (https://apps.microsoft.com/detail/9NBLGGH4NNS1) and run the setup again.\n{by_hand}")
+    } else {
+        format!("Git could not be installed or found.\n{by_hand}")
+    }
 }
 
 fn has(path_env: &str, exe: &str) -> bool {
@@ -1903,5 +1932,21 @@ mod path_tests {
             .output()
             .expect("powershell starts without PATH");
         assert!(String::from_utf8_lossy(&out.stdout).to_lowercase().contains("cmd.exe"));
+    }
+
+    #[test]
+    fn permission_wait_seen_in_the_last_lines() {
+        let winget = "starting package install...\nthe installer will request to run as administrator. expect a prompt.";
+        assert!(waiting_for_permission(winget));
+        assert!(!waiting_for_permission("downloading https://example.org/x.exe"));
+    }
+
+    #[test]
+    fn git_failures_say_what_to_do() {
+        assert!(git_failure_text("You cancelled the installation.\nInstaller failed with exit code: 2").contains("click Yes"));
+        assert!(git_failure_text("Installer failed with exit code: 2").contains("nobody answered"));
+        assert!(!git_failure_text("Installer failed with exit code: 21").contains("nobody answered"));
+        assert!(git_failure_text("winget could not be started: program not found").contains("App Installer"));
+        assert!(git_failure_text("something else").contains("https://git-scm.com/download/win"));
     }
 }

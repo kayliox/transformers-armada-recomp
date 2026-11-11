@@ -12,6 +12,18 @@ release does not work yet. Make sure the file is a full `.iso` image of the disc
 Windows only sees newly installed tools in new windows. Close the setup (or PowerShell), open it again and run
 the setup again. Finished steps are kept.
 
+### My antivirus removed tfa-setup.exe or a file the setup built
+
+Some antivirus programs with strict settings (seen with Trend Micro) flag `tfa-setup.exe` or the helper programs the
+setup builds on your PC, such as `ps2analyzer.exe`: they are new, unsigned programs it has not seen before. This is a
+false alarm. Don't turn the antivirus off. Instead:
+
+1. Add the game's install folder (for example `C:\Users\<your name>\Games\TFA`) as an exclusion (an "allowed" or
+   "exception" folder) in your antivirus.
+2. Restore the removed file from the antivirus's quarantine, or download `tfa-setup.exe` again from the releases page.
+   Only restore a `tfa-setup.exe` you downloaded from this project's GitHub releases.
+3. Run the setup again. Finished steps are kept.
+
 ### The build fails
 
 - Run the setup again. A network hiccup during a download is the most common cause.

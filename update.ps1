@@ -224,7 +224,10 @@ if ($WaitForPid -gt 0) {
 }
 
 if (-not (Test-Path $StateFile)) { Fail "run setup.ps1 first (this copy was never set up)" }
-$state = Get-Content $StateFile -Raw | ConvertFrom-Json
+# (an empty or damaged .setup.json - a write cut off - is a warning, not a stop: only its disc path and build mark are read)
+$state = $null
+try { $state = Get-Content $StateFile -Raw | ConvertFrom-Json } catch {}
+if (-not $state) { Write-Host "warning: .setup.json is empty or damaged: it is written again at the end" -ForegroundColor Yellow; $state = [pscustomobject]@{} }
 if (-not $Binaries -and $state.PSObject.Properties["Binaries"]) { $Binaries = $state.Binaries }
 $Python = Find-Python
 if (-not $Python) { Fail "Python 3.11+ not found: run setup.ps1 again" }

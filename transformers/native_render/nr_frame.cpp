@@ -264,6 +264,7 @@ namespace nr::frame
         GpuTexture g_standIn;           // (slot 0: the white texture - its colour in g_standInColour)
         float g_standInColour[4] = {};
         std::unordered_map<uint64_t, std::array<float, 4>> g_averages; // (a texture's average colour, by id)
+        std::unordered_map<uint64_t, bool> g_cutOuts; // (TODO 290 (14): a small texture with clear texels, by id: no stand-in)
         const double kTexBudgetMs = [] {
             const char *e = std::getenv("TF_NATIVE_TEXBUDGET");
             return e && *e ? std::atof(e) : 3.0;
@@ -688,6 +689,29 @@ namespace nr::frame
             return &g_standIn;
         }
 
+        // (TODO 290 (14)) A small texture with clear texels (a HUD piece, a sprite, an effect): never stood in for. The stand-in
+        // is one flat colour over the whole quad - its clear parts too: a solid box in the texture's average colour, a frame
+        // or two (bbatts's Iris Xe: boxes around the HUD and the Autobot insignia, effects flickering when a warp gate opened;
+        // a slower GPU spends its texture budget sooner, so stand-ins come there). Made at once instead (they are small).
+        bool noStandIn(const Texture &texture)
+        {
+            const size_t n = texture.pixels.size();
+            if (n == 0u || n > 256u * 256u)
+                return false;
+            if (g_cutOuts.size() > 8192u)
+                g_cutOuts.clear();
+            auto [it, fresh] = g_cutOuts.try_emplace(texture.id, false);
+            if (fresh)
+            {
+                const size_t step = std::max<size_t>(1u, n / 4096u);
+                size_t clear = 0, count = 0;
+                for (size_t i = 0; i < n; i += step, ++count)
+                    clear += ((texture.pixels[i] >> 24) & 0xFFu) < 16u;
+                it->second = clear * 100u >= count; // (1% of its texels or more clear)
+            }
+            return it->second;
+        }
+
         GpuTexture *textureFor(const std::shared_ptr<const Texture> &texture, bool standInOk = false)
         {
             // (TODO 177) A texture converted on the pool whose content has a large image loaded already: that one, from
@@ -713,12 +737,12 @@ namespace nr::frame
             // (A game texture already on the uploader's way: its stand-in until it is done - or, with the frame's
             // budget not spent, made here after all: a stand-in lasts a frame or two, not the uploader's queue.
             // The uploader's copy, when it comes, is let go of - takeUploaded.)
-            if (standInOk && !texture->upscaled && g_laterAsked.count(texture->id) && !texture->pixels.empty() &&
+            if (standInOk && !texture->upscaled && g_laterAsked.count(texture->id) && !texture->pixels.empty() && !noStandIn(*texture) &&
                 !(kTexBudgetMs > 0.0 && g_frameMakeMs < kTexBudgetMs))
                 return standInFor(*texture);
             // (Over the frame's creation budget: to the uploader, the stand-in drawn meanwhile.)
             if (standInOk && !texture->upscaled && kTexBudgetMs > 0.0 && g_frameMakeMs >= kTexBudgetMs &&
-                texture->pixels.size() == static_cast<size_t>(texture->width) * texture->height && !texture->pixels.empty() &&
+                texture->pixels.size() == static_cast<size_t>(texture->width) * texture->height && !texture->pixels.empty() && !noStandIn(*texture) &&
                 askLater(texture, true))
                 return standInFor(*texture);
             // (A game texture is made here, when first drawn with: it has nothing to stand in for it, and
@@ -735,7 +759,8 @@ namespace nr::frame
             }
             // (TODO 152) A palette (256 entries or fewer: the depth fog's, the lens filters') is never put off: it costs
             // nothing to make, and without it the pass is drawn from GS memory or left out - a frame of another colour.
-            if (texture->pixels.size() > 256u && g_frameMade > 0 && (g_frameMade >= kTexCap.first || g_frameTexels + texture->pixels.size() > kTexCap.second))
+            if (texture->pixels.size() > 256u && g_frameMade > 0 && !noStandIn(*texture) &&
+                (g_frameMade >= kTexCap.first || g_frameTexels + texture->pixels.size() > kTexCap.second))
             {
                 ++g_frameDeferred;
                 return nullptr;
@@ -1794,7 +1819,9 @@ namespace nr::frame
         // (the render scale: that share of the window's size, the picture shown enlarged - setRenderScale; 100 unless set)
         const int scale = renderScale();
         const int window = g_windowLines.load(std::memory_order_relaxed) * scale / 100;
+#if defined(__linux__)
         const int windowWidth = g_windowWidth.load(std::memory_order_relaxed) * scale / 100;
+#endif
         // (TODO 255) A movie shown as a band of the picture's rows (ps2_host_display::setPictureBand): the picture as
         // many lines taller as the band is short of it, so the band itself still has the window's lines.
         float bandTop = 0.0f, bandBottom = 1.0f;
@@ -1802,8 +1829,14 @@ namespace nr::frame
         const float bandLines = linesFixed > 0 ? 1.0f : 1.0f / std::max(0.25f, bandBottom - bandTop);
         const float shape = input.displayAspect > 0.5f ? input.displayAspect : 4.0f / 3.0f;
         const float tall = (window > 0 ? window : 1080) * bandLines;
+#if defined(__linux__)
+        // (Linux: the window's lines, or its width over the picture's shape in a narrower, letterboxed window - a 16:9
+        // picture on the Steam Deck's 16:10 screen - the extra lines would be drawn and then scaled away.)
         const float lines = linesFixed > 0 ? static_cast<float>(linesFixed) :
             windowWidth > 0 ? std::min(tall, windowWidth / shape) : tall;
+#else
+        const float lines = linesFixed > 0 ? static_cast<float>(linesFixed) : tall;
+#endif
         const uint32_t linesWanted = static_cast<uint32_t>(
             std::clamp(static_cast<int>(std::lround(lines)), 240, 4320));
         const uint32_t height = linesWanted, width = (static_cast<uint32_t>(std::lround(linesWanted * shape)) + 7u) & ~7u;

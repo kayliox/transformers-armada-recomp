@@ -21,6 +21,9 @@ namespace menu_mouse
     void windowFrame(int windowWidth, int windowHeight, bool overlayOpen = false);
     // While true the window keeps the cursor (main.cpp: the mouse is not captured).
     bool wantsCursor();
+    // (TODO 290 (6)) F1 > Controls > Mouse (TF_MOUSE): false = the game takes no mouse input at all - no camera, no
+    // buttons, no pointing in its menus (controller players). The F1 overlay keeps the mouse.
+    bool gameMouseOn();
     // Once a game frame (mod_menu::frame): `paused` - the level is paused.
     void frame(uint8_t *rdram, bool paused);
     // The pad buttons the mouse presses this frame (mod_menu::padButtons merges them).

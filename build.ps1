@@ -126,13 +126,37 @@ function Usual([string]$stage) {
     return ""
 }
 
+# A program this build made on the player's PC and then runs (the recompiler, the analyzer, the game's own shader
+# bake): an antivirus may quarantine it as soon as it is written - a player's "hypersensitive" one flagged
+# ps2_analyzer.exe at every try. That is said plainly, with what to do; nothing is turned off or excluded for him.
+$BuiltHere = @{ "ps2_analyzer.exe" = "PS2Recomp\ps2xAnalyzer"; "ps2_recomp.exe" = "PS2Recomp\ps2xRecomp"; "TransformersRecomp.exe" = "transformers" }
+function Get-AntivirusBlockMessage([string]$Exe) {
+    $leaf = Split-Path $Exe -Leaf
+    "Your antivirus blocked $leaf. It is built on your PC from the open-source code in $(Join-Path $Root $BuiltHere[$leaf]). " +
+    "Don't turn the antivirus off: add the game folder ($Root) as an exclusion, or restore the file and allow it, " +
+    "then run the setup again (finished steps are kept)."
+}
+# Whether a run of a program built here was stopped by an antivirus: the file gone (quarantined right after the
+# build), Windows' "contains a virus" (225 / 0xC0000906 STATUS_VIRUS_INFECTED) or access denied to it.
+function Test-AntivirusBlock([string]$Exe, $Code, [string]$Text) {
+    if (-not $BuiltHere.ContainsKey((Split-Path $Exe -Leaf))) { return $false }
+    if (-not (Test-Path -LiteralPath $Exe)) { return $true }
+    if ($Code -in 225, -1073739514, 3221227782) { return $true }
+    return ($Text -match "contains a virus|potentially unwanted software|Access is denied|0xC0000906")
+}
+function Assert-NotBlocked([string]$Exe, $Code = 0, [string]$Text = "") {
+    if (Test-AntivirusBlock $Exe $Code $Text) { throw (Get-AntivirusBlockMessage $Exe) }
+}
+
 function Run {
     param([string]$Exe, [string[]]$Arguments)
     # Windows PowerShell turns any stderr line from a native tool into an
     # error record; judge success by the exit code only.
     $ErrorActionPreference = "Continue"
-    & $Exe @Arguments 2>&1 | ForEach-Object { "$_" }
-    if ($LASTEXITCODE -ne 0) { throw "$Exe failed with exit code $LASTEXITCODE" }
+    if ($BuiltHere.ContainsKey((Split-Path $Exe -Leaf))) { Assert-NotBlocked $Exe }
+    try { & $Exe @Arguments 2>&1 | ForEach-Object { "$_" } }
+    catch { Assert-NotBlocked $Exe -1 "$_"; throw }
+    if ($LASTEXITCODE -ne 0) { Assert-NotBlocked $Exe $LASTEXITCODE; throw "$Exe failed with exit code $LASTEXITCODE" }
 }
 function RunLogged {
     param([string]$Exe, [string[]]$Arguments, [string]$Log)
@@ -141,14 +165,20 @@ function RunLogged {
     # alone took ~80 s instead of ~8 (TODO 115). Its error output is added at the end.
     $quoted = @($Arguments | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } })
     $err = "$Log.stderr"
-    $p = Start-Process -FilePath $Exe -ArgumentList $quoted -WorkingDirectory (Get-Location).ProviderPath -NoNewWindow -Wait -PassThru `
-        -RedirectStandardOutput $Log -RedirectStandardError $err
+    Assert-NotBlocked $Exe
+    try {
+        $p = Start-Process -FilePath $Exe -ArgumentList $quoted -WorkingDirectory (Get-Location).ProviderPath -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput $Log -RedirectStandardError $err
+    } catch { Assert-NotBlocked $Exe -1 "$($_.Exception.Message)"; throw }
     if (Test-Path -LiteralPath $err) {
         $bytes = [IO.File]::ReadAllBytes($err)
         if ($bytes.Length) { $f = [IO.File]::Open($Log, [IO.FileMode]::Append); try { $f.Write($bytes, 0, $bytes.Length) } finally { $f.Dispose() } }
         Remove-Item -LiteralPath $err -ErrorAction SilentlyContinue
     }
-    if ($p.ExitCode -ne 0) { throw "$(Split-Path $Exe -Leaf) failed with exit code $($p.ExitCode), see $Log" }
+    if ($p.ExitCode -ne 0) {
+        Assert-NotBlocked $Exe $p.ExitCode
+        throw "$(Split-Path $Exe -Leaf) failed with exit code $($p.ExitCode), see $Log"
+    }
 }
 
 foreach ($tool in "cmake", "python", "git") {
@@ -325,6 +355,8 @@ if (-not $SkipRecompile) {
     Run cmake (@("-S", (Join-Path $Root "PS2Recomp"), "-B", $ToolsBuild,
                  "-DPS2X_BUILD_RUNTIME=OFF", "-DPS2X_BUILD_TEST=OFF", "-DPS2X_BUILD_STUDIO=OFF") + $genArgs)
     Run cmake @("--build", $ToolsBuild, "--config", $Config, "--target", "ps2_recomp", "ps2_analyzer", "--", "/m", "/v:m")
+    # (both there right after the build: an antivirus that took one says so here, not as a puzzling failure later)
+    foreach ($t in "ps2xAnalyzer\$Config\ps2_analyzer.exe", "ps2xRecomp\$Config\ps2_recomp.exe") { Assert-NotBlocked (Join-Path $ToolsBuild $t) }
 
     # 3-4. Recompile, when its inputs changed ---------------------------------
     $inputsFile = Join-Path $Work "translation-inputs.txt"
@@ -587,6 +619,7 @@ $linkSeconds = $end - $(if ($lastCompileAt) { $lastCompileAt } else { $buildStar
 # changed - the first build, or a changed shader - the renderer's file is compiled again and linked (~1 min). So no
 # start compiles them, the first one on a PC included.
 $builtExe = Join-Path $Build "transformers\$Config\TransformersRecomp.exe"
+Assert-NotBlocked $builtExe
 $bakedTable = Join-Path $Build "transformers\baked\nr_shaders_baked.inc"
 # (The shaders live in nr_d3d.cpp: when that file is as at the last bake and the table holds shaders, the bake - ~45 s
 # on a small PC - is left out. bake-input.txt records the file's hash.)
@@ -600,9 +633,11 @@ if ((Test-Path -LiteralPath $builtExe) -and $bakeDone) {
 } elseif (Test-Path -LiteralPath $builtExe) {
     Step "Building the renderer's shaders into the game" "shaders"
     $ErrorActionPreference = "Continue"
-    & $builtExe --bake-shaders $bakedTable 2>&1 | ForEach-Object { "  $_" }
+    $bakeText = ""
+    try { & $builtExe --bake-shaders $bakedTable 2>&1 | ForEach-Object { "  $_" } } catch { $bakeText = "$_" }
     $baked = $LASTEXITCODE
     $ErrorActionPreference = "Stop"
+    if (Test-AntivirusBlock $builtExe $baked $bakeText) { throw (Get-AntivirusBlockMessage $builtExe) }
     if ($baked -eq 2) {
         Run cmake @("--build", $Build, "--config", $Config, "--target", "TransformersRecomp", "--", "/m", "/v:m", "/p:UseMultiToolTask=true") | Out-Null
     }

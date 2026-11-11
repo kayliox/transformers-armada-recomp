@@ -4,6 +4,7 @@
 
 #include "camera_mode.h"
 #include "graphics_driver.h"
+#include "hd_pack.h"
 #include "hd_progress.h"
 #include "install_layout.h"
 #include "support_report.h"
@@ -1493,6 +1494,7 @@ namespace mod_menu
             {"TF_HIRES", "HD textures", "The HD textures made from your disc. Off: the game's own. Takes a restart."},
             {"PS2X_TEXTURE_PACK", "Texture pack", "Emulated renderer: PCSX2 texture packs from a replacements folder."},
             {"PS2X_GPU_ANISOTROPY", "Texture pack filtering", "Emulated renderer: how sharp a texture pack stays at an angle."},
+            {"TF_MOUSE", "Mouse in the game", "Off: the game ignores the mouse (camera, buttons, menus), for controller play. F1 still uses it."},
             {"PS2X_MOUSE_SENSITIVITY", "Mouse speed", "How fast the mouse turns the camera."},
             {"PS2X_MOUSE_INVERT_Y", "Invert mouse up / down", "On: moving the mouse up looks down. The game's own Invert Y is for the controller."},
             {"TF_MENU_MOUSE", "Mouse in menus", "Point and click in the game's menus."},
@@ -1808,7 +1810,7 @@ namespace mod_menu
             "TF_DRAW_DISTANCE", "TF_SCENERY_DISTANCE", "TF_FOREST_DISTANCE", "TF_FOREST_SPRITES", "TF_GRASS_DISTANCE",
             "TF_TERRAIN_DETAIL", "TF_FOREST_ADAPTIVE", "TF_FOREST_FULL_DETAIL", "TF_ENEMY_DETAIL", "TF_NATIVE_AA", "PS2X_GPU_AA", "PS2X_GPU_MSAA",
             "TF_NATIVE_SSAA", "TF_NATIVE_QUALITY", "TF_SHARP_TEXTURES", "TF_SMOOTH_TEXTURES", "PS2X_TEXTURE_PACK", "PS2X_GPU_ANISOTROPY", "TF_HIRES",
-            "PS2X_MOUSE_SENSITIVITY", "TF_MENU_MOUSE", "PS2X_SONYPAD_RUMBLE", "PS2X_SONYPAD_LIGHTBAR", "TF_LIGHTBAR_ALERTS", "TF_ADAPTIVE_TRIGGERS", "TF_TRIGGER_STRENGTH", "TF_PAD_SPEAKER", "TF_PAD_SPEAKER_VOLUME", "TF_PAD_SPEAKER_DELAY", "PS2X_GAMEPAD_BACKEND",
+            "TF_MOUSE", "PS2X_MOUSE_SENSITIVITY", "TF_MENU_MOUSE", "PS2X_SONYPAD_RUMBLE", "PS2X_SONYPAD_LIGHTBAR", "TF_LIGHTBAR_ALERTS", "TF_ADAPTIVE_TRIGGERS", "TF_TRIGGER_STRENGTH", "TF_PAD_SPEAKER", "TF_PAD_SPEAKER_VOLUME", "TF_PAD_SPEAKER_DELAY", "PS2X_GAMEPAD_BACKEND",
             "PS2X_STICK_LEFT_DEADZONE", "PS2X_STICK_RIGHT_DEADZONE",
             "PS2X_STICK_RESPONSE", "PS2X_STICK_VEHICLE_MODE", "PS2X_STICK_LEFT_LIFT", "PS2X_STICK_LEFT_SENSITIVITY",
             "PS2X_STICK_RIGHT_LIFT", "PS2X_STICK_VEHICLE_LIFT", "PS2X_STICK_VEHICLE_RESPONSE",
@@ -1933,6 +1935,19 @@ namespace mod_menu
                         ImGui::PopStyleColor();
                         if (!note.empty() && ImGui::GetTime() - noteAt < 6.0)
                             ImGui::TextWrapped("%s", note.c_str());
+                        // (TODO 290 (17)) Their only HD textures: a PCSX2 texture pack of the player's own, used where it is.
+                        if (menu_style::button("I have HD textures (PCSX2 pack)"))
+                            hd_pack::choose();
+                        const std::string pack = hd_pack::current();
+                        if (!pack.empty())
+                        {
+                            ImGui::SameLine();
+                            if (menu_style::button("Stop using the pack"))
+                                hd_pack::forget();
+                            ImGui::TextDisabled("Pack: %s", pack.c_str());
+                        }
+                        if (const std::string st = hd_pack::status(); !st.empty())
+                            ImGui::TextWrapped("%s", st.c_str());
                     }
                     else
                     {
@@ -2032,6 +2047,7 @@ namespace mod_menu
         void pageControls()
         {
             pageHeading("Mouse");
+            keyRow("TF_MOUSE"); // (TODO 290 (6): the mouse out of the game, for controller players)
             keyRow("PS2X_MOUSE_SENSITIVITY");
             keyRow("PS2X_MOUSE_INVERT_Y"); // (TODO 287: the mouse's own, not the save's Invert Y)
             keyRow("TF_MENU_MOUSE");
@@ -2919,6 +2935,7 @@ namespace mod_menu
         distance_meter::addSettings(); // Mods & cheats: the prototype's distance meter (distance_meter.h)
         boss_cheat::addSettings(); // Mods & cheats: one-hit kills on bosses (boss_cheat.h, TODO 199)
         speedrun_timer::addSettings(); // Display, On screen: the speedrun timer (speedrun_timer.h)
+        hd_pack::addSettings();        // (no rows: the pack's folder, kept in the settings file)
         start_screens::addSettings();  // Gameplay: what the game shows from boot to its main menu (start_screens.h, TODO 110)
         {
             // (TODO 243) The native renderer's HD textures on or off (TF_HIRES, read when the renderer starts: a restart).

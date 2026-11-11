@@ -58,6 +58,7 @@ from PIL import Image, ImageChops, ImageStat
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tier_rules
+from jsonfile import read_json, write_json, write_text_atomic  # (the tools' JSON files read and written safely)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SRC = PROJECT_ROOT / "Extracted" / "converted" / "textures"
@@ -435,17 +436,16 @@ TILE_STEPS = (64, 32)
 
 def load_tile(path):
     try:
-        t = int(json.loads(path.read_text(encoding="utf-8")).get("tile", 0))
+        t = int(read_json(path, {}, "the upscaler's tile size (.tile.json)").get("tile", 0))
         return t if t in TILE_STEPS else 0
-    except (OSError, ValueError, AttributeError):
+    except (TypeError, ValueError):
         return 0
 
 
 def save_tile(path, tile, why):
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"tile": tile, "why": why, "when": time.strftime("%Y-%m-%dT%H:%M:%S")}),
-                        encoding="utf-8")
+        write_json(path, {"tile": tile, "why": why, "when": time.strftime("%Y-%m-%dT%H:%M:%S")})
     except OSError:
         pass
 
@@ -480,7 +480,7 @@ def reset_left_last_run(status_path):
     """The last run did not finish (its status still says it was working) and a driver reset was logged after its
     last word: most likely what ended it."""
     try:
-        st = json.loads(status_path.read_text(encoding="utf-8"))
+        st = read_json(status_path, {}, "the HD textures' status (upscale_status.json)")
         if st.get("state") not in ("working", "checking", "paused"):
             return False
         return driver_resets_since(status_path.stat().st_mtime - 60.0) > 0
@@ -554,22 +554,15 @@ def game_running(lock):
 
 
 def read_options(path):
-    try:
-        with open(path, encoding="utf-8-sig") as fp:
-            o = json.load(fp)
-        return o if isinstance(o, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    return read_json(path, {}, "the HD textures' options (hd_options.json)")
 
 
 def write_status(path, **fields):
     if not path:
         return
     fields["updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    tmp = path.with_name(path.name + ".tmp")
     try:
-        tmp.write_text(json.dumps(fields, indent=1), encoding="utf-8")
-        os.replace(tmp, path)
+        write_json(path, fields, indent=1)
     except OSError:
         pass
 
@@ -828,21 +821,16 @@ ASIDE_MIN = 25
 
 
 def load_marker(out_root):
-    try:
-        m = json.loads((out_root / MARKER_NAME).read_text(encoding="utf-8"))
-        if isinstance(m, dict) and isinstance(m.get("cards", []), list):
-            m.setdefault("cards", [])
-            return m
-    except (OSError, ValueError):
-        pass
+    m = read_json(out_root / MARKER_NAME, None, "the set's graphics-card record (.made_on.json)")
+    if isinstance(m, dict) and isinstance(m.get("cards", []), list):
+        m.setdefault("cards", [])
+        return m
     return None
 
 
 def save_marker(out_root, marker):
     out_root.mkdir(parents=True, exist_ok=True)
-    tmp = out_root / (MARKER_NAME + ".tmp")
-    tmp.write_text(json.dumps(marker, indent=1), encoding="utf-8")
-    os.replace(tmp, out_root / MARKER_NAME)
+    write_json(out_root / MARKER_NAME, marker, indent=1)
 
 
 def card_driver(name):
@@ -1169,12 +1157,7 @@ def check_set(src_root, out_root, backup_root, status_path=None, lock=None, coun
     srcs = {s.relpath: s for s in scan_sources(src_root, errors)}
     recs = load_manifest(out_root)
     ledger_path = backup_root / "colour_gains.json"
-    ledger = {}
-    if ledger_path.exists():
-        try:
-            ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
-        except ValueError:
-            ledger = {}
+    ledger = read_json(ledger_path, {}, "the colour-match ledger (colour_gains.json)")
     work = []
     by_rel = {}
     for sha1, r in sorted(recs.items()):
@@ -1234,9 +1217,9 @@ def check_set(src_root, out_root, backup_root, status_path=None, lock=None, coun
         mf = out_root / MANIFEST_NAME
         lines = [ln for ln in mf.read_text(encoding="utf-8").splitlines()
                  if not any(f'"sha1": "{h}"' in ln for h in drop)]
-        mf.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        write_text_atomic(mf, "\n".join(lines) + ("\n" if lines else ""))
     if (fixed or removed) and ledger_path.exists():
-        ledger_path.write_text(json.dumps(ledger, indent=0, sort_keys=True), encoding="utf-8")
+        write_json(ledger_path, ledger, indent=0, sort_keys=True)
     print(f"check: {len(work)} images checked, {fixed} with red and blue exchanged back, {removed} broken (made again)")
     if counts is not None:
         counts[:] = [len(work), removed]
@@ -1260,16 +1243,7 @@ VERIFIED_NAME = ".verified.json"
 
 
 def _write_json(path, data):
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
-    for attempt in range(20):  # (the game reading it a moment)
-        try:
-            os.replace(tmp, path)
-            return
-        except PermissionError:
-            if attempt == 19:
-                raise
-            time.sleep(0.1)
+    write_json(path, data, indent=1)  # (whole or not at all; the game reading it a moment is waited for)
 
 
 def _verify_file(args):
@@ -1310,10 +1284,7 @@ def verify_set(src_root, out_root, hd_dir, quality, lock=None):
     recs = load_manifest(out_root)
     marker = load_marker(out_root)
     backup_root = out_root.parent / "upscaled_precolour"
-    try:
-        verified = json.loads((out_root / VERIFIED_NAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        verified = {}
+    verified = read_json(out_root / VERIFIED_NAME, {}, "the verify record (.verified.json)")
     missing, not_made, work = [], [], []
     by_rel = {}
     for job in jobs:
@@ -1421,18 +1392,14 @@ def verify_set(src_root, out_root, hd_dir, quality, lock=None):
 def forget_broken(out_root, hd_dir):
     """(TODO 281, "Remake N broken images") The last report's missing and broken images removed with their
     manifest records (their colour-match originals and ledger entries too): the maker's next run makes only those."""
-    try:
-        report = json.loads((hd_dir / VERIFY_REPORT).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    report = read_json(hd_dir / VERIFY_REPORT, None, "the verify report (verify_report.json)")
+    if not isinstance(report, dict):
         print("remake: no verify report", flush=True)
         return 0
     items = report.get("missing", []) + report.get("broken", [])
     backup_root = out_root.parent / "upscaled_precolour"
     ledger_path = backup_root / "colour_gains.json"
-    try:
-        ledger = json.loads(ledger_path.read_text(encoding="utf-8")) if ledger_path.exists() else {}
-    except ValueError:
-        ledger = {}
+    ledger = read_json(ledger_path, {}, "the colour-match ledger (colour_gains.json)")
     drop = set()
     for it in items:
         for rp in it.get("files", []):
@@ -1446,9 +1413,9 @@ def forget_broken(out_root, hd_dir):
     if drop and mf.exists():
         lines = [ln for ln in mf.read_text(encoding="utf-8").splitlines()
                  if not any(f'"sha1": "{h}"' in ln for h in drop)]
-        mf.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        write_text_atomic(mf, "\n".join(lines) + ("\n" if lines else ""))
     if items and ledger_path.exists():
-        ledger_path.write_text(json.dumps(ledger, indent=0, sort_keys=True), encoding="utf-8")
+        write_json(ledger_path, ledger, indent=0, sort_keys=True)
     report["state"] = "remaking"
     _write_json(hd_dir / VERIFY_REPORT, report)
     print(f"remake: {len(items)} image(s) removed to be made again", flush=True)

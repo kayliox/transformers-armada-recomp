@@ -1162,9 +1162,10 @@ read-back from GS memory again instead of the native depth - nr_occlusion.cpp).
 - `nr_d3d.cpp`: the Direct3D 12 side (D3D12 for ray tracing, the upscalers' frame generation, more headroom).
 - `nr_backend.cpp`: which backend is in use, chosen once at start (`TF_GFX_API`: `d3d12`, the default, or `vulkan`).
 - `vulkan/nr_vulkan.cpp`: the Vulkan backend with its own SDL3 window and swapchain (in development; built with
-  `TF_VULKAN` as the library `tf_vulkan_backend`). `vulkan/nr_vulkan_dxc.cpp`: the HLSL compiled to SPIR-V with DXC's
-  library at start; `vulkan/nr_vulkan_vma.cpp`: the Vulkan Memory Allocator; `vulkan/extract_hlsl.cmake`: the HLSL taken
-  from `nr_d3d.cpp` at build time.
+  `TF_VULKAN` as the library `tf_vulkan_backend`). `vulkan/nr_vulkan_shaders.h`: its SPIR-V, built into the game - the
+  build's own program `vulkan/bake_spirv.cpp` (with `vulkan/nr_vulkan_dxc.cpp`, DXC's library) compiles every shader and
+  variant at build time; `vulkan/nr_vulkan_vma.cpp`: the Vulkan Memory Allocator; `vulkan/extract_hlsl.cmake`: the HLSL
+  taken from `nr_d3d.cpp` at build time.
 - `nr_install.h`: the entry point, called from `applyTransformers` after the decomp layer.
 - `nr_thread.cpp`: the render thread (the frame's list read, grass, D3D12 recording).
 - `nr_present.cpp`: the live picture's hand-over to the window (stage 4); `nr_glshare.cpp`: its shared

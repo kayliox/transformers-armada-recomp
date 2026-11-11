@@ -1,7 +1,7 @@
 #pragma once
 // The graphics card's driver, checked once at the start (TODO 290). Intel's drivers from before 2023 draw this game
-// wrong: a player's Iris Xe on 27.20.100.9565 (2021) showed the title menu as blue edges on black, the HUD in solid
-// boxes and the F1 menu garbled over noise. The log says which driver it is, and the F1 menu (Graphics, About) says
+// wrong: a player's Iris Xe on 27.20.100.9565 (2021) showed the title menu as blue edges on black and the F1 menu
+// garbled over noise (the boxes around its HUD were the texture stand-ins, TODO 290 (14), not the driver). The log says which driver it is, and the F1 menu (Graphics, About) says
 // when it is that old, with the advice to update it.
 #include <cstdint>
 #include <string>

@@ -487,6 +487,17 @@ namespace hd_progress
         return made && nr::hdSetAside().empty() ? "Verify HD textures" : "Make HD textures";
     }
 
+    void prepareOriginals()
+    {
+#if defined(_WIN32)
+        fs::path dir = g_dir.empty() ? findDir() : g_dir;
+        if (dir.empty())
+            dir = fs::absolute(fs::path("hd_textures"));
+        if (!makerRunning(dir))
+            startMaker(dir.parent_path(), L"-SkipUpscale");
+#endif
+    }
+
     std::string makeHdTextures()
     {
         if (graphics_driver::lowEnd())

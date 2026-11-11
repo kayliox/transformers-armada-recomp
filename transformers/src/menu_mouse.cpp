@@ -72,6 +72,7 @@ namespace menu_mouse
         std::atomic<float> g_wheel{0.0f};
         std::atomic<bool> g_wantCursor{false}; // (the game thread's answer: a menu is up)
         std::atomic<bool> g_enabled{true};     // TF_MENU_MOUSE
+        std::atomic<bool> g_gameMouse{true};   // TF_MOUSE (TODO 290 (6)): off = no mouse input in the game at all
 
         // --- The game thread's side -----------------------------------------------------------
         constexpr uint32_t kSetBarPositions = 0x00312820u;
@@ -263,6 +264,28 @@ namespace menu_mouse
 
     void addSettings()
     {
+        // (TODO 290 (6), bbatts: a controller player wants the mouse out of the game) Off: the window never takes the mouse
+        // for the camera (main.cpp: no capture, so no turning and no mouse buttons in play), and the game's menus get no
+        // pointing or clicks. The F1 overlay keeps the mouse either way.
+        if (const char *env = std::getenv("TF_MOUSE"); env && *env)
+            g_gameMouse.store(*env != '0');
+        {
+            ps2_settings::Setting m;
+            m.key = "TF_MOUSE";
+            m.section = "Mouse";
+            m.label = "Mouse in the game";
+            m.order = 30;
+            m.help = "Off: the game takes no mouse input at all - no camera, no buttons, no pointing in its menus - for playing "
+                     "with a controller without the mouse getting in the way. The F1 menu still works with the mouse.";
+            m.choices = {{"1", "On"}, {"0", "Off"}};
+            m.defaultValue = "1";
+            m.apply = [](const std::string &value)
+            {
+                g_gameMouse.store(value != "0");
+                return true;
+            };
+            ps2_settings::add(m);
+        }
         if (const char *env = std::getenv("TF_MENU_MOUSE"); env && *env)
             g_enabled.store(*env != '0');
         ps2_settings::Setting s;
@@ -379,6 +402,8 @@ namespace menu_mouse
 
     bool wantsCursor() { return g_wantCursor.load(std::memory_order_relaxed); }
 
+    bool gameMouseOn() { return g_gameMouse.load(std::memory_order_relaxed); }
+
     uint16_t padButtons()
     {
         return g_buttons;
@@ -429,7 +454,7 @@ namespace menu_mouse
                              word(rdram, kGame) != 0u ? 1 : 0, paused ? 1 : 0);
             lastVtable = menuVtable;
         }
-        const bool active = shown && g_enabled.load(std::memory_order_relaxed);
+        const bool active = shown && g_enabled.load(std::memory_order_relaxed) && g_gameMouse.load(std::memory_order_relaxed);
         // (TODO 175) A list the HQ shows on a hologram panel (its Options, Controller, Audio..., the "Are you sure?" of
         // its Exit - taScreenExit): the 2D drawn into the panel, the panel in 3D, slanted, wherever the camera has it -
         // the rows are not where the 2D has them on the screen. No pointing there: the wheel steps, a left click takes the

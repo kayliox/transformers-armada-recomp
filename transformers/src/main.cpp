@@ -537,7 +537,9 @@ int main(int argc, char *argv[])
                 // The panels need the cursor: the game only gets the mouse while both are hidden.
                 // (the pause menu's cursor: menu_mouse.h; none of the clicks while F1 or the debugger is up, TODO 286)
                 menu_mouse::windowFrame(GetScreenWidth(), GetScreenHeight(), panel->isVisible() || mod_menu::isOpen());
-                ps2_host_input::setMouseCaptureAllowed(!panel->isVisible() && !mod_menu::isOpen() && !menu_mouse::wantsCursor());
+                // (TODO 290 (6): F1 > Controls > Mouse in the game Off - never taken, so no turning or buttons from it)
+                ps2_host_input::setMouseCaptureAllowed(!panel->isVisible() && !mod_menu::isOpen() && !menu_mouse::wantsCursor() &&
+                                                       menu_mouse::gameMouseOn());
             },
             [](PS2Runtime &, void *userData)
             { static_cast<PS2DebugPanel *>(userData)->shutdown(); },

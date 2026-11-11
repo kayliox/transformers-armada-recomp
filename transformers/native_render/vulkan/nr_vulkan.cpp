@@ -1,14 +1,14 @@
 // nr_vulkan.cpp - the native renderer's Vulkan backend (docs/RENDERER_BACKEND.md), with a window and swapchain of its
 // own made with SDL3 (roadmap P2 / P3). TF_GFX_API=vulkan chooses it at start (nr_backend.cpp); Direct3D 12 stays the
-// default. Built with TF_VULKAN (CMake option, on by default): the Vulkan headers, the volk loader, the Vulkan Memory
+// default. Built with TF_VULKAN (CMake option, off by default): the Vulkan headers, the volk loader, the Vulkan Memory
 // Allocator, SDL3 and DXC's release are fetched at configure time like raylib, so no Vulkan SDK is needed to build it.
 //
 // Milestone 1: the device, the window and the swapchain; the frame's life (prepareFrame, beginFrame, endFrame, two
 // slots in flight, the frame-done call); the targets (made zeroed, cleared, moved between uses, copied, read back - the
 // shots and the debug saves); time stamps; and the picture shown in the window through the swapchain.
 // Milestone 2: the draws - textures (uploaded on the frame's own upload list, uploadTextureLater at the next frame's
-// start), meshes, the rings as host-visible buffers, the Direct3D 12 backend's HLSL compiled to SPIR-V at start with DXC
-// (nr_vulkan_dxc.cpp; the source taken from nr_d3d.cpp at build time), pipelines from PipelineDesc, the root signature as
+// start), meshes, the rings as host-visible buffers, the Direct3D 12 backend's HLSL as SPIR-V compiled at build time
+// (nr_vulkan_shaders.h: DXC run by the build, the table built in), pipelines from PipelineDesc, the root signature as
 // one descriptor set, dynamic rendering begun at the first draw after a target is set (and ended before any copy, clear
 // or layout change outside it), snapshot, the pixel shader's variants (on a thread, as D3D12's psv::), and the effects
 // FXAA, SMAA, the probe, the sparks, the bloom, the tone mapping and the local contrast.
@@ -35,9 +35,11 @@
 #include "nr_frame.h"
 #include "nr_glshare.h" // (d3d::SharedPicture: the hand-over's metadata)
 #include "nr_hlsl_sources.h" // (generated at build time from nr_d3d.cpp: extract_hlsl.cmake)
+#if defined(__linux__)
 #include "nr_picture_mailbox.h" // (Published: the TF_VK_ALONE CPU hand-over, tested by tests/vulkan_picture_tests.cpp)
+#endif
 #include "nr_types.h"
-#include "nr_vulkan_dxc.h"
+#include "nr_vulkan_shaders.h" // (the SPIR-V the build compiled: bake_spirv.cpp)
 
 #include "ext/smaa/AreaTex.h"   // (SMAA's lookup tables, MIT: ext/smaa/LICENSE.txt - as the D3D12 backend uploads them)
 #include "ext/smaa/SearchTex.h"
@@ -301,9 +303,11 @@ namespace nr::vulkan
             std::vector<gfx::ReadbackId> readbackFree[kSlots], readbackReleased[kSlots];
             gfx::ReadbackId publishRead[kSlots] = {}; // (TF_VK_ALONE: the picture for the window, read back)
             bool publishHas3D[kSlots] = {};
+#if defined(__linux__)
             uint64_t publishTick[kSlots] = {};    // (the frame's VBlank and its picture's moment, for the hand-over)
             int64_t publishDueNs[kSlots] = {};
             uint64_t publishTurn[kSlots] = {};    // (the frame's id: the pacing log's turn)
+#endif
             // ---- time stamps ----
             VkQueryPool stamps = VK_NULL_HANDLE;
             uint32_t stampsUsed[kSlots] = {};
@@ -328,7 +332,22 @@ namespace nr::vulkan
             return on;
         }
 
+#if defined(__linux__)
         Published g_pub;
+#else
+        // TF_VK_ALONE: the newest picture as CPU pixels for the main window (latestPicture / waitPicture).
+        struct Published
+        {
+            std::mutex mutex;
+            std::condition_variable cv;
+            std::vector<uint32_t> pixels;
+            uint32_t w = 0, h = 0;
+            uint64_t serial = 0;
+            bool has3D = false;
+            int64_t lastNs = 0;
+        };
+        Published g_pub;
+#endif
 
         // ---- the window (SDL3): made and pumped on a thread of its own ----------------------------------------------
         // (The main window is still the runtime's raylib window on the main thread; this one is the Vulkan backend's own.
@@ -827,15 +846,15 @@ namespace nr::vulkan
 
         // ---- shaders: the D3D12 backend's HLSL as SPIR-V ---------------------------------------------------------------
         // A vertex shader's inputs from its SPIR-V: DXC names each "in.var.<SEMANTIC>" and decorates it with its location.
-        std::vector<std::pair<std::string, uint32_t>> inputsOf(const std::vector<uint32_t> &w)
+        std::vector<std::pair<std::string, uint32_t>> inputsOf(const uint32_t *w, size_t count)
         {
             std::unordered_map<uint32_t, std::string> names;
             std::unordered_map<uint32_t, uint32_t> locations;
             std::vector<uint32_t> inputs;
-            for (size_t i = 5; i < w.size();)
+            for (size_t i = 5; i < count;)
             {
                 const uint32_t op = w[i] & 0xFFFFu, n = w[i] >> 16;
-                if (!n || i + n > w.size())
+                if (!n || i + n > count)
                     break;
                 if (op == 5u && n >= 3u) // OpName
                 {
@@ -862,23 +881,25 @@ namespace nr::vulkan
             return out;
         }
 
-        bool makeShader(Shader &s, const char *source, size_t size, const char *entry, const char *profile)
+        // A shader's SPIR-V from the table the build made (nr_vulkan_shaders.h), as a module. Any thread.
+        bool makeShader(Shader &s, const char *source, size_t size, const char *entry, const char *profile,
+                        const shaders::Defines &defines = {})
         {
-            std::vector<uint32_t> spirv;
-            std::string errors;
-            if (!dxc::compile(source, size, entry, profile, {}, spirv, errors))
+            const shaders::Baked *b = shaders::find(shaders::keyOf(source, size, entry, profile, defines));
+            if (!b)
             {
-                std::fprintf(stderr, "[vulkan] shader %s: %s\n", entry, errors.empty() ? "failed" : errors.c_str());
+                std::fprintf(stderr, "[vulkan] shader %s (%s, %zu defines) is not in the SPIR-V the build made (bake_spirv.cpp's list)\n",
+                             entry, profile, defines.size());
                 return false;
             }
             VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-            ci.codeSize = spirv.size() * 4u;
-            ci.pCode = spirv.data();
+            ci.codeSize = size_t(b->count) * 4u;
+            ci.pCode = b->words;
             if (!ok(vkCreateShaderModule(g.device, &ci, nullptr, &s.module), "vkCreateShaderModule"))
                 return false;
             s.entry = entry;
             if (profile[0] == 'v')
-                s.inputs = inputsOf(spirv);
+                s.inputs = inputsOf(b->words, b->count);
             return true;
         }
 
@@ -1286,30 +1307,14 @@ namespace nr::vulkan
             bool started = false;
             std::atomic<uint32_t> made{0}, failed{0};
 
-            // The variant's switches: bit 0 set (a variant), bits 1-2 PSV_TEX (0 / 1), 3 PSV_LOD, 4 PSV_CLAMP, 5 PSV_ATEST,
-            // 6 PSV_DATE, 7 PSV_CULL - nr_d3d.cpp's compileVariant.
+            // The variant's switches (nr_vulkan_shaders.h's variantDefines: nr_d3d.cpp's compileVariant), its SPIR-V from
+            // the build's table - every variant is built in.
             bool compileVariant(uint32_t v, Shader &out)
             {
-                static const char *names[] = {"PSV_TEX", "PSV_LOD", "PSV_CLAMP", "PSV_ATEST", "PSV_DATE", "PSV_CULL"};
-                const char *values[6] = {(v >> 1) & 3u ? "1" : "0", (v >> 3) & 1u ? "1" : "0", (v >> 4) & 1u ? "1" : "0",
-                                         (v >> 5) & 1u ? "1" : "0", (v >> 6) & 1u ? "1" : "0", (v >> 7) & 1u ? "1" : "0"};
-                std::vector<std::pair<std::string, std::string>> defines;
-                for (int k = 0; k < 6; ++k)
-                    defines.emplace_back(names[k], values[k]);
-                std::vector<uint32_t> spirv;
-                std::string errors;
-                if (!dxc::compile(hlsl::kShader, sizeof(hlsl::kShader) - 1u, "ps", "ps_6_0", defines, spirv, errors))
-                {
-                    std::fprintf(stderr, "[vulkan] pixel shader variant %02x: %s\n", v, errors.c_str());
-                    return false;
-                }
-                VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-                ci.codeSize = spirv.size() * 4u;
-                ci.pCode = spirv.data();
-                if (vkCreateShaderModule(g.device, &ci, nullptr, &out.module) != VK_SUCCESS)
-                    return false;
-                out.entry = "ps";
-                return true;
+                if (makeShader(out, hlsl::kShader, sizeof(hlsl::kShader) - 1u, "ps", "ps_6_0", shaders::variantDefines(v)))
+                    return true;
+                std::fprintf(stderr, "[vulkan] pixel shader variant %02x: not made\n", v);
+                return false;
             }
 
             void worker()
@@ -1522,10 +1527,9 @@ namespace nr::vulkan
 
         bool makeShaders()
         {
-            std::string why;
-            if (!dxc::available(why))
+            if (shaders::kBakedCount == 0u)
             {
-                std::fprintf(stderr, "[vulkan] no shader compiler (%s): nothing is drawn with Vulkan\n", why.c_str());
+                std::fprintf(stderr, "[vulkan] this build has no SPIR-V built in (no shader compiler for its system yet): nothing is drawn with Vulkan\n");
                 return false;
             }
             const auto t0 = Clock::now();
@@ -1559,9 +1563,9 @@ namespace nr::vulkan
                 for (int k = 0; k < 6; ++k)
                     makeShader(*out[k], smaa.c_str(), smaa.size(), names[k], (k & 1) ? "ps_6_0" : "vs_6_0");
             }
-            std::fprintf(stderr, "[vulkan] shaders compiled to SPIR-V in %.0f ms (the clipping stage %s; effects: FXAA %s, probe %s, sparks %s, "
-                                 "bloom %s, tone mapping %s, local contrast %s, SMAA %s)\n",
-                         std::chrono::duration<double, std::milli>(Clock::now() - t0).count(), g.gs.module ? "made" : "none",
+            std::fprintf(stderr, "[vulkan] shaders made from the built-in SPIR-V (%zu) in %.0f ms (the clipping stage %s; effects: FXAA %s, "
+                                 "probe %s, sparks %s, bloom %s, tone mapping %s, local contrast %s, SMAA %s)\n",
+                         shaders::kBakedCount, std::chrono::duration<double, std::milli>(Clock::now() - t0).count(), g.gs.module ? "made" : "none",
                          effectMade(gfx::Effect::Fxaa) ? "yes" : "no", effectMade(gfx::Effect::Probe) ? "yes" : "no",
                          effectMade(gfx::Effect::Cloud) ? "yes" : "no", effectMade(gfx::Effect::BloomUp) ? "yes" : "no",
                          effectMade(gfx::Effect::ToneMap) ? "yes" : "no", effectMade(gfx::Effect::LocalContrast) ? "yes" : "no",
@@ -1740,7 +1744,7 @@ namespace nr::vulkan
             vkGetPhysicalDeviceFeatures2(g.phys, &haveF);
             VkPhysicalDeviceVulkan13Features want13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
             want13.dynamicRendering = have13.dynamicRendering;
-            want13.shaderDemoteToHelperInvocation = have13.shaderDemoteToHelperInvocation; // (discard as Direct3D's: nr_vulkan_dxc.cpp)
+            want13.shaderDemoteToHelperInvocation = have13.shaderDemoteToHelperInvocation; // (discard as Direct3D's: nr_vulkan_shaders.h)
             VkPhysicalDeviceFeatures2 wantF{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
             wantF.features.samplerAnisotropy = haveF.features.samplerAnisotropy;
             wantF.features.geometryShader = haveF.features.geometryShader;
@@ -1882,10 +1886,25 @@ namespace nr::vulkan
             ReadbackBuffer &rb = g.readbacks[r];
             if (rb.format == gfx::Format::RGBA8 && rb.mem.mapped)
             {
+#if defined(__linux__)
                 const int64_t readyNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
                 g_pub.publish(rb.mem.mapped, rb.w, rb.h, rb.rowBytes, g.publishHas3D[s], g.publishTick[s], g.publishDueNs[s],
                               readyNs, g.publishTurn[s]);
+#else
+                std::lock_guard<std::mutex> lock(g_pub.mutex);
+                g_pub.pixels.resize(static_cast<size_t>(rb.w) * rb.h);
+                for (uint32_t y = 0; y < rb.h; ++y)
+                    std::memcpy(g_pub.pixels.data() + static_cast<size_t>(y) * rb.w, rb.mem.mapped + static_cast<size_t>(y) * rb.rowBytes, rb.w * 4u);
+                g_pub.w = rb.w;
+                g_pub.h = rb.h;
+                g_pub.has3D = g.publishHas3D[s];
+                ++g_pub.serial;
+                g_pub.lastNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+#endif
             }
+#if !defined(__linux__)
+            g_pub.cv.notify_all();
+#endif
             rb.live = false;
             g.readbackReleased[rb.slot].push_back(r);
         }
@@ -2328,9 +2347,11 @@ namespace nr::vulkan
                 {
                     g.publishRead[s] = readTarget(end.picture);
                     g.publishHas3D[s] = end.frame && end.frame->has3D;
+#if defined(__linux__)
                     g.publishTick[s] = end.frame ? end.frame->tick : 0;
                     g.publishDueNs[s] = end.pictures.empty() ? 0 : end.pictures[0].dueNs; // (the picture Vulkan draws: the first)
                     g.publishTurn[s] = g.frameIndex;
+#endif
                 }
                 // The picture into the window: the swapchain's next image, the picture fitted into it (bars black).
                 uint32_t imageIndex = 0;
@@ -3358,13 +3379,28 @@ namespace nr::vulkan
 
             void preUpload(const std::shared_ptr<const Texture> &texture) override { frame::preUpload(texture); }
 
-            // TF_VK_ALONE: the picture as CPU pixels (RGBA8, R in the low byte) - the main window's CPU hand-over. The
-            // pixels stay valid and unchanged until pictureShown, newer publications going into the other buffer.
+            // TF_VK_ALONE: the picture as CPU pixels (RGBA8, R in the low byte) - the main window's CPU hand-over.
+#if defined(__linux__)
+            // The pixels stay valid and unchanged until pictureShown, newer publications going into the other buffer.
             bool latestPicture(const uint8_t *&pixels, uint32_t &rowPitch, int &index, uint64_t &serial, d3d::SharedPicture &meta) override
             {
                 return g_pub.take(pixels, rowPitch, index, serial, meta);
             }
             void pictureShown(int index) override { g_pub.shown(index); }
+#else
+            bool latestPicture(std::vector<uint32_t> &pixels, uint32_t &width, uint32_t &height, uint64_t &serial, bool &has3D) override
+            {
+                std::lock_guard<std::mutex> lock(g_pub.mutex);
+                if (g_pub.serial == serial || g_pub.pixels.empty())
+                    return false;
+                pixels.swap(g_pub.pixels);
+                width = g_pub.w;
+                height = g_pub.h;
+                has3D = g_pub.has3D;
+                serial = g_pub.serial;
+                return true;
+            }
+#endif
             void setSharedPictures(bool on) override
             {
                 static bool told = false;
@@ -3376,14 +3412,29 @@ namespace nr::vulkan
             }
             bool latestShared(d3d::SharedPicture &, uint64_t &) override { return false; }
             void sharedHeld(int) override {}
+#if defined(__linux__)
             bool waitPicture(uint64_t serial, int64_t untilNs, int64_t &lastNs) override { return g_pub.wait(serial, untilNs, lastNs); }
+#else
+            bool waitPicture(uint64_t serial, int64_t untilNs, int64_t &lastNs) override
+            {
+                std::unique_lock<std::mutex> lock(g_pub.mutex);
+                const auto until = Clock::time_point(std::chrono::nanoseconds(untilNs));
+                g_pub.cv.wait_until(lock, until, [serial] { return g_pub.serial != serial; });
+                lastNs = g_pub.lastNs;
+                return g_pub.serial != serial;
+            }
+#endif
             int pacingMode() override { return 0; }
 
+#if defined(__linux__)
             void setWindowSize(int width, int height) override
             {
                 frame::g_windowWidth.store(width, std::memory_order_relaxed);
                 frame::g_windowLines.store(height, std::memory_order_relaxed);
             }
+#else
+            void setWindowLines(int lines) override { frame::g_windowLines.store(lines, std::memory_order_relaxed); }
+#endif
             void setAntiAliasing(int mode) override { frame::g_aa.store(std::clamp(mode, 0, 2), std::memory_order_relaxed); }
             void setSupersampling(bool on) override { frame::g_ssaa.store(on ? 1 : 0, std::memory_order_relaxed); }
             void setSpeedupsForced(int on) override { frame::g_speedupsForced.store(on, std::memory_order_relaxed); }

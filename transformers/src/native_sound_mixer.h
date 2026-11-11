@@ -34,6 +34,7 @@ namespace native_sound::mixer
     void rewind(int32_t handle);
     void queuePlay(int32_t handle);  // a key-on held for the packet's channel assignment
     void assignChannels();           // the held key-ons, the most important first
+    void endPacket();                // (TODO 290 (10)) a frame packet's end: an engine loop keyed off at a transformation fades
     void forgetPlay(int32_t handle); // a held key-on dropped (the voice stopped or destroyed)
     void silenceVoices();
     void setReservedChannels(int channels);

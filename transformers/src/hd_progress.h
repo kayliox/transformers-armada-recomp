@@ -58,6 +58,9 @@ namespace hd_progress
     // set is set aside (it tries the card again); "Verifying HD textures" while a verify runs.
     std::string makeLabel();
     std::string makeHdTextures();
+    // (TODO 290 (17)) The game's own textures prepared for an HD texture pack (hd_textures\converted: the disc's textures as
+    // images, which tell same-named textures apart), in the small window: no graphics card work.
+    void prepareOriginals();
 
     // (TODO 281) Before a first make (no set, none begun): F1 shows what it costs and asks - "Make HD textures?" with
     // Start (makeHdTextures) and Not now.
