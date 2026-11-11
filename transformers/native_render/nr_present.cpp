@@ -222,7 +222,20 @@ namespace nr
             if (backend().waitPicture(g_takenSerial.load(std::memory_order_relaxed),
                                  std::chrono::duration_cast<std::chrono::nanoseconds>(until.time_since_epoch()).count(), lastNs))
                 return 1;
-            if (lastNs == 0 || nowNs() - lastNs > 100000000ll)
+            // (How long without a picture counts as none coming: 100 ms, or three of the recent intervals between them where
+            // the renderer is slower than that - on a low-end PC in full screen it hands over one every 140-200 ms, and at
+            // 100 ms the window dropped back to its own redraws every other picture. A second at most. Unchanged at 30
+            // pictures a second and above: three intervals are then 100 ms or less.)
+            static int64_t seenNs = 0, intervalNs = 0;
+            if (lastNs != 0 && lastNs != seenNs)
+            {
+                const int64_t d = seenNs != 0 ? lastNs - seenNs : 0;
+                if (d > 0 && d < 1000000000ll)
+                    intervalNs = intervalNs == 0 ? d : (intervalNs * 7 + d) / 8;
+                seenNs = lastNs;
+            }
+            const int64_t noneAfterNs = std::clamp<int64_t>(3 * intervalNs, 100000000ll, 1000000000ll);
+            if (lastNs == 0 || nowNs() - lastNs > noneAfterNs)
             {
                 g_pacedLive.store(false, std::memory_order_relaxed);
                 return -1;
