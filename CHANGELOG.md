@@ -50,6 +50,12 @@
   most on handhelds such as the Steam Deck.
 - F1 > Display > Frame rate limit now includes 45: on a 90 Hz screen such as the Steam Deck OLED's each picture is
   then shown for two refreshes. A 45 limit is also no longer turned into 60 at the start of a session.
+- Linux and Steam Deck: the native renderer shows each picture as it is handed over, as on Windows, instead of
+  waiting for a VBlank: a 45 limit now gives 45 frames a second (it read 38-39), nothing skipped, and the picture is
+  uploaded straight from the renderer's read-back - the render thread's setup halves (1.15 ms -> 0.57 ms) and the
+  power at 45 drops a little (8.98 W -> 8.13 W).
+- F1: the Windows-worded "Quit game" page is no longer in the menu on Linux and the Steam Deck (the game's own main
+  menu has QUIT GAME).
 - Linux and Steam Deck: "Finishing HD textures" no longer stays on screen after the HD set is finished, including
   sets made before this fix, and "HD textures ready" no longer comes back at every start once the set is finished.
   `make_hd_textures.sh` checks the set's images once, as the Windows maker does (0.4.7's checks too).

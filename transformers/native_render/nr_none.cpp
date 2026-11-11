@@ -37,7 +37,8 @@ namespace nr::d3d
     double replayWaitMs() { return 0.0; }
     double slotWaitMs() { return 0.0; }
     double pacerDelayMs() { return 0.0; }
-    bool latestPicture(std::vector<uint32_t> &, uint32_t &, uint32_t &, uint64_t &, bool &) { return false; }
+    bool latestPicture(const uint8_t *&, uint32_t &, int &, uint64_t &, SharedPicture &) { return false; }
+    void pictureShown(int) {}
     void prepare() {}
     bool drawsPictures() { return false; }
     double waitForFrameSlot() { return 0.0; }

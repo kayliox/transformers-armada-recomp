@@ -105,7 +105,8 @@ namespace nr
         virtual void preUpload(const std::shared_ptr<const Texture> &texture) = 0;
 
         // ---- pictures to the window (window thread) ----
-        virtual bool latestPicture(std::vector<uint32_t> &pixels, uint32_t &width, uint32_t &height, uint64_t &serial, bool &has3D) = 0;
+        virtual bool latestPicture(const uint8_t *&pixels, uint32_t &rowPitch, int &index, uint64_t &serial, d3d::SharedPicture &meta) = 0;
+        virtual void pictureShown(int index) = 0;
         virtual void setSharedPictures(bool on) = 0;
         virtual bool latestShared(d3d::SharedPicture &out, uint64_t &serial) = 0;
         virtual void sharedHeld(int index) = 0;

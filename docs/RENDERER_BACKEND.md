@@ -41,7 +41,7 @@ mechanical change) and to choose the backend at start.
 | `waitForFrameSlot()` | render thread | Wait until the next frame slot is free; returns the ms waited. |
 | `render(frame, shotPath)` | render thread | Draw the frame (section 3). With `shotPath`, also save the picture as a BMP. |
 | `preUpload(texture)` | any | A game texture made ahead, handed to the uploader at the next frame. |
-| `latestPicture(pixels, w, h, serial, has3D)` | window thread | The newest picture as CPU pixels. |
+| `latestPicture(pixels, rowPitch, index, w, h, serial, meta)`, `pictureShown(index)` | window thread | The next CPU picture, in the order the pictures were handed over: the hand-over's mapped read-back itself, held (not read back into again) until the window calls `pictureShown` after its upload. |
 | `setSharedPictures(on)`, `latestShared(picture, serial)`, `sharedHeld(index)` | window thread | The newest picture as a texture the window imports, and which one the window still holds. |
 | `waitPicture(serial, untilNs, lastNs)`, `pacingMode()` | window thread | The pacer: wait for the next picture by its due time. |
 | `setWindowSize`, `setAntiAliasing`, `setSupersampling`, `setSpeedupsForced` | any | Settings, used from the next frame. |
@@ -296,8 +296,10 @@ The native picture reaches the window in one of two ways, chosen at start:
   `kSharedPictures` (24) shareable `RGBA8` textures with NT handles. The window imports them into OpenGL with
   `GL_EXT_memory_object_win32` (`nr_glshare.cpp`) and draws the one handed over (`latestShared`). The backend never draws
   into a texture the window holds (`sharedHeld`) or the newest one handed over.
-- **CPU pixels**: the picture is read back and the window uploads it (`latestPicture`). This is the fallback when the
-  import fails (for example under Wine/Proton) and with `TF_NATIVE_SHARE=0`.
+- **CPU pixels**: the picture is read back and the window uploads it straight from the mapped read-back
+  (`latestPicture`, then `pictureShown`), one hand-over of four in turn so a newer picture never replaces one
+  waiting; it is presented as it is handed over, paced like the shared textures. This is the path on Linux, the
+  fallback when the import fails (for example under Wine/Proton), and with `TF_NATIVE_SHARE=0`.
 
 The pacer (`pace::` in `nr_d3d.cpp`, `waitPicture` on the window's side) hands each picture over at its due time
 (`PictureOut::dueNs`) plus a delay that follows the GPU's times, so pictures reach the screen evenly.
