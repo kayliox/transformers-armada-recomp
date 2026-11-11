@@ -243,12 +243,14 @@ instructions = [
 # which overrides.cpp keeps as the game's (F1 "Trees close to you": fade) or -1 (stay: no tree is that near).
   { address = "0x429f30", value = "0xc7818008" }, # 0x429510: lwc1 $f1, -0x7FF8($gp) (was lwc1 $f1, -0x5190($gp))
   { address = "0x42a000", value = "0xc7818004" }, # 0x429510: lwc1 $f1, -0x7FFC($gp) (was lwc1 $f1, -0x518C($gp): the far one, 0x6CB0F4)
-  { address = "0x429fe0", value = "0x9381800c" }, # 0x429510 fade out: lbu $at, -0x7FF4($gp) (was addiu $v0, $v0, 0x1)
-  { address = "0x429fe4", value = "0x00411021" }, # addu $v0, $v0, $at (was sb $v0, 0xF5($s2))
-  { address = "0x429fe8", value = "0xa24200f5" }, # sb $v0, 0xF5($s2) (was lbu $v0, 0xF5($s2))
-  { address = "0x42a0b0", value = "0x9381800c" }, # 0x429510 fade in: lbu $at, -0x7FF4($gp) (was addiu $v0, $v0, 0x1)
-  { address = "0x42a0b4", value = "0x00411021" }, # addu $v0, $v0, $at (was sb $v0, 0xF5($s2))
-  { address = "0x42a0b8", value = "0xa24200f5" }, # sb $v0, 0xF5($s2) (was lbu $v0, 0xF5($s2))
+  # (`replaces`: the word each one replaces - the three move instructions around, so another release's build checks
+  # these words as they are, tools/make_config.py)
+  { address = "0x429fe0", value = "0x9381800c", replaces = "0x24420001" }, # 0x429510 fade out: lbu $at, -0x7FF4($gp) (was addiu $v0, $v0, 0x1)
+  { address = "0x429fe4", value = "0x00411021", replaces = "0xa24200f5" }, # addu $v0, $v0, $at (was sb $v0, 0xF5($s2))
+  { address = "0x429fe8", value = "0xa24200f5", replaces = "0x924200f5" }, # sb $v0, 0xF5($s2) (was lbu $v0, 0xF5($s2))
+  { address = "0x42a0b0", value = "0x9381800c", replaces = "0x24420001" }, # 0x429510 fade in: lbu $at, -0x7FF4($gp) (was addiu $v0, $v0, 0x1)
+  { address = "0x42a0b4", value = "0x00411021", replaces = "0xa24200f5" }, # addu $v0, $v0, $at (was sb $v0, 0xF5($s2))
+  { address = "0x42a0b8", value = "0xa24200f5", replaces = "0x924200f5" }, # sb $v0, 0xF5($s2) (was lbu $v0, 0xF5($s2))
   { address = "0x4293c4", value = "0x8f83a1ac" }, # 0x4293C0: lw $v1, -0x5E54($gp) (was addiu $v1, $zero, 0x190)
   # The drawing of those instances (0x429510) writes a record for each one it draws into a static array of 400
   # (0x728220, 0x60 bytes each) and a pointer to each into a list of 400 (0x731820, sorted by 0x42AC00) - no
