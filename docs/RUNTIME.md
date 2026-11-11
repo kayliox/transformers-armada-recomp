@@ -26,17 +26,17 @@ find all of this in [DEBUGGING.md](DEBUGGING.md), where things stand in [STATUS.
 
 ## The patches
 
-The submodule's working tree is where the work happens; the patch files are generated from
-it and must be regenerated before every commit of this repository:
+The submodule's working tree is where the work happens; each patch file is written by hand, one
+per change (upstream's areas keep their `0001`-`0166` names; this port adds `1001` and up), and
+the series is checked before every commit of this repository:
 
 ```powershell
 python tools\make_patches.py --verify
 ```
 
-This writes one patch per area from the difference between the pinned commit and the working
-tree, new files included, then checks out the pinned commit into `out\patch_verify`, applies
-the patches there and compares every changed and new file with the working tree. It reads
-the submodule without touching its files or its index.
+It checks out the pinned commit into `out\patch_verify`, applies every patch there in sorted
+order and compares every changed and new file with the working tree (line endings aside). It
+reads the submodule without touching its files or its index, and it never rewrites the patches.
 
 | Patch | Covers |
 |---|---|

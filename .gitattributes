@@ -1,5 +1,5 @@
-# The PS2Recomp patches are applied to a fresh clone by build.ps1: keep them byte for byte as
-# tools/make_patches.py writes them, whatever core.autocrlf says.
+# The PS2Recomp patches are applied to a fresh clone by build.ps1 and build.sh: keep them byte
+# for byte as their authors wrote them, whatever core.autocrlf says.
 *.patch -text
 # The README's screenshots (docs/images): binary, never touched by line endings.
 *.jpg binary
