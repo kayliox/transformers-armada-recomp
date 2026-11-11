@@ -46,6 +46,8 @@
 - Linux and Steam Deck: the native renderer uses less CPU and battery. Its Direct3D 12 layer (vkd3d) no longer wakes
   a helper thread at every draw (on a Steam Deck at 60 frames a second: 12% less CPU, about 1.2 W less), and the
   finished picture is copied to the window in one piece instead of row by row (half the time).
+- The native sound mixer does the same work with fewer steps (the sound is bit for bit the same): a little less CPU,
+  most on handhelds such as the Steam Deck.
 - Linux and Steam Deck: "Finishing HD textures" no longer stays on screen after the HD set is finished, including
   sets made before this fix, and "HD textures ready" no longer comes back at every start once the set is finished.
   `make_hd_textures.sh` checks the set's images once, as the Windows maker does (0.4.7's checks too).
