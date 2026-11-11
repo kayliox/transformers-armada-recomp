@@ -347,6 +347,11 @@ namespace nr
             }
             else if (share != 1 && backend().latestPicture(pixels, w, h, serial, has3D))
             {
+                // (taken: the pacer waits for the next one - paceWait. It was left at the last shared picture taken
+                // before the CPU hand-over took over, so every pass of the window found "a new picture": the same one
+                // was drawn ~190 times a second and the FPS counter counted each.)
+                fresh = true;
+                g_takenSerial.store(serial, std::memory_order_relaxed);
                 if (shown.id == 0u || shown.width != static_cast<int>(w) || shown.height != static_cast<int>(h))
                 {
                     if (shown.id != 0u)
@@ -503,6 +508,21 @@ namespace nr
                 width = static_cast<int>(sharedW);
                 height = static_cast<int>(sharedH);
                 return true;
+            }
+            // The CPU hand-over's picture: paced and logged as a shared one (shown when it is handed over).
+            {
+                const uint64_t skipped = serialBefore != 0u && serial > serialBefore + 1u ? serial - serialBefore - 1u : 0u;
+                if (fresh && g_pacerOn)
+                {
+                    g_pendingShown = true;
+                    g_pendingPicture = d3d::SharedPicture{};
+                    g_pendingSkipped = skipped;
+                }
+                else if (fresh)
+                    noteShown(d3d::SharedPicture{}, skipped);
+                else if (pacingLogOn())
+                    ++g_pacing.repeats;
+                g_pacedLive.store(true, std::memory_order_relaxed);
             }
             texture = shown.id;
             width = shown.width;

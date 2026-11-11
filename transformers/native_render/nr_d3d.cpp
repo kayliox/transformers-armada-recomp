@@ -4484,7 +4484,12 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                         g_published.width = w;
                         g_published.height = h;
                         ++g_published.serial;
+                        // (when it came, and the window woken for it - waitPicture: the CPU hand-over's pictures are paced
+                        // as the shared ones are; without it the window, paced since its shared pictures, saw a new picture on
+                        // every pass and drew the same one ~190 times a second)
+                        g_published.lastNs = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
                     }
+                    g_published.cv.notify_all();
                     const D3D12_RANGE written{0, 0};
                     g.slotReadback[slot]->Unmap(0, &written);
                 }
