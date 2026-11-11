@@ -2007,6 +2007,10 @@ namespace mod_menu
             return true; // (Debug always: its recordings - TODO 156)
 #else
             // The public build (no overlay): no Mods & cheats page and no Debug page - their rows are the overlay's.
+#if defined(__linux__)
+            if (page == Page::Quit)
+                return false; // (its text is for Windows, and the game's own main menu has QUIT GAME - TODO 277)
+#endif
             return page != Page::Mods && page != Page::Other;
 #endif
         }

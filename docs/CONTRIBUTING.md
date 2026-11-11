@@ -29,13 +29,15 @@ recordings. Screenshots and short videos are fine.
 ### Changes to PS2Recomp
 
 The `PS2Recomp` folder is a submodule and is never committed to directly. Changes to it live as patch files in
-`patches/ps2recomp/`, which `build.ps1` applies. After editing the submodule, run:
+`patches/ps2recomp/`, which `build.ps1` and `build.sh` apply in sorted order. Write one patch file per change
+(upstream's areas keep their `0001`-`0166` names; this port adds `1001` and up), then check the whole series:
 
 ```powershell
 python tools\make_patches.py --verify
 ```
 
-and commit the updated patch files.
+It applies every patch to a clean checkout of the pinned commit and compares the result with the submodule's
+working tree. It never rewrites the patch files.
 
 ### No game data, ever
 
