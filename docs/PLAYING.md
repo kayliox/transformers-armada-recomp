@@ -178,8 +178,12 @@ update, **Check HD textures** tries again.
 
 ### Controls
 
-Mouse speed, mouse in menus, vibration, the light bar, the stick response, car steering and the key layout.
+Mouse speed, mouse in menus, vibration, the light bar, the stick dead zones, the stick response, car steering and the
+key layout.
 
+- **Left / right stick dead zone, Auto** (the default): the game measures where each stick rests when you let go of it
+  and ignores that much, so a worn stick that does not come back to the centre does not make your robot walk or your
+  car steer on its own. A stick that rests at the centre keeps the usual 5%. You can also pick a fixed size.
 - **Stick response, Modern** (the default): a light touch walks, about a third of the stick runs.
   **Off** gives the original response back.
 - **Car steering, Original** steers as on the PS2. **Tuned** is gentler near the centre.

@@ -160,5 +160,24 @@ int main() {
         map(x,y,rx,ry,wide,1,.2f);
         check(x==0&&y==0&&rx==0&&ry==0,"a wider dead zone cuts the car's original axes");
     }
+    { // (patch 0167) Auto: the stick's rest measured on the pad
+        const auto settle=[](RestDeadzone& r,float x,float y,double from,double secs){
+            bool any=false;for(double t=from;t<=from+secs;t+=1/60.)any|=r.sample(x,y,t);return any;};
+        RestDeadzone centred;settle(centred,.01f,-.005f,0,3);
+        check(centred.deadzone()==kDeadzone,"a pad resting near the centre keeps 5%");
+        RestDeadzone worn;check(settle(worn,.04f,-.1136f,0,3),"a worn stick's rest is measured");
+        check(std::fabs(worn.rest-.1204f)<.001f&&std::fabs(worn.deadzone()-.1504f)<.001f,"the rest 12%: Auto 15%");
+        Config a=c;a.leftDeadzone=worn.deadzone();
+        float x=.04f,y=-.1136f,rx=0,ry=0;map(x,y,rx,ry,a,0,.2f);
+        check(x==0&&y==0,"the worn stick at rest: nothing, in play (the lift walked it before)");
+        x=.04f;y=-.1136f;rx=0;ry=0;map(x,y,rx,ry,c,0,.2f);
+        check(std::hypot(x,y)>.5f,"(the same rest under the 5% default walks)");
+        check(move(0,-1,a)>.85f,"full tilt still runs under Auto");
+        RestDeadzone thumb;bool any=false;
+        for(int i=0;i<600;++i){const float j=.0012f*(i%3);any|=thumb.sample(.5f+j,.02f,i/60.);}
+        check(!any&&thumb.deadzone()==kDeadzone,"a thumb moving the stick is never a rest");
+        RestDeadzone held;check(!settle(held,.5f,0,0,5)&&held.deadzone()==kDeadzone,"a stick held at 50% is never a rest");
+        RestDeadzone brief;check(!settle(brief,.12f,0,0,.9),"under a second still is not a rest yet");
+    }
     std::printf("CHECKS %d FAILURES %d\n",checks,failures);return failures?1:0;
 }

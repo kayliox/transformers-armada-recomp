@@ -45,6 +45,8 @@ Click into the game window first. **Esc** gives the mouse back to Windows.
 - DualSense, DualShock 4 and Xbox controllers should work right away. Others work through Steam Input.
 - If Steam Input shows your PlayStation controller as an Xbox controller, set **F1 > Display > Button prompts**
   to **PlayStation**.
+- If your robot walks, your car steers or the view turns on its own (stick drift), set **F1 > Controls > Left / Right
+  stick dead zone** to a larger size. Auto already covers how far your sticks rest from the centre when you let go.
 - If Steam and the game both read a Sony controller, set **F1 > Controls > Controller support** (under Advanced)
   so only one of them does.
 

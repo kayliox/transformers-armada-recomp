@@ -76,13 +76,16 @@ namespace controller_settings
         responseSetting("PS2X_STICK_RESPONSE", "Stick response", "Modern: early robot walk/run and selectable car steering. Off restores the old host pad bytes.",
                         "on", {{"on", "Modern"}, {"off", "Off (original port)"}}, 40);
         // (TODO 274) The sticks' dead zones: applied where the pad's state is made, so the menus, the robot, the car and
-        // every kind of controller get them. 5% is what the response always had.
+        // every kind of controller get them. 5% is what the response always had. Auto (patch 0167): the stick's rest
+        // measured on the pad plus 3 points, never under 5% - a pad that rests at the centre gets 5%, a worn one more.
         responseSetting("PS2X_STICK_LEFT_DEADZONE", "Left stick dead zone",
-                        "How far the left stick must move before the game sees it. Raise it if the robot walks or a menu scrolls on its own.",
-                        "0.05", {{"0", "Off"}, {"0.05", "5% (default)"}, {"0.10", "10%"}, {"0.15", "15%"}, {"0.20", "20%"}, {"0.25", "25%"}, {"0.30", "30%"}}, 38);
+                        "How far the left stick must move before the game sees it. Auto measures where the stick rests when you let go "
+                        "(a worn stick does not come back to the centre) and ignores that much. Raise it if the robot walks or a menu scrolls on its own.",
+                        "auto", {{"auto", "Auto (default)"}, {"0", "Off"}, {"0.05", "5%"}, {"0.10", "10%"}, {"0.15", "15%"}, {"0.20", "20%"}, {"0.25", "25%"}, {"0.30", "30%"}}, 38);
         responseSetting("PS2X_STICK_RIGHT_DEADZONE", "Right stick dead zone",
-                        "How far the right stick must move before the game sees it. Raise it if the view turns on its own.",
-                        "0.05", {{"0", "Off"}, {"0.05", "5% (default)"}, {"0.10", "10%"}, {"0.15", "15%"}, {"0.20", "20%"}, {"0.25", "25%"}, {"0.30", "30%"}}, 39);
+                        "How far the right stick must move before the game sees it. Auto measures where the stick rests when you let go "
+                        "and ignores that much. Raise it if the view turns on its own.",
+                        "auto", {{"auto", "Auto (default)"}, {"0", "Off"}, {"0.05", "5%"}, {"0.10", "10%"}, {"0.15", "15%"}, {"0.20", "20%"}, {"0.25", "25%"}, {"0.30", "30%"}}, 39);
         responseSetting("PS2X_STICK_LEFT_LIFT", "Left anti-deadzone", "Robot lift before sensitivity; 0.625 starts walking just outside 5% tilt.",
                         "0.625", {{"0", "Off"}, {"0.20", "0.20"}, {"0.625", "0.625 (default)"}, {"0.70", "0.70"}}, 41);
         responseSetting("PS2X_STICK_RIGHT_LIFT", "Right anti-deadzone", "Camera stick lift; the mouse and keyboard bypass it.",
