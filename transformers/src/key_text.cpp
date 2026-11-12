@@ -124,10 +124,109 @@ namespace key_text
                 s.replace(at, from.size(), to);
         }
 
+        // (TODO 288 follow-up, the European disc) The same hints in French, German, Italian and Spanish: the tables'
+        // own phrases for the sticks and the buttons (Windows-1252, as the tables hold them), said with the player's keys
+        // in each language's words - "touche" / "Taste" / "tasto", the mouse as "Souris" / "Maus" / "Mouse" / "Rat\xf3n",
+        // the mouse buttons named in the language. Nothing matches a string of another language, so the English table
+        // (and the USA disc) is untouched. The same text when nothing in it changes.
+        std::string europeanText(const std::string &original, const std::map<std::string, std::vector<std::string>> &keys)
+        {
+            const auto has = [&](const char *t) { return original.find(t) != std::string::npos; };
+            const int lang = has("analogique") || has("Recon avec R3")                      ? 1   // French
+                             : has("Analog-Stick") || has("Aufkl\xe4rung: R3")               ? 2   // German
+                             : has("evetta analogica") || has("Ricognizione: tasto R3")      ? 3   // Italian
+                             : has("oystick anal\xf3g") || has("Recon. bot\xf3n R3")         ? 4   // Spanish
+                                                                                             : 0;
+            if (lang == 0)
+                return original;
+            // (the mouse buttons' names, as keyWord gives them in English, in the string's language)
+            static const std::map<std::string, std::string> mouse[5] = {
+                {},
+                {{"left click", "clic gauche"}, {"right click", "clic droit"}, {"middle click", "clic milieu"},
+                 {"side mouse button", "bouton souris"}, {"extra mouse button", "bouton souris"}},
+                {{"left click", "Linksklick"}, {"right click", "Rechtsklick"}, {"middle click", "Mittelklick"},
+                 {"side mouse button", "Maustaste"}, {"extra mouse button", "Maustaste"}},
+                {{"left click", "clic sinistro"}, {"right click", "clic destro"}, {"middle click", "clic centrale"},
+                 {"side mouse button", "tasto mouse"}, {"extra mouse button", "tasto mouse"}},
+                {{"left click", "clic izquierdo"}, {"right click", "clic derecho"}, {"middle click", "clic central"},
+                 {"side mouse button", "bot\xf3n del rat\xf3n"}, {"extra mouse button", "bot\xf3n del rat\xf3n"}}};
+            const auto key = [&](const char *button) {
+                std::string k = shownKey(keys, button);
+                if (k.empty() && std::string(button) == "r3" && !ps2_host_input::mouseButtonBound(1))
+                    k = "right click"; // (TODO 224: R3 has no key by default, the right mouse button does recon mode)
+                const auto it = mouse[lang].find(k);
+                return it != mouse[lang].end() ? it->second : k;
+            };
+            const std::string up = key("lup"), left = key("lleft"), down = key("ldown"), right = key("lright");
+            const std::string move = up + " " + left + " " + down + " " + right;
+            const std::string l1 = key("l1"), cross = key("cross"), r3 = key("r3");
+            std::string s = original;
+            if (lang == 1)
+            {
+                replaceAll(s, "Joystick analogique gauche - Direction", left + " " + right + " - Direction");
+                replaceAll(s, "joystick vers l'arri\xe8re", "touche " + down);
+                replaceAll(s, "Joystick analogique gauche", move);
+                replaceAll(s, "Joystick analogique droit", "Souris");
+                if (!l1.empty())
+                    replaceAll(s, "touche L1", "touche " + l1);
+                if (!cross.empty())
+                    replaceAll(s, "touche X", "touche " + cross);
+                if (!r3.empty())
+                    replaceAll(s, "Recon avec R3", "Recon avec " + r3);
+            }
+            else if (lang == 2)
+            {
+                replaceAll(s, "Linker Analog-Stick - Steuern", left + " " + right + " - Steuern");
+                replaceAll(s, "Linker Analog-Stick nach unten", down + "-Taste");
+                replaceAll(s, "Linker Analog-Stick", move);
+                replaceAll(s, "Rechter Analog-Stick", "Maus");
+                if (!l1.empty())
+                    replaceAll(s, "L1-Taste", l1 + "-Taste");
+                if (!cross.empty())
+                    replaceAll(s, "X-Taste", cross + "-Taste");
+                if (!r3.empty())
+                    replaceAll(s, "Aufkl\xe4rung: R3", "Aufkl\xe4rung: " + r3);
+            }
+            else if (lang == 3)
+            {
+                replaceAll(s, "Levetta analogica sinistra: sterzo", left + " " + right + ": sterzo");
+                replaceAll(s, "muovi la levetta analogica sinistra in basso", "tieni premuto " + down);
+                replaceAll(s, "Muovi la levetta analogica sinistra", "Usa " + move);
+                replaceAll(s, "Levetta analogica sinistra", move);
+                replaceAll(s, "Levetta analogica destra", "Mouse");
+                if (!r3.empty())
+                    replaceAll(s, "Ricognizione: tasto R3", "Ricognizione: " + r3);
+                if (!l1.empty())
+                    replaceAll(s, "tasto L1", "tasto " + l1);
+                if (!cross.empty())
+                    replaceAll(s, "tasto X", "tasto " + cross);
+            }
+            else
+            {
+                replaceAll(s, "Joystick anal\xf3gico izquierdo: Direcci\xf3n", left + " " + right + ": Direcci\xf3n");
+                replaceAll(s, "tira del joystick anal\xf3g. izq.", "mant\xe9n " + down);
+                replaceAll(s, "el joystick anal\xf3g. izq.", move);
+                replaceAll(s, "Joystick anal\xf3gico izquierdo", move);
+                replaceAll(s, "Joystick anal\xf3gico derecho", "Rat\xf3n");
+                if (!l1.empty())
+                {
+                    replaceAll(s, "Pulsa L1", "Pulsa " + l1);
+                    replaceAll(s, "pulsado L1", "pulsado " + l1);
+                }
+                if (!cross.empty())
+                    replaceAll(s, "el bot\xf3n X", cross);
+                if (!r3.empty())
+                    replaceAll(s, "Recon. bot\xf3n R3", "Recon. " + r3);
+            }
+            return s;
+        }
+
         // The keyboard's wording of a string (the stick phrases first, the longest first; then the buttons named in
         // the same strings). The same text when nothing in it changes.
         std::string keyboardText(const std::string &original, const std::map<std::string, std::vector<std::string>> &keys)
         {
+            if (std::string eu = europeanText(original, keys); eu != original)
+                return eu; // (the European disc's other languages)
             const std::string up = shownKey(keys, "lup"), left = shownKey(keys, "lleft"), down = shownKey(keys, "ldown"),
                               right = shownKey(keys, "lright");
             const std::string move = up + " " + left + " " + down + " " + right;
@@ -162,7 +261,10 @@ namespace key_text
         {
             const auto t0 = std::chrono::steady_clock::now();
             const uint32_t from = 0x00100000u, to = PS2_RAM_SIZE;
-            static const char *const marks[] = {"analog stick", "R3 button", "L3 button"};
+            // (and the European disc's French, German, Italian and Spanish: europeanText)
+            static const char *const marks[] = {"analog stick", "R3 button", "L3 button", "Joystick analogique", "joystick vers l'arri\xe8re",
+                                                "Recon avec R3", "Analog-Stick", "Aufkl\xe4rung: R3", "evetta analogica",
+                                                "Ricognizione: tasto R3", "oystick anal\xf3g", "Recon. bot\xf3n R3"};
             std::vector<uint32_t> starts;
             for (const char *m : marks)
             {
