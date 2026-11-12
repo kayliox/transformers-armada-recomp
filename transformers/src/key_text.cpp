@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <string>
@@ -32,16 +33,27 @@ namespace key_text
         {
             uint32_t object = 0, chars = 0;
             std::string original;
+            std::string written; // (the text last written there: the original or a keyboard wording - "" none yet)
         };
 
         std::mutex g_mutex;
         std::vector<Entry> g_entries; // (found by the search; the game's thread applies them)
+        // (TODO 309: those let go at a load, kept to be taken back after it where the string is still the game's - the boot
+        // table's - with its original: the search finds only texts that still name a button or stick, not ones rewritten)
+        std::vector<Entry> g_previous;
         std::atomic<bool> g_searching{false};
         bool g_searched = false;
         bool g_shown = false;                // the keyboard texts in place
         std::string g_shownLayout;           // (the layout they were made from: a change makes them again)
         std::chrono::steady_clock::time_point g_lastSearch{}, g_lastCheck{};
         int g_searches = 0;
+        // (TODO 309: a load frees what the strings were found in - the HQ's Mini-Con pages - and the heap gives their bytes
+        // to the level: the strings are let go when a load begins or the HQ ends, and looked for again once it settles)
+        std::atomic<bool> g_dropRequested{false};
+        std::atomic<unsigned> g_epoch{0u}; // (a search started before a drop: its results thrown away)
+        std::chrono::steady_clock::time_point g_holdUntil{};
+        uint32_t g_loadingBefore = 0u;
+        constexpr uint32_t kLoading = 0x006CD324u; // (set while the game loads - and throughout the HQ)
 
         uint32_t word(const uint8_t *rdram, uint32_t a)
         {
@@ -50,6 +62,16 @@ namespace key_text
             return v;
         }
         void setWord(uint8_t *rdram, uint32_t a, uint32_t v) { std::memcpy(rdram + a, &v, 4); }
+
+        // (TODO 309) The string is still exactly as last left there - the game's text or ours - in the same std::string.
+        bool stillHeld(const uint8_t *rdram, const Entry &e)
+        {
+            const std::string &held = e.written.empty() ? e.original : e.written;
+            const uint32_t flags = word(rdram, e.object);
+            return e.chars + held.size() + 1u < PS2_RAM_SIZE && word(rdram, e.object + 8u) == e.chars && (flags & 1u) &&
+                   (flags >> 1) >= e.original.size() && word(rdram, e.object + 4u) == held.size() &&
+                   std::memcmp(rdram + e.chars, held.data(), held.size()) == 0 && rdram[e.chars + held.size()] == 0;
+        }
 
         bool enabled()
         {
@@ -291,7 +313,7 @@ namespace key_text
         }
 
         // ---- The search: the strings that name a stick, and the std::strings that hold them ----
-        void search(const uint8_t *rdram)
+        void search(const uint8_t *rdram, unsigned epoch)
         {
             const auto t0 = std::chrono::steady_clock::now();
             const uint32_t from = 0x00100000u, to = PS2_RAM_SIZE;
@@ -352,6 +374,14 @@ namespace key_text
             std::fprintf(stderr, "[key text] the sticks' strings: %zu found (%zu texts), %.0f ms\n", found.size(), starts.size(),
                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
             std::lock_guard<std::mutex> lock(g_mutex);
+            if (epoch != g_epoch.load())
+                return; // (a load began while it searched: what it found may be freed - looked for again)
+            // (TODO 309: the strings already rewritten no longer name a button, so the search does not find them: those still
+            // held as left are kept, with their originals)
+            for (Entry &e : g_entries)
+                if (std::none_of(found.begin(), found.end(), [&](const Entry &f) { return f.object == e.object && f.chars == e.chars; }) &&
+                    stillHeld(rdram, e))
+                    found.push_back(std::move(e));
             g_entries = std::move(found);
             g_searched = true;
         }
@@ -370,9 +400,11 @@ namespace key_text
             std::lock_guard<std::mutex> lock(g_mutex);
             bool allThere = true;
             int changed = 0;
-            for (const Entry &e : g_entries)
+            for (Entry &e : g_entries)
             {
-                if (word(rdram, e.object + 8u) != e.chars)
+                // (still the game's std::string as found: its pointer, an odd first word and room for the original)
+                const uint32_t flags = word(rdram, e.object);
+                if (word(rdram, e.object + 8u) != e.chars || !(flags & 1u) || (flags >> 1) < e.original.size())
                 {
                     allThere = false;
                     continue;
@@ -383,14 +415,13 @@ namespace key_text
                 const std::string now(reinterpret_cast<const char *>(rdram + e.chars), std::min<uint32_t>(size, 4096u));
                 if (now == want)
                     continue;
-                if (now != e.original && now != kb)
+                // (TODO 309: written over only where it still holds the game's text or the one written last - an old layout's.
+                // Any other text means the bytes are no longer this string's: the heap gave them to something else - the
+                // level loaded after the HQ - and writing there broke the level's data: "Generic fatal error" at the warp.)
+                if (now != e.original && now != kb && (e.written.empty() || now != e.written))
                 {
-                    // (a text that is neither: an old layout's - written over only where it is no longer than the original)
-                    if (size > e.original.size())
-                    {
-                        allThere = false;
-                        continue;
-                    }
+                    allThere = false;
+                    continue;
                 }
                 static int told = 24;
                 if (told > 0)
@@ -401,6 +432,7 @@ namespace key_text
                 std::memset(rdram + e.chars, 0, e.original.size() + 1u);
                 std::memcpy(rdram + e.chars, want.data(), want.size());
                 setWord(rdram, e.object + 4u, static_cast<uint32_t>(want.size()));
+                e.written = want;
                 ++changed;
             }
             if (changed)
@@ -409,11 +441,63 @@ namespace key_text
         }
     }
 
+    void levelChanged() { g_dropRequested = true; }
+
     void frame(uint8_t *rdram)
     {
         if (!enabled())
             return;
         const auto now = std::chrono::steady_clock::now();
+        // (TODO 309: a load begun, or the HQ ended - levelChanged: the strings found are let go, and looked for again 1 s
+        // after a level's load ends - 10 s at most, the HQ keeps the loading word set)
+        {
+            const uint32_t loading = word(rdram, kLoading);
+            const bool loadBegan = loading != 0u && g_loadingBefore == 0u;
+            g_loadingBefore = loading;
+            if (loadBegan || g_dropRequested.exchange(false))
+            {
+                std::lock_guard<std::mutex> lock(g_mutex);
+                ++g_epoch;
+                const bool had = !g_entries.empty();
+                g_previous.insert(g_previous.end(), std::make_move_iterator(g_entries.begin()), std::make_move_iterator(g_entries.end()));
+                g_entries.clear();
+                g_searched = false;
+                g_shown = false;
+                g_shownLayout.clear();
+                g_searches = 0;
+                g_holdUntil = now + std::chrono::seconds(10); // (the HQ keeps the loading word set: at most 10 s)
+                if (had)
+                    std::fprintf(stderr, "[key text] a load: the strings found are let go (looked for again after it)\n");
+            }
+            // (a level: 1 s after its load ends)
+            if (loading == 0u && now < g_holdUntil && g_holdUntil - now > std::chrono::seconds(1))
+                g_holdUntil = now + std::chrono::seconds(1);
+            if (now < g_holdUntil)
+                return;
+        }
+        // (TODO 309: after a load, the strings let go that are still exactly as written - the boot table's, never freed - are
+        // taken back with their originals; the others were freed with the load and stay let go)
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            if (!g_previous.empty())
+            {
+                size_t kept = 0;
+                for (Entry &p : g_previous)
+                {
+                    if (!stillHeld(rdram, p))
+                        continue;
+                    const auto same = std::find_if(g_entries.begin(), g_entries.end(), [&](const Entry &e)
+                                                   { return e.object == p.object && e.chars == p.chars; });
+                    if (same != g_entries.end())
+                        *same = std::move(p);
+                    else
+                        g_entries.push_back(std::move(p));
+                    ++kept;
+                }
+                std::fprintf(stderr, "[key text] after the load: %zu of %zu strings still the game's, taken back\n", kept, g_previous.size());
+                g_previous.clear();
+            }
+        }
         const bool keyboard = ps2_host_input::keyboardPromptsShown();
         // (Nothing to do until the keyboard is used: the controller's words are the game's own.)
         if (!g_searched && !g_searching.load())
@@ -423,8 +507,9 @@ namespace key_text
             ++g_searches;
             g_lastSearch = now;
             g_searching = true;
-            std::thread([rdram] {
-                search(rdram);
+            const unsigned epoch = g_epoch.load();
+            std::thread([rdram, epoch] {
+                search(rdram, epoch);
                 g_searching = false;
             }).detach();
             return;

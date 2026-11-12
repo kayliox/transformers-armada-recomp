@@ -1,5 +1,11 @@
 # What's new
 
+## 0.6.9
+
+**Fixed**
+- Warping from the HQ into a level no longer sometimes stops on a "Generic fatal error" screen when you play with
+  keyboard and mouse.
+
 ## 0.6.8
 
 **New**

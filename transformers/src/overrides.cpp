@@ -2423,6 +2423,7 @@ namespace
                      static_cast<unsigned long long>(runtime->eeScheduler().currentVSyncTick()));
         g_hqMoments.store(false); // (the levels' own setting from here)
         g_executorVtable = 0u;    // (the HQ is over: the next level's load is muted again, fast_load)
+        key_text::levelChanged(); // (TODO 309: the HQ's strings are freed with it - never written to after this)
         if (g_inHq)
             switchFrameRate(rdram, ctx, runtime, 0);
         g_inHq = false;

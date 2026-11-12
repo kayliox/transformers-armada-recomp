@@ -22,4 +22,6 @@ namespace key_text
 {
     // Every game frame, on the game's thread (overrides.cpp frameKick).
     void frame(uint8_t *rdram);
+    // (TODO 309) The HQ ended: the strings found are let go (the HQ's pages freed; a level's load is seen by itself).
+    void levelChanged();
 }
