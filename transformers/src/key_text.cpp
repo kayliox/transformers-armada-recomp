@@ -160,6 +160,8 @@ namespace key_text
             const std::string up = key("lup"), left = key("lleft"), down = key("ldown"), right = key("lright");
             const std::string move = up + " " + left + " " + down + " " + right;
             const std::string l1 = key("l1"), cross = key("cross"), r3 = key("r3");
+            // (a button on the mouse is no key: "le clic milieu", not "la touche clic milieu")
+            const auto onMouse = [&](const char *button) { return mouse[lang].count(shownKey(keys, button)) != 0; };
             std::string s = original;
             if (lang == 1)
             {
@@ -167,10 +169,17 @@ namespace key_text
                 replaceAll(s, "joystick vers l'arri\xe8re", "touche " + down);
                 replaceAll(s, "Joystick analogique gauche", move);
                 replaceAll(s, "Joystick analogique droit", "Souris");
-                if (!l1.empty())
+                if (!l1.empty() && onMouse("l1"))
+                {
+                    replaceAll(s, "la touche L1 enfonc\xe9" "e", "le " + l1 + " enfonc\xe9");
+                    replaceAll(s, "touche L1 enfonc\xe9" "e", l1 + " enfonc\xe9");
+                    replaceAll(s, "la touche L1", "le " + l1);
+                    replaceAll(s, "touche L1", l1);
+                }
+                else if (!l1.empty())
                     replaceAll(s, "touche L1", "touche " + l1);
                 if (!cross.empty())
-                    replaceAll(s, "touche X", "touche " + cross);
+                    replaceAll(s, "touche X", onMouse("cross") ? cross : "touche " + cross);
                 if (!r3.empty())
                     replaceAll(s, "Recon avec R3", "Recon avec " + r3);
             }
@@ -181,9 +190,9 @@ namespace key_text
                 replaceAll(s, "Linker Analog-Stick", move);
                 replaceAll(s, "Rechter Analog-Stick", "Maus");
                 if (!l1.empty())
-                    replaceAll(s, "L1-Taste", l1 + "-Taste");
+                    replaceAll(s, "L1-Taste", onMouse("l1") ? l1 : l1 + "-Taste");
                 if (!cross.empty())
-                    replaceAll(s, "X-Taste", cross + "-Taste");
+                    replaceAll(s, "X-Taste", onMouse("cross") ? cross : cross + "-Taste");
                 if (!r3.empty())
                     replaceAll(s, "Aufkl\xe4rung: R3", "Aufkl\xe4rung: " + r3);
             }
@@ -197,9 +206,9 @@ namespace key_text
                 if (!r3.empty())
                     replaceAll(s, "Ricognizione: tasto R3", "Ricognizione: " + r3);
                 if (!l1.empty())
-                    replaceAll(s, "tasto L1", "tasto " + l1);
+                    replaceAll(s, "tasto L1", onMouse("l1") ? l1 : "tasto " + l1);
                 if (!cross.empty())
-                    replaceAll(s, "tasto X", "tasto " + cross);
+                    replaceAll(s, "tasto X", onMouse("cross") ? cross : "tasto " + cross);
             }
             else
             {
