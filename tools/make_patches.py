@@ -8,11 +8,12 @@ uncommitted edits and new files. The patches are that difference, split by area;
 applies them to a fresh clone. Neither mode touches the submodule's files or its index (new
 files are added to a temporary index), so nothing gets rebuilt because of it.
 
-The default invocation is the writer: it rewrites the five area patches (0001-0005) from the
-working tree. The hand-written series (the later upstream patches and this port's 1001+) is
-checked with --verify, which applies every patch already in patches/ps2recomp/ to a clean
-checkout of the pinned commit and compares every changed and new file with the working tree,
-line endings aside. --verify never writes or removes a patch.
+The default invocation deletes every patches/ps2recomp/*.patch and replaces the series with
+five grouped area patches (0001-0005) from the working tree. This also replaces later
+hand-written patches, including this port's 1001+. Do not use it to maintain that series.
+Use --verify instead: it applies every existing patch to a clean checkout of the pinned
+commit and compares every changed and new file with the working tree, line endings aside.
+--verify never writes or removes a patch.
 """
 import argparse
 import os

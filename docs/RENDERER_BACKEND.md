@@ -46,7 +46,8 @@ and `gfx::device()` are defined there; the Direct3D 12 backend's own are `d3d12B
 | `latestPicture(pixels, rowPitch, index, serial, meta)`, `pictureShown(index)` | window thread | Linux only: the next CPU picture, in the order the pictures were handed over: the hand-over's mapped read-back itself, held (not read back into again) until the window calls `pictureShown` after its upload. Windows keeps 0.6's `latestPicture(pixels, width, height, serial, has3D)`, which copies the newest picture into a vector. |
 | `setSharedPictures(on)`, `latestShared(picture, serial)`, `sharedHeld(index)` | window thread | The newest picture as a texture the window imports, and which one the window still holds. |
 | `waitPicture(serial, untilNs, lastNs)`, `pacingMode()` | window thread | The pacer: wait for the next picture by its due time. |
-| `setWindowSize(w, h)` (Linux) / `setWindowLines(h)` (Windows: what 0.6 and earlier use) | any | Settings, used from the next frame. |
+| `setWindowSize(w, h)` (Linux) / `setWindowLines(h)` (Windows: what 0.6 and earlier use) | window thread | The window's size in pixels, called every frame by the picture provider, not only on a resize. It is one or two relaxed atomic stores (Linux also stores the width), so calling it each frame costs next to nothing; the next picture uses it (Linux: as many lines as the window shows, or its width over the picture's shape in a narrower window; Windows: the window's lines, as 0.6 does). |
+| `setAntiAliasing(mode)`, `setSupersampling(on)`, `setSpeedupsForced(on)` | any | Settings, used from the next frame: the anti-aliasing pass (0 off, 1 FXAA, 2 SMAA 1x), supersampling (the 3D drawn at 1.5x the picture's pixels and averaged down), and a checking aid that forces the picture-keeping speed-ups on or off (-1: as the settings say). |
 | `largeImageCap`, `largeImageBudget`, `largeImageBytes`, `adapterMemoryMB`, `qualityPreset` | any | The HD textures' video-memory budget and the quality preset. |
 | `gpuPictureMs`, `gpuExtraMs`, `cpuPictureMs`, `replayWaitMs`, `slotWaitMs`, `pacerDelayMs` | render or window thread | Timing figures for the frame pacer and the stats lines. |
 
@@ -332,7 +333,7 @@ only the tone mapping's SDR part exists (`ToneMap`). For an HDR mode:
 - A setting for paper white and peak brightness, since displays differ.
 
 The hand-over is the part of the backend that is least separated today: the window's side lives in `nr_present.cpp`
-and `nr_glshare.cpp`, and calls `nr::d3d` directly. Changing it is part of the SDL3 work.
+and `nr_glshare.cpp`, the calls go through `nr::backend()`, and changing it is part of the SDL3 work.
 
 ## 8. Build integration
 
@@ -418,4 +419,6 @@ same frame rate as before. S1 named the neutral types (`nr_backend.h`). S2 moved
 the targets; the textures, meshes and rings; the state and draws; the copies, the effects and the anti-aliasing; the
 queries, statistics, predication and read-backs (the occlusion probe became an effect read back through `readTarget`);
 and finally the frame's life (`prepareFrame`, `beginFrame`, `endFrame`), after which the frame builder moved into
-`nr_frame.cpp`. Left for later: the window hand-over (section 7) and the callers' switch to `nr::backend()`.
+`nr_frame.cpp`. The callers then moved to `nr::backend()`, and the hand-over followed: Linux hands over its mapped
+read-back in turn, keeping each picture until the window has uploaded it, while Windows keeps 0.6's copied newest
+picture. The window's own side stayed in `nr_present.cpp` and `nr_glshare.cpp` (section 7).

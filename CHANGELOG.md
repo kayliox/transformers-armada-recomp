@@ -15,7 +15,8 @@
 - Linux: OpenGL goes through Mesa's Zink driver when the usual driver lacks a feature the GPU renderer needs (AMD,
   the Steam Deck). `TF_ZINK=0` turns this off.
 - Native renderer: the optional Vulkan backend (in development, off by default) compiles with the current backend
-  interface, and the CPU picture hand-over keeps each picture as the window reads it until the window has uploaded it.
+  interface, and on Linux the CPU picture hand-over keeps each picture as the window reads it until the window has
+  uploaded it.
 - Linux: the mouse in the menus, the F1 menu's typing and scrolling, Xbox-controller vibration and the HD movies work
   as on Windows.
 - Linux: the game finds its files and memory card saves whatever the case of their names, as on Windows, and the
@@ -46,9 +47,9 @@
   at 175 frames a second, the extra pictures never seen): less CPU, GPU and battery used.
 - The F1 menu no longer shows red stripes and broken text with Zink (Mesa's command reordering is turned off
   for the game; `ZINK_DEBUG` set by you still wins).
-- The native renderer no longer draws a larger picture than the screen shows on narrower screens. On a Steam Deck's
-  16:10 screen, the 16:9 picture was drawn at 1424x801 and shrunk to 1280x720; it is now drawn at 1280x720.
-  Less work for the graphics card, the same picture on screen.
+- Linux: the native renderer no longer draws a larger picture than the window shows on narrower screens.
+  With 16:9 selected on a Steam Deck, it draws 1280x720 instead of drawing 1424x801 and shrinking it.
+  Match screen follows the window's shape; it is not a fixed 720-line preset.
 - The game window no longer uploads an unused placeholder picture on every frame while the native renderer is on.
   On Linux and Steam Deck it did this 60–90 times a second, so this saves a little CPU work.
 - Linux and Steam Deck: the native renderer uses less CPU and battery. Its Direct3D 12 layer (vkd3d) no longer wakes
@@ -56,12 +57,13 @@
   finished picture is copied to the window in one piece instead of row by row (half the time).
 - The native sound mixer does the same work with fewer steps (the sound is bit for bit the same): a little less CPU,
   most on handhelds such as the Steam Deck.
-- F1 > Display > Frame rate limit now includes 45: on a 90 Hz screen such as the Steam Deck OLED's each picture is
-  then shown for two refreshes. A 45 limit is also no longer turned into 60 at the start of a session.
+- Linux: F1 > Display > Frame rate limit now includes 45: on a 90 Hz screen such as the Steam Deck OLED's each
+  picture is then shown for two refreshes. A 45 limit is also no longer turned into 60 at the start of a session.
 - Linux and Steam Deck: the native renderer shows each picture as it is handed over, as on Windows, instead of
   waiting for a VBlank: a 45 limit now gives 45 frames a second in steady play (it read 38-39); a loading window may
-  still repeat or drop a picture, and the picture is uploaded straight from the renderer's read-back - the render
-  thread's setup halves (1.15 ms -> 0.57 ms) and the power at 45 drops a little (8.98 W -> 8.13 W).
+  still repeat or drop a picture, and the picture is uploaded straight from the renderer's read-back. Those figures
+  come from a pre-0.6 A/B on the build before the merge, not the current build: the render thread's setup halves
+  (1.15 ms -> 0.57 ms) and the power at 45 drops a little (8.98 W -> 8.13 W; historical, not current-build figures).
 - F1: the Windows-worded "Quit game" page is no longer in the menu on Linux and the Steam Deck (the game's own main
   menu has QUIT GAME).
 - Linux and Steam Deck: "Finishing HD textures" no longer stays on screen after the HD set is finished, including

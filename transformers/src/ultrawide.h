@@ -22,7 +22,7 @@
 // The window then shows the picture at S, and the 2D (HUD, menus, text, drawn for 4:3) is narrowed
 // by (4/3) / S, its groups kept at the screen's edges (the runtime's overlay squeeze).
 //
-// TF_ASPECT = 16:9 (the game's own, the default), 21:9, 32:9, screen (the window's shape) or W:H.
+// TF_ASPECT = screen (the default: the window's shape), 16:9 (the game's own), 21:9, 32:9 or W:H.
 // Up to 2.4 (the data's tested range; 32:9 showed culling holes at the sides in 12 of 90 frames
 // in the PAL tests, so it is clamped). Movies stay 4:3.
 

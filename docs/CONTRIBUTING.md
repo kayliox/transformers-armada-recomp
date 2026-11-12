@@ -30,7 +30,7 @@ recordings. Screenshots and short videos are fine.
 
 The `PS2Recomp` folder is a submodule and is never committed to directly. Changes to it live as patch files in
 `patches/ps2recomp/`, which `build.ps1` and `build.sh` apply in sorted order. Write one patch file per change
-(upstream's areas keep their `0001`-`0166` names; this port adds `1001` and up), then check the whole series:
+(upstream's patches keep their names through `0171`; this port adds `1001` and up), then check the whole series:
 
 ```powershell
 python tools\make_patches.py --verify
@@ -38,6 +38,9 @@ python tools\make_patches.py --verify
 
 It applies every patch to a clean checkout of the pinned commit and compares the result with the submodule's
 working tree. It never rewrites the patch files.
+
+The bare command is upstream's writer: it deletes all existing `.patch` files and replaces the series with five
+grouped area patches (`0001`–`0005`). Do not use it to update this hand-written series.
 
 ### No game data, ever
 

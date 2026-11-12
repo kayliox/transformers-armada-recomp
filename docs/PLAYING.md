@@ -147,7 +147,7 @@ Your choices are saved in `settings.ini` in the install folder.
 | Screen | Which monitor the game uses. |
 | Aspect ratio | 4:3, 16:9, 21:9, Match screen, or Ultrawide 2.4:1. Wider shows more at the sides. |
 | Field of view | How wide the camera sees. |
-| Frame rate limit | The most frames a second the game draws: 30, 60, 90, 120, 144, 165, 240 or Unlimited. The game always runs at its true speed. |
+| Frame rate limit | The most frames a second the game draws: 30, 60, 90, 120, 144, 165, 240 or Unlimited (Linux also offers 45). The game always runs at its true speed. |
 | Show frame rate | A frame counter in the corner (F3). |
 | Sharp text | The game's fonts, redrawn sharp. |
 | Button prompts | Match device (your keys, or your controller's buttons), PlayStation, Xbox, or PS2 (original). |
