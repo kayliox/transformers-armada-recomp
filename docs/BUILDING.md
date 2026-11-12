@@ -70,8 +70,11 @@ cd transformers-armada-recomp
 The build copies the FFmpeg shared libraries it found beside the executable
 (`tools/bundle_libraries.cmake`) and the executable looks in its own folder first (`$ORIGIN`), so the build carries
 its movie decoding with it: a build made in a distribution's container runs on SteamOS, which has no FFmpeg or
-another ABI. glibc, libstdc++ and libgcc stay the host's. FFmpeg linked statically (no `libav*` in `ldd`) copies
-nothing.
+another ABI. glibc, libstdc++ and libgcc stay the host's, and so do the graphics, audio and input libraries (GL,
+EGL, Vulkan, X11/xcb, Wayland, DRM, ALSA, Pulse, udev and dbus): because the game's folder is a loader search path
+for the host's own GPU driver too, the container's older copies would be picked up first on a newer SteamOS. FFmpeg's
+other dependencies (the codec libraries and the like) travel with it. FFmpeg linked statically (no `libav*` in `ldd`)
+copies nothing.
 
 The emulated renderer's GPU path needs an OpenGL feature (`GL_ARB_fragment_shader_interlock`) that some drivers lack,
 AMD's among them (the Steam Deck too). The game then runs OpenGL through Mesa's Zink driver on Vulkan, which has it.

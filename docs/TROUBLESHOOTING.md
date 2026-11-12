@@ -33,9 +33,10 @@ false alarm. Don't turn the antivirus off. Instead:
 
 ### On Linux the game stops with "cannot open shared object file"
 
-The build copies the FFmpeg libraries it found beside the executable, so a folder normally plays on a machine without
-them. If one is missing, it is a folder copied without those files or a build from before they were copied: run
-`./setup.sh` (or `./build.sh`) again where you are, or copy the whole folder, not part of it.
+The build copies the FFmpeg libraries it found, and their own dependencies, beside the executable, so a folder
+normally plays on a machine without them. If one is missing, it is a folder copied without those files or a build
+from before they were copied: run `./setup.sh` (or `./build.sh`) again where you are, or copy the whole folder, not
+part of it.
 
 ### The game shows the original, blurry textures
 
