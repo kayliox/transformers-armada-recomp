@@ -57,12 +57,18 @@ def transform(name, data):
 
 
 def scratchpad_hot():
-    """The function names of transformers/config/scratchpad_hot.txt (TODO 94)."""
-    path = Path(__file__).resolve().parent.parent / "config" / "scratchpad_hot.txt"
+    """The function names of transformers/config/scratchpad_hot.txt (TODO 94). Another release without its own list
+    uses the USA one, its sub_<address> names moved to the release's addresses (game.json code_shift)."""
+    from ps2elf import code_address, config_dir, load_game_config, release_file
+    path = release_file("scratchpad_hot.txt")
+    cfg = load_game_config() if path.parent != config_dir() else None
     names = set()
     if path.exists():
         for line in path.read_text().splitlines():
             line = line.split("#", 1)[0].strip()
+            if cfg and line.startswith("sub_"):
+                moved = code_address(int(line[4:], 16), cfg)
+                line = f"sub_{moved:08X}" if moved is not None else ""
             if line:
                 names.add(line)
     return names

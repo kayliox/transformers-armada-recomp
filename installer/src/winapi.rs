@@ -65,6 +65,7 @@ unsafe extern "system" {
     fn QueryInformationJobObject(job: Handle, class: i32, info: *mut c_void, length: u32, returned: *mut u32) -> i32;
     fn GetExitCodeProcess(process: Handle, code: *mut u32) -> i32;
     fn QueryFullProcessImageNameW(process: Handle, flags: u32, name: *mut u16, size: *mut u32) -> i32;
+    fn GetProcessTimes(process: Handle, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
 }
 
 #[link(name = "advapi32")]
@@ -75,9 +76,18 @@ unsafe extern "system" {
 #[link(name = "user32")]
 unsafe extern "system" {
     fn GetAsyncKeyState(key: i32) -> i16;
+    fn AllowSetForegroundWindow(pid: u32) -> i32;
 }
 
 /// The Shift key held down right now (a launcher's start with Shift held: the setup's window instead of the game).
+/// (TODO 290) Lets the programs a step starts bring their windows forward - Windows' permission prompt (UAC) for an
+/// installer the tools step starts came up behind the setup's window, or only as a flashing taskbar button, and the
+/// step sat at "Starting package install" for minutes.
+pub fn allow_foreground() {
+    const ASFW_ANY: u32 = 0xFFFF_FFFF;
+    unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+}
+
 pub fn shift_held() -> bool {
     const VK_SHIFT: i32 = 0x10;
     unsafe { GetAsyncKeyState(VK_SHIFT) < 0 }
@@ -196,6 +206,22 @@ pub fn is_console_host(pid: u32) -> bool {
         let ok = QueryFullProcessImageNameW(process, 0, name.as_mut_ptr(), &mut size) != 0;
         CloseHandle(process);
         ok && String::from_utf16_lossy(&name[..size as usize]).to_ascii_lowercase().ends_with("\\conhost.exe")
+    }
+}
+
+/// (TODO 289) A running process's start time (FILETIME ticks): with its id it names the process, an id alone can be
+/// given to another process once it has ended. None: not running (or not ours to ask).
+pub fn process_started(pid: u32) -> Option<u64> {
+    unsafe {
+        let process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return None;
+        }
+        let running = WaitForSingleObject(process, 0) != 0; // (0: signalled = it has ended)
+        let (mut creation, mut exit, mut kernel, mut user) = (0u64, 0u64, 0u64, 0u64);
+        let ok = GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) != 0;
+        CloseHandle(process);
+        (ok && running).then_some(creation)
     }
 }
 

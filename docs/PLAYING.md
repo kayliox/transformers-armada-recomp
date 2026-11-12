@@ -21,9 +21,15 @@ Something not working? See [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 - **About 15 GB of free space.**
 - **Your own disc image of Transformers (USA)**, `SLUS-20668`, as an `.iso` file.
   You can make one from your own disc with a DVD drive and a tool such as ImgBurn.
-  The European and Japanese releases do not work yet.
+  The European release, `SLES-52388`, works too, experimentally (see [The European disc](#the-european-disc)).
+  **Other languages need the European disc**: the USA disc has English only.
+  The Japanese release does not work yet.
 
 The setup installs the rest: Git, Python and the Visual Studio C++ build tools. Windows may ask for permission.
+
+On Linux or a Steam Deck, the game also builds natively, without Windows or Proton: see
+[README.md's "Linux and Steam Deck (native)"](../README.md#linux-and-steam-deck-native). [Your files](#your-files)
+below shows where each layout keeps its files.
 
 ## Install
 
@@ -49,14 +55,16 @@ cd transformers-armada-recomp
 ```
 
 - `-InstallPrerequisites` installs any missing tools with winget.
-- `-SkipHdTextures` leaves out the HD textures. You can run `setup.ps1` again later to make them.
+- `-SkipHdTextures` leaves out the HD textures. You can make them later in the game (F1 > Graphics > Make HD textures) or run `setup.ps1` again.
 - If the setup stops, run it again. Finished steps are kept.
 
 For a manual build, see [BUILDING.md](BUILDING.md).
 
 ## Starting the game
 
-Start **`Play.bat`** in the install folder. The setup program also has a Play button.
+Start the game with the desktop shortcut, or with **`Transformers Armada.exe`** in the folder you installed into.
+The setup program also has a Play button. To add the game to Steam or another launcher, give it
+`Transformers Armada.exe`.
 
 On the first start the game uses good default settings for most PCs. Press **F1** to change them.
 
@@ -126,8 +134,8 @@ Change any key in **F1 > Controls**: click **Change** and press the new key, or 
 | F8 | Photo mode |
 | F11 | Switches between a window and full screen |
 
-Save states are kept in the `states` folder. They are a copy of the game's memory, so keep them private, like
-your disc image.
+Save states are kept in `saves\states` in the folder you installed into (`states` in the checkout on native
+Linux). They are a copy of the game's memory, so keep them private, like your disc image.
 
 ## Settings (F1)
 
@@ -135,7 +143,7 @@ Press **F1** to open the menu over the game. Use the mouse, the arrow keys or a 
 at once. A few (marked **RESTART**) need the game to start again: the menu offers **Restart now**, which brings
 you back to the same moment.
 
-Your choices are saved in `settings.ini` in the install folder.
+Your choices are saved in `settings.ini` in the folder you installed into.
 
 ### Display
 
@@ -145,7 +153,7 @@ Your choices are saved in `settings.ini` in the install folder.
 | Screen | Which monitor the game uses. |
 | Aspect ratio | 4:3, 16:9, 21:9, Match screen, or Ultrawide 2.4:1. Wider shows more at the sides. |
 | Field of view | How wide the camera sees. |
-| Frame rate limit | The most frames a second the game draws: 30, 60, 90, 120, 144, 165, 240 or Unlimited. The game always runs at its true speed. |
+| Frame rate limit | The most frames a second the game draws: 30, 60, 90, 120, 144, 165, 240 or Unlimited (Linux also offers 45). The game always runs at its true speed. |
 | Show frame rate | A frame counter in the corner (F3). |
 | Sharp text | The game's fonts, redrawn sharp. |
 | Button prompts | Match device (your keys, or your controller's buttons), PlayStation, Xbox, or PS2 (original). |
@@ -165,21 +173,27 @@ Your choices are saved in `settings.ini` in the install folder.
 | Anti-aliasing | Smooths jagged edges: edge filter, multisampling (up to 8x) and supersampling (1.5x). |
 | Texture quality | Texture sharpness and filtering. Low suits 4 GB graphics cards. |
 | Sharp distant textures | Keeps textures sharp into the distance on high-resolution screens. |
-| HD textures | The HD textures made from your disc, on or off (native renderer; takes a restart). Its buttons open their folder and make or check them. |
+| HD textures | The HD textures made from your disc, on or off (native renderer; takes a restart). Its buttons open their folder, **Make HD textures** (says the disk space and time first), **Verify HD textures** (checks images without changing them) and **Remake N broken images** (after a verify that found some). On Linux, the maker buttons show [commands to run in a terminal](BUILDING.md#hd-textures-and-sharp-fonts). |
 | Texture pack | Emulated renderer only: PCSX2 texture packs from a replacements folder. Not the HD textures. |
 
-The **Ultra** preset sets everything to its highest: the longest distances, every tree in full 3D, full enemy
-detail, 8x multisampling with 1.5x supersampling and Ultra textures. It needs a strong graphics card. If the
-frame rate drops, try **High**.
+The **Ultra** preset sets everything to its highest but the forest: the longest distances, full enemy detail,
+8x multisampling with 1.5x supersampling and Ultra textures, with the forest at 2x. It needs a strong graphics
+card. If the frame rate drops, try **High**. A longer forest (3x, 4x) and every tree in full 3D are under
+Graphics > Advanced (Forest distance, Trees): very heavy, they can drop the frame rate a lot, even on strong
+graphics cards.
 
 If a graphics card makes the HD textures black (some GTX 16-series cards do), the maker notices, tries safer
 ways, and if none works it makes none: F1 says so and the game shows its own textures. After a graphics driver
-update, **Check HD textures** tries again.
+update, **Make HD textures** tries again.
 
 ### Controls
 
-Mouse speed, mouse in menus, vibration, the light bar, the stick response, car steering and the key layout.
+Mouse speed, mouse in menus, vibration, the light bar, the stick dead zones, the stick response, car steering and the
+key layout.
 
+- **Left / right stick dead zone, Auto** (the default): the game measures where each stick rests when you let go of it
+  and ignores that much, so a worn stick that does not come back to the centre does not make your robot walk or your
+  car steer on its own. A stick that rests at the centre keeps the usual 5%. You can also pick a fixed size.
 - **Stick response, Modern** (the default): a light touch walks, about a third of the stick runs.
   **Off** gives the original response back.
 - **Car steering, Original** steers as on the PS2. **Tuned** is gentler near the centre.
@@ -196,7 +210,8 @@ Volume, from Off to full.
 
 ### Saves
 
-Your memory card saves, and import or export of PS2 saves (from the `Saves` folder). Save states by name.
+Your memory card saves, and import or export of PS2 saves (through `saves\backups` and `saves\exports` in the
+folder you installed into; `Saves/backups` and `Saves/exports` in the checkout on native Linux). Save states by name.
 
 ### About
 
@@ -229,14 +244,60 @@ To turn the automatic check off: **F1 > About > Check for updates automatically*
 
 ## Your files
 
-Everything the setup makes from your disc stays on your PC, in folders that Git ignores:
+Everything the setup makes from your disc stays on your PC.
+
+**Windows: the install folder.** The setup keeps your things in folders of their own, so the whole folder can be
+copied or moved as one:
 
 | Folder or file | What it is |
 |---|---|
-| `game\` | Your extracted disc, and your memory cards (`game\mc0`, `game\mc1`) |
-| `work\`, `out\` | The game built from your disc |
-| `hd_textures\` | The HD textures made from your disc |
-| `states\` | Your save states |
+| `Transformers Armada.exe` | Starts the game (give this one to Steam or another launcher) |
 | `settings.ini` | Your settings |
+| `saves\` | Your memory cards (`mc0`, `mc1`), save states (`states`) and F1 > Saves' `backups` and `exports` |
+| `logs\` | The game's, the setup's and the updates' logs |
+| `data\` | Your extracted disc (`game`), the HD movies and the shader cache |
+| `transformers-armada-recomp\` | The game built from your disc (`work\`, `out\`), and the HD textures (`hd_textures\`) |
 
-Never share or upload these: they contain game data.
+**Linux (native): the checkout.** There is no separate install folder: the game and your files stay in the folder
+you cloned the repository into:
+
+| Folder or file | What it is |
+|---|---|
+| `settings.ini` | Your settings |
+| `game/` | Your extracted disc, and your memory cards (`mc0`, `mc1`) |
+| `states/` | Save states |
+| `Saves/` | F1 > Saves' `backups` and `exports` |
+| `runs/` | The game's logs |
+| `hd_textures/` | The HD textures, made by `./tools/make_hd_textures.sh` |
+| `out/` | The game built from your disc |
+
+To back up your saves on Windows, copy `saves`; on Linux, copy `game/mc0`, `game/mc1`, `states` and `Saves`. To move
+the game to another drive, another PC or a Steam Deck, copy the whole install folder on Windows, or the whole
+checkout on Linux: the game finds everything from where it is.
+
+Never share or upload `saves`, `data` or the built game on Windows, or `game`, `states` or `Saves` on Linux: they
+contain game data.
+
+A Windows install from before this layout is moved by its next update, after a backup of your saves and settings in
+`saves\backups`. The old files stay where they were. The native Linux checkout already keeps its files this way, so
+nothing moves there.
+
+## The European disc
+
+Support for the European release (`SLES-52388`) is experimental: it plays, but it is played less than the USA disc.
+Please report what does not work.
+
+- **Language (European disc only)**: English, French, German, Spanish or Italian, text and voices:
+  **F1 > Gameplay > Language**. Auto follows your Windows language. The USA disc has English only, and has no such
+  setting.
+
+  > **Changing the language while you play:** the voices and the button bar at the bottom of the screen change at
+  > once. Most menu text changes when its screen is shown again. **The HQ's titles under its big icons (Autobots,
+  > Options, Quit...) keep the old language until the HQ is loaded again** (after a mission), and so does the bar
+  > on **Extras > Movies**. The original game had no language menu: it chose its language once, at start-up.
+  > **For everything in one language, set it before you start, or close the game and start it again after
+  > changing it.**
+- **50 Hz or 60 Hz**: the game runs at the same speed in both, so by default it does not ask and starts in 50 Hz.
+  To get the choice back, set **F1 > Gameplay > When the game starts** to **Everything**.
+- **Saves**: the European disc keeps its saves in its own folder on the memory card (`BESLES-52388 TRANSFM`).
+  **F1 > Saves** imports a USA save into it, and exports either kind.

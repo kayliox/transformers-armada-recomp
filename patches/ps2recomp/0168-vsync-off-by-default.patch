@@ -1,0 +1,18 @@
+Subject: [PATCH] Runtime: VSync off when nothing sets it (TODO 283)
+
+PS2X_PRESENT_SYNC unset now means 0 (the presents at once), not "by the screen". "on" (what the settings' VSync
+row writes for On) and any other word: by the screen, as before; 1: always at the refresh.
+
+diff --git a/ps2xRuntime/src/lib/ps2_host_present.cpp b/ps2xRuntime/src/lib/ps2_host_present.cpp
+--- a/ps2xRuntime/src/lib/ps2_host_present.cpp
++++ b/ps2xRuntime/src/lib/ps2_host_present.cpp
+@@ -55,7 +55,8 @@
+         {
+             const char *env = std::getenv("PS2X_PRESENT_SYNC");
+             int expected = -2;
+-            g_sync.compare_exchange_strong(expected, (env && (*env == '0' || *env == '1')) ? *env - '0' : -1);
++            // (TODO 283: no setting = off - the presents at once. "on", or anything but 0 and 1: by the screen, as before.)
++            g_sync.compare_exchange_strong(expected, (env && (*env == '0' || *env == '1')) ? *env - '0' : (env && *env ? -1 : 0));
+             mode = g_sync.load(std::memory_order_relaxed);
+         }
+         return mode;

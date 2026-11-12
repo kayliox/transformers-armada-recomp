@@ -34,19 +34,34 @@
     .\tools\make_hd_textures.ps1 -CrispFontsOnly  # step 5 only
 .EXAMPLE
     .\tools\make_hd_textures.ps1 -FontsOnly      # font assets only, no GPU or downloads
+.EXAMPLE
+    .\tools\make_hd_textures.ps1 -Verify         # (TODO 281) the set checked and reported, nothing changed
+.EXAMPLE
+    .\tools\make_hd_textures.ps1 -Remake         # (TODO 281) the last report's broken images made again
 #>
 param([switch]$SkipUpscale, [switch]$CrispFontsOnly, [switch]$FontsOnly, [string]$Python = "python",
       [ValidateSet("", "best", "fast")][string]$Quality = "",
-      [switch]$Resume, [int]$GamePid = 0)
+      [switch]$Resume, [int]$GamePid = 0, [switch]$Verify, [switch]$Remake)
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path $PSScriptRoot -Parent
-$Game = Join-Path $Root "game"
+# (TODO 279: the disc's files may be in the install's data\game - install_layout.ps1)
+. (Join-Path $PSScriptRoot "install_layout.ps1")
+$Game = Get-GameDataDir $Root
 $Out = Join-Path $Root "hd_textures"
 $Py = Join-Path $PSScriptRoot "hd_textures"
 
 # (TODO 219) Started by the game (-Resume): an HD set left unfinished is carried on in a small window of its own,
 # which waits while the game runs and works once it closes. Python is looked for as the setup does.
+# (TODO 281) F1's "Verify HD textures" (-Verify: the set checked and reported, nothing changed) and "Remake N broken
+# images" (-Remake: the images that verify found missing or broken removed, then made again as -Resume makes them).
+if ($Remake) { $Resume = $true }
+if ($Verify) {
+    try { $Host.UI.RawUI.WindowTitle = "Verifying the HD textures (nothing is changed)" } catch {}
+    . (Join-Path $PSScriptRoot "setup_common.ps1")
+    if ($Python -eq "python") { $found = Find-Python; if ($found) { $Python = $found } }
+    Write-Host "Checking every HD texture. Nothing is changed; the result shows in F1 > Graphics."
+}
 if ($Resume) {
     try { $Host.UI.RawUI.WindowTitle = "Making the HD textures (you can close this; it carries on next time)" } catch {}
     . (Join-Path $PSScriptRoot "setup_common.ps1")
@@ -66,7 +81,12 @@ if ($Resume) {
 $withGame = if ($GamePid -gt 0) { @("--game-pid", "$GamePid") } else { @() }
 # (in that window a stop is shown for a minute before it closes; otherwise an error ends the script as always)
 trap {
-    if ($Resume) {
+    if ($Verify) {
+        Write-Host "`nVerifying the HD textures stopped: $_" -ForegroundColor Red
+        Write-Host "Nothing was changed. This window closes in a minute."
+        Start-Sleep -Seconds 60
+    }
+    elseif ($Resume) {
         Write-Host "`nMaking the HD textures stopped: $_" -ForegroundColor Red
         Write-Host "It is tried again the next time you start the game. This window closes in a minute."
         Start-Sleep -Seconds 60
@@ -93,7 +113,10 @@ function SetStatus([string]$State) {
         } catch {}
     }
     $st.updated = (Get-Date).ToUniversalTime().ToString("s")
-    [System.IO.File]::WriteAllText($StatusFile, ($st | ConvertTo-Json))  # (UTF-8 without a BOM: the game reads it)
+    # (UTF-8 without a BOM: the game reads it. Written beside it and put in place in one step: never left half-written)
+    $tmp = "$StatusFile.tmp"
+    [System.IO.File]::WriteAllText($tmp, ($st | ConvertTo-Json))
+    for ($i = 0; $i -lt 20; $i++) { try { Move-Item -LiteralPath $tmp -Destination $StatusFile -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 100 } }
 }
 # One maker at a time: the setup's, Play.bat's or the game's. hd_textures\.upscaling holds its process id while it runs;
 # Windows deletes the file when it ends (a closed window too).
@@ -144,11 +167,81 @@ if ($FontsOnly) {
     return
 }
 
+# (User decision 2026-11-11) Built-in or low-end graphics (no card with 3.5 GB of its own video memory: the GTX 1650's
+# 4 GB and up are not): no HD textures are made here - the upscaler and the streaming of large images make the game
+# stutter or crash on them. Once, a set made before is removed (the game then draws its own textures) and the space
+# it took is said; hd_textures\.low_end_cleared marks that it was done, so it is never done twice. The sharp fonts
+# (no graphics card work) are still made. The card: the game writes hd_textures\.gpu.json at each start (the card it
+# draws on); before the game has run, the cards Windows lists. TF_HD_LOW_END=0 / 1 decides for tests.
+function Get-LowEndGraphics {
+    if ($env:TF_HD_LOW_END -in "0", "1") { return @{ low = ($env:TF_HD_LOW_END -eq "1"); card = "(TF_HD_LOW_END)"; mb = 0 } }
+    $gpuFile = Join-Path $Out ".gpu.json"
+    if (Test-Path $gpuFile) {
+        try { $g = Get-Content $gpuFile -Raw | ConvertFrom-Json; return @{ low = [bool]$g.low_end; card = [string]$g.card; mb = [int64]$g.video_memory_mb } } catch {}
+    }
+    $best = $null
+    foreach ($k in Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue) {
+        $p = Get-ItemProperty -LiteralPath $k.PSPath -ErrorAction SilentlyContinue
+        if (-not $p -or -not $p.DriverDesc -or $p.DriverDesc -match 'Basic|Parsec|Virtual|Remote|Citrix|Mirage|Meta') { continue }
+        $bytes = 0
+        if ($p.'HardwareInformation.qwMemorySize') { $bytes = [uint64]$p.'HardwareInformation.qwMemorySize' }
+        elseif ($p.'HardwareInformation.MemorySize' -is [byte[]]) { $bytes = [BitConverter]::ToUInt32($p.'HardwareInformation.MemorySize', 0) }
+        elseif ($p.'HardwareInformation.MemorySize') { $bytes = [uint64]$p.'HardwareInformation.MemorySize' }
+        $mb = [int64]($bytes / 1MB)
+        if (-not $best -or $mb -gt $best.mb) { $best = @{ card = [string]$p.DriverDesc; mb = $mb } }
+    }
+    if (-not $best) { return @{ low = $false; card = ""; mb = 0 } }  # (nothing found: nothing changes)
+    return @{ low = ($best.mb -lt 3584); card = $best.card; mb = $best.mb }
+}
+if (-not $FontsOnly -and -not $CrispFontsOnly) {
+    $lowEnd = Get-LowEndGraphics
+    if ($lowEnd.low) {
+        $mark = Join-Path $Out ".low_end_cleared"
+        if (-not (Test-Path $mark)) {
+            $bytes = 0
+            foreach ($d in "upscaled", "upscaled_precolour", "upscaled_bc7_cache", "upscaled_orig", "work") {
+                $dir = Join-Path $Out $d
+                if (Test-Path -LiteralPath $dir) {
+                    $bytes += [int64](Get-ChildItem -LiteralPath $dir -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+                    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+            foreach ($f in "upscale_status.json", ".images_checked_3") { Remove-Item -LiteralPath (Join-Path $Out $f) -Force -ErrorAction SilentlyContinue }
+            # (the HD textures setting off: the game's own textures, and F1 shows it so)
+            $ini = Join-Path $Root "settings.ini"
+            $lines = @(if (Test-Path $ini) { Get-Content -LiteralPath $ini } else { @() })
+            $lines = @($lines | Where-Object { $_ -notmatch '^\s*TF_HIRES\s*=' }) + @("TF_HIRES=0")
+            Set-Content -LiteralPath $ini -Value $lines
+            New-Item -ItemType Directory -Force $Out | Out-Null
+            Set-Content -LiteralPath $mark -Value "cleared $(Get-Date -Format s) on $($lowEnd.card) ($($lowEnd.mb) MB): $bytes bytes"
+            $size = if ($bytes -ge 1GB) { "{0:N1} GB" -f ($bytes / 1GB) } elseif ($bytes -gt 0) { "{0:N0} MB" -f ($bytes / 1MB) } else { "" }
+            if ($size) { Write-Host "==> HD textures off on built-in graphics: $size of HD textures removed (the game's own textures are used)" }
+            else { Write-Host "==> HD textures off on built-in graphics (the game's own textures are used)" }
+        }
+        if ($Resume -or $Verify) { Write-Host "Built-in or low-end graphics ($($lowEnd.card)): no HD textures are made on this PC."; return }
+        Write-Host "Built-in or low-end graphics ($($lowEnd.card), $($lowEnd.mb) MB of its own video memory): no HD textures are made on this PC; the sharp fonts are."
+        $SkipUpscale = $true
+    }
+}
+
 if (-not $CrispFontsOnly -and -not (TakeWorkerLock)) {
-    if ($Resume) { Write-Host "The HD textures are being made already (another window)."; return }
+    if ($Resume -or $Verify) { Write-Host "The HD textures are being made already (another window)."; return }
     # (the setup or an update while the game's own window makes them: it waits for that one, then carries on)
     Write-Host "The HD textures are being made in another window: waiting for it (close it to carry on here)."
     while (-not (TakeWorkerLock)) { Start-Sleep -Seconds 5 }
+}
+# (TODO 281) hd_textures\work holds only the batch being made, and under the lock none is: what is there was left by a
+# stop or by an older maker (a player's set had 2.4 GB of one batch, named before the batches were numbered, that
+# nothing ever deleted). Removed at every run - the setup, an update, the game's window, Verify.
+$workDir = Join-Path $Out "work"
+if (-not $CrispFontsOnly -and (Test-Path -LiteralPath $workDir)) {
+    $stale = @(Get-ChildItem -LiteralPath $workDir -Force -ErrorAction SilentlyContinue)
+    if ($stale.Count -gt 0) {
+        $bytes = ($stale | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue } |
+            Measure-Object Length -Sum).Sum
+        $stale | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+        Write-Host ("Removed {0} of leftover work files (hd_textures\work)." -f $(if ($bytes -ge 1GB) { "{0:N1} GB" -f ($bytes / 1GB) } else { "{0:N0} MB" -f ($bytes / 1MB) }))
+    }
 }
 $zips = "TFA", "TFA2", "TA_XTRAS", "SOUNDE" | ForEach-Object { Join-Path $Game "$_.ZIP" }
 foreach ($z in $zips) { if (-not (Test-Path $z)) { throw "$z not found: run build.ps1 -Iso <your disc> first" } }
@@ -166,6 +259,15 @@ if (-not (Test-Path (Join-Path $converted "TFA"))) {
     Step "Converting the textures to PNG into $converted"
     $inputs = "TFA", "TFA2", "TA_XTRAS", "SOUNDE" | ForEach-Object { Join-Path $archives $_ } | Where-Object { Test-Path $_ }
     Run $Python (@((Join-Path $Py "itf_to_png.py")) + $inputs + @("--out", $converted, "--all-palettes"))
+}
+
+if ($Verify) {
+    Step "Verifying the HD textures (nothing is changed)"
+    $a = @((Join-Path $Py "upscale_textures.py"), $converted, "--out", (Join-Path $Out "upscaled"), "--verify",
+        "--quality", $Quality, "--hd-dir", $Out)
+    Run $Python $a
+    Write-Host "`nDone: see F1 > Graphics." -ForegroundColor Green
+    return
 }
 
 function CrispFonts {
@@ -212,11 +314,16 @@ if (-not (Test-Path $exe)) {
 
 # (TODO 241) A set made before the maker checked its images: every image checked once (a graphics card that gives
 # black, junk-striped or red-and-blue-exchanged images - a GTX 1660 SUPER did): exchanged ones put right, broken ones
-# removed and made again below. Again whenever "Check HD textures" (F1) runs this on a finished set.
+# removed and made again below. Again whenever "Make HD textures" (F1) runs this on a set the card made broken or set aside.
 $checkedMark = Join-Path $Out ".images_checked_3"
 $finished = $false
 if (Test-Path $StatusFile) { try { $finished = ((Get-Content $StatusFile -Raw | ConvertFrom-Json).state -in @("done", "card_broken")) } catch {} }
-if ((Test-Path (Join-Path $Out "upscaled\upscale_manifest.jsonl")) -and (-not (Test-Path $checkedMark) -or ($Resume -and $finished))) {
+if ($Remake) {
+    Step "Removing the images the last verify found missing or broken (they are made again below)"
+    Run $Python @((Join-Path $Py "upscale_textures.py"), $converted, "--out", (Join-Path $Out "upscaled"), "--forget-broken",
+        "--hd-dir", $Out)
+}
+elseif ((Test-Path (Join-Path $Out "upscaled\upscale_manifest.jsonl")) -and (-not (Test-Path $checkedMark) -or ($Resume -and $finished))) {
     Step "Checking the HD textures made so far (a few minutes)"
     Run $Python (@((Join-Path $Py "upscale_textures.py"), $converted, "--out", (Join-Path $Out "upscaled"), "--check-colours") +
         $(if ($GamePid -gt 0) { @("--no-wait-for-game") } else { @() }))
@@ -243,7 +350,7 @@ $cardBroken = ($code -eq 3)
 if ($cardBroken) {
     Write-Host "`nwarning: this graphics card's HD images come out broken (black), in every way the upscaler can make them." -ForegroundColor Yellow
     Write-Host "No HD textures are made on it; the game draws its own. A newer graphics driver may fix it:" -ForegroundColor Yellow
-    Write-Host "then F1 > Graphics > Check HD textures tries again." -ForegroundColor Yellow
+    Write-Host "then F1 > Graphics > Make HD textures tries again." -ForegroundColor Yellow
 }
 elseif ($code -ne 0) {
     if ($code -eq 1 -and $summary) {

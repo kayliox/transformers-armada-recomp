@@ -21,7 +21,7 @@
 
 <p align="center">
   <b>The setup contains no game.</b> You need your own copy of <b>Transformers (USA, SLUS-20668)</b> as an
-  <code>.iso</code> disc image. The setup installs the tools it needs and builds the game on your PC from your disc.
+  <code>.iso</code> disc image (the European release, SLES-52388, works too, experimentally). The setup installs the tools it needs and builds the game on your PC from your disc.
 </p>
 
 <p align="center">
@@ -131,12 +131,25 @@ Some bugs are in the original game on the PlayStation 2 too. This version fixes 
   "fall when dropped" instruction, so they stay in mid-air when the ship lets them go. Rare on the PS2 too. Here the
   passengers keep that instruction through the cutscene, so they land and fight.
 
+## Differences from the PS2
+
+A few things behave differently from the original on purpose. Each one can be turned off:
+
+- **Transforming fades the vehicle's engine out over 0.15 seconds.** On the PS2 the engine stops dead.
+  `TF_ENGINE_SOFT_STOP=0` in settings.ini gives the cut back.
+- **Textures stay smooth up close.** The PS2 shows hard, blocky texels there. F1 > Graphics > Smooth textures, Off.
+- **The game starts in its 16:9 mode.** The PS2 starts in 4:3. The game's own Options > Widescreen switches it off.
+- **A light touch of the stick walks, a third of the stick runs.** F1 > Controls > Stick response, Off.
+- **Moving the mouse up looks up,** whatever a save's Invert Y option says (that option is the controller's).
+  F1 > Controls > Invert mouse up / down.
+
 ## Requirements
 
 - Windows 10 or 11, 64-bit.
 - A graphics card with DirectX 12 and Vulkan (any recent AMD, NVIDIA or Intel card).
 - About 15 GB of free disk space.
-- Your own disc image of **Transformers (USA)**, `SLUS-20668`. Other regions do not work yet.
+- Your own disc image of **Transformers (USA)**, `SLUS-20668`. The European release, `SLES-52388` (English,
+  French, German, Spanish, Italian), works too, experimentally. The Japanese release does not work yet.
 
 The setup installs everything else for you (Git, Python and the Visual Studio C++ build tools).
 
@@ -150,9 +163,9 @@ The setup installs everything else for you (Git, Python and the Visual Studio C+
    The first build takes about 15 to 25 minutes. Making the HD textures takes longer: pick **Fast** for a quicker
    set, or skip them. Once they start, **Play now** lets you play while the rest is made: the ones you see first
    (the menus, the HQ, the first levels) are made first.
-3. **Play.** The setup ends with a Play button. Later, start the game with `Play.bat` in the install folder, or
-   straight from `out/build/transformers/RelWithDebInfo/TransformersRecomp.exe` (for example as a non-Steam game in
-   Steam).
+3. **Play.** The setup ends with a Play button. Later, start the game with the desktop shortcut, or with
+   **`Transformers Armada.exe`** in the folder you installed into. That is the program to give to Steam or any other
+   launcher.
 
 The game checks for updates by itself. When there is one, **F1 > About > Update now** installs it and puts you
 back where you were.
@@ -166,31 +179,38 @@ Prefer the command line, or want to build it yourself? See **[docs/BUILDING.md](
 can build from your USA disc, show settings and back up saves. See
 [the integration guide](docs/RECOMPLAUNCHER.md).
 
-Once the game is built, starting `tfa-setup.exe` again starts the game itself, so a launcher such as
+**Any other launcher:** give it **`Transformers Armada.exe`** in the folder you installed into. It starts the game
+and stays open until the game closes, so the launcher (and Steam) sees how long you play.
+
+Once the game is built, starting `tfa-setup.exe` again also starts the game, so a launcher such as
 [Quiver](https://quiverlauncher.com) that keeps the setup can use it as the game's Play button. Hold **Shift** while
 starting it to open the setup's window instead (updates, repair).
 
-The game can also be started straight from its program file, so any launcher can start it:
-
-`<install folder>/transformers-armada-recomp/out/build/transformers/RelWithDebInfo/TransformersRecomp.exe`
-
-(`<install folder>` is the folder you picked in the setup.)
-
 **Steam on Windows**
 
-1. In Steam: **Games > Add a Non-Steam Game to My Library > Browse**, pick `TransformersRecomp.exe` above, then
-   **Add Selected Programs**.
-2. Start it from your Steam library like any other game.
+1. In Steam: **Games > Add a Non-Steam Game to My Library > Browse**, pick **`Transformers Armada.exe`** in the
+   folder you installed into, then **Add Selected Programs**.
+2. Start it from your Steam library like any other game. Steam shows you in game until the game closes, and Steam
+   Input (your controller's dead zones, remapping) works in it.
 
-**Steam Deck**
+Added the game to Steam before? An entry that points at `tfa-setup.exe` or `TransformersRecomp.exe` keeps working.
+If you move or copy the game's folder, point the entry at `Transformers Armada.exe` in the new place.
 
-The game has to be built on a Windows PC first: the setup needs Windows to compile it from your disc.
+**Steam Deck (the Windows build, under Proton)**
+
+These steps play the Windows build through Proton. The game also runs natively on Linux and SteamOS, without
+Proton: build it as in [Linux and Steam Deck (native)](#linux-and-steam-deck-native) below, then add `play.sh` to
+Steam. For this Proton route, build the Windows version on a Windows PC first: its setup compiles the game from your
+disc.
 
 1. On your Windows PC, install the game with the setup as described above, and play it once.
-2. Copy the whole install folder to the Steam Deck, for example with a USB drive, a microSD card or a network
-   share. Keep everything inside it.
+2. Copy the **whole** folder you installed into (the one with `Transformers Armada.exe` in it) to the Steam Deck, for
+   example with a USB drive, a microSD card or a network share. Keep everything inside it: the game finds its saves,
+   settings and disc files from where it is, so the copy works on another drive or PC.
+   Already have the game on the Deck? Copy its `saves` folder somewhere safe first: copying the PC's folder over it
+   replaces the Deck's saves with the PC's.
 3. On the Deck, switch to **Desktop Mode**, open **Steam**, then **Games > Add a Non-Steam Game to My Library >
-   Browse**. Set the file type to **All Files**, pick `TransformersRecomp.exe` in the copied folder, then
+   Browse**. Set the file type to **All Files**, pick **`Transformers Armada.exe`** in the copied folder, then
    **Add Selected Programs**.
 4. In your Steam library, open the game's **Properties > Compatibility**, tick **Force the use of a specific Steam
    Play compatibility tool** and choose **Proton Experimental** (or the newest Proton).
@@ -244,14 +264,35 @@ Every key can be changed in **F1 > Controls**. The full list, with the function 
 
 ## Where things are
 
-Open the folder you installed into, then `transformers-armada-recomp`.
+Everything you need is in the folder you installed into:
 
-- **Saves:** in `game\mc0`. In the game, F1 > Saves imports, exports and backs them up into the `Saves` folder.
-- **Settings:** `settings.ini`.
-- **Logs, for a bug report:** the game's logs are in `runs`. Zip the newest `play_...out` and `play_...err` files
-  and attach them. If the install or an update failed, also attach `setup.log` or `update-setup.log` from the
-  folder you installed into.
-- **Never attach** save files, save states or anything from the `game` folder: they contain game data.
+| What | Where |
+|---|---|
+| **`Transformers Armada.exe`** | Starts the game. Give this one to Steam or any other launcher. |
+| **`tfa-setup.exe`** | The setup: updates and repair. |
+| **`settings.ini`** | Your settings (F1 in the game changes them). Delete it to go back to the defaults. |
+| **`saves\`** | Everything you would back up: your memory cards (`mc0`, `mc1`), your save states (`states`), and what F1 > Saves makes (`backups`, `exports`). In the game, F1 > Saves > "Open saves folder" takes you there. |
+| **`logs\`** | The game's logs, and the setup's and the updates'. |
+| **`data\`** | The game's files from your disc (`game`), the HD movies and the shader cache. Never share this folder. |
+| `transformers-armada-recomp\` | The game's program and what the setup builds. The HD textures are in its `hd_textures` folder, and a texture pack goes in its `replacements` folder. With the mods version, the mods are in its `Mods` folder. |
+
+To back up your saves, copy the `saves` folder. To move the game to another drive or PC, or to a Steam Deck, copy
+the whole folder you installed into.
+
+The native Linux build has no `saves`, `logs` or `data` folders: everything stays in the checkout. `settings.ini` is
+in its root, the disc's files in `game`, the memory cards in `game/mc0` and `game/mc1`, save states in `states`, logs
+in `runs`, and F1 > Saves' backups and exports in `Saves`.
+
+**Logs, for a bug report:** in the game, **F1 > About > "Make a report"** makes one zip file with the logs, your
+settings and your PC's details (no saves, nothing of the game's files) and opens its folder. Attach that file. If
+the game does not start, zip the newest `play_...out` and `play_...err` files from `logs`. If the install or an
+update failed, also attach `setup.log`, `update.log` or `update-setup.log` (in `logs`, or beside `tfa-setup.exe`).
+
+**Never attach** save files, save states or anything from the `data` folder: they contain game data.
+
+Installed the game before these folders existed? The next update moves your saves, settings and the disc's files
+into them by itself, after making a backup of your saves and settings in `saves\backups`. Nothing is deleted: the
+old files stay in `transformers-armada-recomp` as they were.
 
 ## Help
 

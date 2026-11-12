@@ -559,6 +559,7 @@ namespace native_sound
             }
 
             mixer::assignChannels(); // (a packet without tag 0x25: its key-ons all the same)
+            mixer::endPacket();
             bool fed = false; // (a stream the EE feeds: the mix here, its credits from it at once)
             for (const auto &[handle, eeFed] : g_eeFedStreams)
                 fed = fed || eeFed;

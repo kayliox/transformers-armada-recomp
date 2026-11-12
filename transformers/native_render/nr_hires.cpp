@@ -12,6 +12,7 @@
 // ../converted/textures beside it. TF_HIRES=0 turns replacement off.
 #include "dev_tree.h"
 #include "nr_types.h"
+#include "nr_backend.h"
 #include "nr_prompt_style.h"
 
 #include "raylib.h"
@@ -20,6 +21,7 @@
 #include "runtime/ps2_thread_placement.h"
 
 #include "ext/bc7enc/bc7enc.h"
+#include "ext/bc7enc/bc7decomp.h"
 
 #include <algorithm>
 #include <cmath>
@@ -66,7 +68,65 @@ namespace nr
             std::string keysSet, xboxSet;
             bool fontsOnly = false;
             bool ps2Symbols = false; // (TF_BUTTON_SYMBOLS=ps2: Auto keeps them, xboxPromptsShown)
+            // (TODO 290 (17)) A PCSX2 texture pack (TF_HD_PACK): our texture name (relpath) -> the pack's image, through
+            // tools\hd_textures\pcsx2_names.json. Empty: no pack, the upscaled set as before.
+            std::unordered_map<std::string, fs::path> pack;
         } g;
+
+        // (TODO 290 (17)) The PCSX2 pack's name table: PCSX2's image name (lower case, no extension) -> our texture's relpath.
+        // Looked for where the game starts, then beside the exe and above it (as hd_textures is).
+        std::unordered_map<std::string, std::string> packNames()
+        {
+            std::unordered_map<std::string, std::string> out;
+            std::error_code ec;
+            fs::path file = fs::path("tools") / "hd_textures" / "pcsx2_names.json";
+            for (fs::path at = fs::path(GetApplicationDirectory()); !fs::exists(file, ec) && !at.empty(); at = at.parent_path())
+            {
+                file = at / "tools" / "hd_textures" / "pcsx2_names.json";
+                if (at == at.parent_path())
+                    break;
+            }
+            std::ifstream f(file, std::ios::binary);
+            std::string line;
+            while (std::getline(f, line))
+            {
+                // (the file's lines: "<hash>-<hash>-<bits>": "<relpath>",)
+                const size_t a = line.find('"'), b = a == std::string::npos ? a : line.find('"', a + 1);
+                const size_t c = b == std::string::npos ? b : line.find('"', b + 1), d = c == std::string::npos ? c : line.find('"', c + 1);
+                if (d == std::string::npos || line.compare(a + 1, 1, "_") == 0 || line.find("\": \"", b) != b)
+                    continue;
+                out[line.substr(a + 1, b - a - 1)] = line.substr(c + 1, d - c - 1);
+            }
+            return out;
+        }
+
+        // (TODO 290 (17)) The pack's images in a folder (and its subfolders), by our texture names. `matched` / `images`:
+        // how many images it has.
+        std::unordered_map<std::string, fs::path> indexPack(const fs::path &folder, size_t &images)
+        {
+            std::unordered_map<std::string, fs::path> out;
+            images = 0;
+            const auto names = packNames();
+            std::error_code ec;
+            for (auto it = fs::recursive_directory_iterator(folder, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
+            {
+                if (!it->is_regular_file())
+                    continue;
+                std::string ext = it->path().extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                if (ext != ".dds" && ext != ".png")
+                    continue;
+                ++images;
+                std::string stem = it->path().stem().string();
+                std::transform(stem.begin(), stem.end(), stem.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                if (auto n = names.find(stem); n != names.end())
+                    out.emplace(n->second, it->path());
+            }
+            return out;
+        }
+
+        // A BC7 DDS (DX10 header, DXGI 98 / 99): its largest level the cap allows, as RGBA8, the alpha doubled. False: not one.
+        bool decodeDds(const fs::path &file, const Texture &game, uint32_t cap, uint32_t &w, uint32_t &h, std::vector<uint32_t> &px);
 
         // (TODO 119) Crisp text and PS5 button symbols: the font atlases made again at 8x their size, every
         // glyph in its own rectangle (the game draws the same quads: nothing moves). Three sets beside the
@@ -208,12 +268,32 @@ namespace nr
             if (const std::string why = hdOff ? std::string() : setAsideWhy(g.upscaled); !why.empty())
             {
                 std::fprintf(stderr, "[native render] HD textures set aside (%s): the game's own textures. After a graphics driver "
-                                     "update, F1 > Graphics > Check HD textures tries the card again\n", why.c_str());
+                                     "update, F1 > Graphics > Make HD textures tries the card again\n", why.c_str());
                 hdOff = true;
             }
             g.native = g.upscaled.empty() ? fs::path() : g.upscaled.parent_path() / "converted" / "textures";
             chooseCrisp();
-            if (hdOff || !fs::is_directory(g.upscaled, ec) || !fs::is_directory(g.native, ec))
+            // (TODO 290 (17)) A PCSX2 texture pack chosen in F1 (TF_HD_PACK: its folder, used where it is): its images in place of
+            // an upscaled set, found through the name table; the originals (hd_textures\converted) pick among same-named ones.
+            if (const char *pk = std::getenv("TF_HD_PACK"); pk && *pk && !hdOff)
+            {
+                // (The game's own textures where the game starts first: with no upscaled set the folder above may be
+                // another one's - the developer's tree - whose converted\textures is not there. Seen on the Vostro.)
+                if (const fs::path here = fs::absolute(fs::path("hd_textures") / "converted" / "textures", ec);
+                    g.native.empty() || (!fs::is_directory(g.native, ec) && fs::is_directory(here, ec)))
+                    g.native = here;
+                size_t images = 0;
+                if (!fs::is_directory(fs::path(pk), ec))
+                    std::fprintf(stderr, "[native render] HD texture pack: its folder is not there any more (%s): the game's own textures\n", pk);
+                else if (!fs::is_directory(g.native, ec))
+                    std::fprintf(stderr, "[native render] HD texture pack: the game's own textures are not prepared yet (%s)\n", g.native.string().c_str());
+                else
+                {
+                    g.pack = indexPack(fs::path(pk), images);
+                    std::fprintf(stderr, "[native render] HD texture pack %s: %zu of its %zu images used\n", pk, g.pack.size(), images);
+                }
+            }
+            if (g.pack.empty() && (hdOff || !fs::is_directory(g.upscaled, ec) || !fs::is_directory(g.native, ec)))
             {
                 if (hdOff && off && *off == '0')
                     std::fprintf(stderr, "[native render] HD textures off (TF_HIRES=0): the game's own textures\n");
@@ -230,6 +310,9 @@ namespace nr
                 if (!it->is_regular_file() || upper(it->path().extension().string()) != ".PNG")
                     continue;
                 std::string rel = fs::relative(it->path(), g.native, ec).replace_extension().generic_string();
+                if (!g.pack.empty() && g.pack.find(rel) == g.pack.end() &&
+                    (rel.rfind("TFA2/FONTS/", 0) != 0 || (crispImage(rel, g.crispSet).empty() && crispImage(rel, g.xboxSet).empty())))
+                    continue; // (with a pack: its images and the sharp fonts)
                 if (g.fontsOnly && (rel.rfind("TFA2/FONTS/", 0) != 0 ||
                     (crispImage(rel, g.crispSet).empty() && crispImage(rel, g.xboxSet).empty()))) continue;
                 std::string stem = upper(it->path().stem().string());
@@ -695,6 +778,47 @@ namespace nr
             return l;
         }
 
+        bool decodeDds(const fs::path &file, const Texture &game, uint32_t cap, uint32_t &w, uint32_t &h, std::vector<uint32_t> &px)
+        {
+            std::ifstream f(file, std::ios::binary);
+            uint8_t hd[148] = {};
+            if (!f.read(reinterpret_cast<char *>(hd), sizeof hd) || std::memcmp(hd, "DDS ", 4) != 0 || std::memcmp(hd + 84, "DX10", 4) != 0)
+                return false;
+            auto u32 = [&hd](size_t at) { uint32_t v; std::memcpy(&v, hd + at, 4); return v; };
+            const uint32_t H = u32(12), W = u32(16), levels = std::max<uint32_t>(1u, u32(28)), dxgi = u32(128);
+            if ((dxgi != 98u && dxgi != 99u) || W < game.width || H < game.height || (W & 3u) || (H & 3u) || levels > 16u)
+                return false;
+            // (the largest level the cap allows: the others are never read)
+            const uint32_t first = firstLevel(W, H, levels, cap, game, true);
+            uint64_t at = sizeof hd;
+            for (uint32_t l = 0; l < first; ++l)
+                at += bcBytes(std::max(1u, W >> l), std::max(1u, H >> l));
+            w = std::max(1u, W >> first);
+            h = std::max(1u, H >> first);
+            std::vector<uint8_t> blocks(bcBytes(w, h));
+            f.seekg(static_cast<std::streamoff>(at));
+            if (!f.read(reinterpret_cast<char *>(blocks.data()), static_cast<std::streamsize>(blocks.size())))
+                return false;
+            px.assign(static_cast<size_t>(w) * h, 0u);
+            const uint32_t bw = (w + 3u) / 4u, bh = (h + 3u) / 4u;
+            bc7decomp::color_rgba texels[16];
+            for (uint32_t by = 0; by < bh; ++by)
+                for (uint32_t bx = 0; bx < bw; ++bx)
+                {
+                    bc7decomp::unpack_bc7(blocks.data() + (static_cast<size_t>(by) * bw + bx) * 16u, texels);
+                    for (uint32_t y = 0; y < 4u && by * 4u + y < h; ++y)
+                        for (uint32_t x = 0; x < 4u && bx * 4u + x < w; ++x)
+                        {
+                            const bc7decomp::color_rgba &c = texels[y * 4u + x];
+                            // (A PCSX2 pack keeps the GS's alpha, 0x80 = opaque; this port's large images have it doubled,
+                            // as its converted textures do: 1,068 of the user's pack's images measured at half.)
+                            const uint32_t alpha = std::min(255u, static_cast<uint32_t>(c.a) * 2u);
+                            px[static_cast<size_t>(by * 4u + y) * w + bx * 4u + x] = c.r | (c.g << 8) | (c.b << 16) | (alpha << 24);
+                        }
+                }
+            return true;
+        }
+
         // The game's own mip levels (Texture::gameMips) in the large image's chain: level
         // base + k is the game's level k, and the levels below the last one taken in box-filtered from it.
         // Returned as (level, texels); `last` the last level the game's gave (0: none).
@@ -738,7 +862,7 @@ namespace nr
             const auto t0 = std::chrono::steady_clock::now();
             // (TODO 219) None of the name's images made yet (the set is still being made, hd_progress.h): told as such
             // at once - a few file checks, no image decoded - so that it is asked for again once the set has grown.
-            if (missing && !forceSet && !g.fontsOnly && g.enabled)
+            if (missing && !forceSet && !g.fontsOnly && g.enabled && g.pack.empty())
                 if (auto it = g.byStem.find(upper(name)); it != g.byStem.end())
                 {
                     std::error_code mec;
@@ -766,19 +890,33 @@ namespace nr
             // same glyphs in the same rectangles, so the content check below, made for redrawn art, is not
             // asked of it; its compressed copy kept apart from the upscaled image's.)
             const fs::path crisp = crispImage(*chosen, set);
-            const fs::path png = crisp.empty() ? (g.fontsOnly ? g.native : g.upscaled) / (*chosen + ".png") : crisp;
+            fs::path png = crisp.empty() ? (g.fontsOnly ? g.native : g.upscaled) / (*chosen + ".png") : crisp;
+            // (TODO 290 (17)) A PCSX2 pack's image in place of the upscaled one: a BC7 DDS taken as it is (its own levels, from
+            // the one the cap allows: no decoding), a PNG through the path below (not cached: the pack is the player's).
+            fs::path packDds;
+            bool fromPack = false;
+            if (crisp.empty() && !g.pack.empty())
+            {
+                const auto it = g.pack.find(*chosen);
+                if (it == g.pack.end())
+                    return false;
+                fromPack = true;
+                std::string ext = it->second.extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                (ext == ".dds" ? packDds : png) = it->second;
+            }
             std::error_code ec;
-            const uint64_t srcSize = fs::file_size(png, ec);
+            const uint64_t srcSize = fs::file_size(packDds.empty() ? png : packDds, ec);
             if (ec)
             {
                 if (missing && !forceSet)
                     *missing = true; // (TODO 219: its image not made yet)
                 return false;
             }
-            const uint64_t srcTime = static_cast<uint64_t>(fs::last_write_time(png, ec).time_since_epoch().count());
-            const uint32_t cap = d3d::largeImageCap();
+            const uint64_t srcTime = static_cast<uint64_t>(fs::last_write_time(packDds.empty() ? png : packDds, ec).time_since_epoch().count());
+            const uint32_t cap = backend().largeImageCap();
             const fs::path root = bcOn() ? cacheRoot() : fs::path();
-            const fs::path cached = root.empty() ? fs::path() : crisp.empty() ? root / (*chosen + ".bc7") : root / ("crisp_" + set) / (*chosen + ".bc7");
+            const fs::path cached = root.empty() ? fs::path() : fromPack ? root / "pcsx2_pack" / (*chosen + ".bc7") : crisp.empty() ? root / (*chosen + ".bc7") : root / ("crisp_" + set) / (*chosen + ".bc7");
             if (!crisp.empty())
                 std::fprintf(stderr, "[native render] crisp fonts: %s (%s)\n", chosen->c_str(), set.c_str());
             auto looksRight = [&](const std::vector<uint32_t> &avg) { return !crisp.empty() || looksLikeGame(avg, game, name); };
@@ -836,7 +974,13 @@ namespace nr
             {
                 const HeavySlot slot; // (TODO 102: at most g_heavyMax of these at once)
                 std::vector<uint32_t> px;
-                if (!load(png, w, h, px) || w < game.width || h < game.height)
+                if (!packDds.empty() ? !decodeDds(packDds, game, cap, w, h, px) : !load(png, w, h, px))
+                {
+                    if (!packDds.empty())
+                        std::fprintf(stderr, "[native render] HD texture pack: %s is not a BC7 DDS this can use\n", packDds.filename().string().c_str());
+                    return false;
+                }
+                if (w < game.width || h < game.height)
                     return false;
                 ++g_pngLoads;
                 std::vector<uint32_t> avg = boxAverage(px, w, h, game.width, game.height);

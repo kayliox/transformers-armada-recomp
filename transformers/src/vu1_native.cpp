@@ -26,6 +26,7 @@ namespace nr
     namespace warp
     {
         bool vu1Run(ps2vu1native::Run &run); // (native_render/nr_warp.cpp: the warp tunnel's program, drawn natively - TODO 27)
+        bool strayRun(ps2vu1native::Run &run); // (the same: a game batch on the warp program, left out - TODO 185 b)
     }
 }
 
@@ -2742,6 +2743,9 @@ namespace
             return false;
         // (TODO 27) The warp tunnel's own program (a load's screen): left out while the native renderer draws it.
         if (state.pc == 0x0000u && nr::warp::vu1Run(run))
+            return true;
+        // (TODO 185 b) A game batch started on the warp program while a tunnel shows: left out, nothing run.
+        if (state.pc != 0x0000u && nr::warp::strayRun(run))
             return true;
         // The shared core's two set-up programs, some 60,000 runs a second: MSCAL 0 (ILW.x vi13,
         // 4(vi00) - how many routines the table has - with the E bit; IADDIU vi14, vi00, 1020 - the

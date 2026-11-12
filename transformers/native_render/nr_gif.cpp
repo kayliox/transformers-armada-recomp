@@ -8,11 +8,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 namespace nr::gif
 {
+    thread_local bool t_offList = false;
     namespace
     {
         uint64_t lo64(const uint32_t *q) { return static_cast<uint64_t>(q[0]) | static_cast<uint64_t>(q[1]) << 32; }
@@ -227,6 +229,15 @@ namespace nr::gif
             case 0x07u:
                 s.tex0[reg - 0x06u] = value;
                 s.tex0At[reg - 0x06u] = ++s.writes;
+                {
+                    // (Debug, TODO 270: TF_NATIVE_TEX0LOG=<tbp hex>: each TEX0 write with that TBP - its value, the state's write
+                    // count, and whether it came from the list's own words or applied from off the list, t_offList; 400 lines)
+                    static const uint32_t want = std::getenv("TF_NATIVE_TEX0LOG") ? static_cast<uint32_t>(std::strtoul(std::getenv("TF_NATIVE_TEX0LOG"), nullptr, 16)) : 0xFFFFFFFFu;
+                    static int left = 400;
+                    if ((static_cast<uint32_t>(value) & 0x3FFFu) == want && left-- > 0)
+                        std::fprintf(stderr, "[native render] TEX0_%u %016llx at write %llu, %s\n", reg - 5u, static_cast<unsigned long long>(value),
+                                     static_cast<unsigned long long>(s.writes), t_offList ? "off the list" : "the list's own");
+                }
                 break;
             case 0x08u:
             case 0x09u:

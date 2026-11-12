@@ -15,6 +15,12 @@ namespace nr::glshare
     unsigned import(void *handle, uint64_t size, uint32_t width, uint32_t height, unsigned &memory);
 
     void release(unsigned texture, unsigned memory);
+
+    // What the window's GL reads from an imported texture (its context current): the brightest red, green or blue
+    // and the largest alpha over all its pixels. All 0: nothing reached GL - Intel's driver imports the shared
+    // texture without an error and reads zeros (a black window on the N100 / UHD Graphics, 2026-11-10), where a
+    // picture the renderer made, even a black one, is opaque. False when it cannot be read.
+    bool readBack(unsigned texture, uint32_t width, uint32_t height, unsigned &maxColour, unsigned &maxAlpha);
 }
 
 namespace nr::d3d

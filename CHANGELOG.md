@@ -10,8 +10,13 @@
   lists them) the game has the emulated renderer only. vkd3d cannot yet compile the grass shader's double-precision
   version, so the grass uses its single-precision version there (checked on a Steam Deck: the same picture, 0.1% of
   pixels apart at blade edges).
+- Linux: `tools/make_hd_textures.sh --verify` checks HD images without changing them, and `--remake` makes again only
+  the images it found missing or broken (F1's HD buttons show the commands).
 - Linux: OpenGL goes through Mesa's Zink driver when the usual driver lacks a feature the GPU renderer needs (AMD,
   the Steam Deck). `TF_ZINK=0` turns this off.
+- Native renderer: the optional Vulkan backend (in development, off by default) compiles with the current backend
+  interface, and on Linux the CPU picture hand-over keeps each picture as the window reads it until the window has
+  uploaded it.
 - Linux: the mouse in the menus, the F1 menu's typing and scrolling, Xbox-controller vibration and the HD movies work
   as on Windows.
 - Linux: the game finds its files and memory card saves whatever the case of their names, as on Windows, and the
@@ -29,6 +34,10 @@
 - Linux: the VSync setting (F1 > Graphics) works there too (Off: the pictures go to the screen at once).
 
 **Fixed**
+- Windows: the port's Linux-only choices (the 45 limit, the picture lock for 31-59 limits, the paced four-picture
+  hand-over and the picture size fitted to the window's width) no longer apply there: Windows keeps 0.6's behavior.
+- Linux: choosing 45 and then 240 no longer leaves the fast-rate fallback off until a restart.
+- Linux: public builds link the 0.6.0 ultrawide hooks without the private decompilation bridge.
 - The first level (Amazon Basin) no longer stops with "Generic fatal error" on Linux: a C library function the game
   uses behaved differently there.
 - The game no longer crashes when it closes on Linux with Zink.
@@ -38,27 +47,216 @@
   at 175 frames a second, the extra pictures never seen): less CPU, GPU and battery used.
 - The F1 menu no longer shows red stripes and broken text with Zink (Mesa's command reordering is turned off
   for the game; `ZINK_DEBUG` set by you still wins).
-- The native renderer no longer draws a larger picture than the screen shows on narrower screens. On a Steam Deck's
-  16:10 screen, the 16:9 picture was drawn at 1424x801 and shrunk to 1280x720; it is now drawn at 1280x720.
-  Less work for the graphics card, the same picture on screen.
+- Linux: the native renderer no longer draws a larger picture than the window shows on narrower screens.
+  With 16:9 selected on a Steam Deck, it draws 1280x720 instead of drawing 1424x801 and shrinking it.
+  Match screen follows the window's shape; it is not a fixed 720-line preset.
 - The game window no longer uploads an unused placeholder picture on every frame while the native renderer is on.
   On Linux and Steam Deck it did this 60–90 times a second, so this saves a little CPU work.
 - Linux and Steam Deck: the native renderer uses less CPU and battery. Its Direct3D 12 layer (vkd3d) no longer wakes
-  a helper thread at every draw (on a Steam Deck at 60 frames a second: 12% less CPU, about 1.2 W less), and the
+  a helper thread at every draw (on a Steam Deck at 60 frames a second: about 11% less CPU, about 1.2 W less), and the
   finished picture is copied to the window in one piece instead of row by row (half the time).
 - The native sound mixer does the same work with fewer steps (the sound is bit for bit the same): a little less CPU,
   most on handhelds such as the Steam Deck.
-- F1 > Display > Frame rate limit now includes 45: on a 90 Hz screen such as the Steam Deck OLED's each picture is
-  then shown for two refreshes. A 45 limit is also no longer turned into 60 at the start of a session.
+- Linux: F1 > Display > Frame rate limit now includes 45: on a 90 Hz screen such as the Steam Deck OLED's each
+  picture is then shown for two refreshes. A 45 limit is also no longer turned into 60 at the start of a session.
 - Linux and Steam Deck: the native renderer shows each picture as it is handed over, as on Windows, instead of
-  waiting for a VBlank: a 45 limit now gives 45 frames a second (it read 38-39), nothing skipped, and the picture is
-  uploaded straight from the renderer's read-back - the render thread's setup halves (1.15 ms -> 0.57 ms) and the
-  power at 45 drops a little (8.98 W -> 8.13 W).
+  waiting for a VBlank: a 45 limit now gives 45 frames a second in steady play (it read 38-39); a loading window may
+  still repeat or drop a picture, and the picture is uploaded straight from the renderer's read-back. Those figures
+  come from a pre-0.6 A/B on the build before the merge, not the current build: the render thread's setup halves
+  (1.15 ms -> 0.57 ms) and the power at 45 drops a little (8.98 W -> 8.13 W; historical, not current-build figures).
 - F1: the Windows-worded "Quit game" page is no longer in the menu on Linux and the Steam Deck (the game's own main
   menu has QUIT GAME).
 - Linux and Steam Deck: "Finishing HD textures" no longer stays on screen after the HD set is finished, including
   sets made before this fix, and "HD textures ready" no longer comes back at every start once the set is finished.
   `make_hd_textures.sh` checks the set's images once, as the Windows maker does (0.4.7's checks too).
+
+## 0.6.6
+
+**New**
+- Your things now have their own folders in the folder you installed into: `saves` (memory cards, save states,
+  backups and exports), `logs`, `settings.ini` and `data` (the game's files from your disc and the HD movies). The
+  game itself stays in `transformers-armada-recomp`. The README's "Where things are" shows what is where.
+- `Transformers Armada.exe` in the folder you installed into starts the game. Give it to Steam or any other
+  launcher: it stays open until the game closes.
+- The whole folder can be copied to another drive, another PC or a Steam Deck and plays from there.
+
+**Changed**
+- This update moves your saves, settings and the disc's files into the new folders, once, by itself. It first makes
+  a backup of your saves and settings in `saves\backups`. If the backup cannot be made (for example a full disk),
+  nothing moves and the game plays on as before; the next update tries again. Your desktop shortcut keeps working.
+- Playing on a Steam Deck or another PC with a copied folder? After this update copy the whole game folder again
+  (not only the folder inside it), back up the Deck's saves first, and point Steam at `Transformers Armada.exe` in
+  the main folder.
+- RecompLauncher: its manifest names the new folders, so its save backups keep working after the move.
+
+**Fixed**
+- On the USA disc a change of picture shape (4:3 and 16:9) shows at once again, as in 0.5.0; the European disc
+  keeps its 50 Hz fixes. Thanks to TheBrousse.
+
+## 0.6.5
+
+**Fixed**
+- On PCs held back by the graphics card, the frame rate no longer keeps stepping up and down (felt as stutter); it
+  settles on a rate the card can draw. On an RX 5700 XT at 3440x1440 the dropped frames fell by about 80%.
+
+**Changed**
+- The Ultra preset keeps the forest at 2x. A longer forest and "every tree in full 3D" are now only under
+  Graphics > Advanced, with a warning: they are very heavy, even on strong graphics cards. If you chose Ultra
+  before, the new Ultra applies at your next start (forest settings you set by hand are kept).
+- The 1% low in the frame-rate log now counts the pictures you see, not the game's internal frames.
+
+## 0.6.4
+
+**Changed**
+- Sounds now fade out with the PS2 sound chip's own curves instead of straight lines, so menu clicks, impacts,
+  engines and the dropship end as they do on the console.
+
+**Fixed**
+- On ultrawide screens the sun's glare is round again instead of a tall oval.
+
+## 0.6.3
+
+**Fixed**
+- Updates no longer stop at the HD textures with "upscale_textures.py failed with exit code 1" when one of their
+  record files was left empty (for example after the window was closed or the graphics driver restarted while they
+  were being made): the file is made again. Those files are now always written whole or not at all.
+
+## 0.6.2
+
+**New**
+- On built-in graphics, F1 > Graphics > "I have HD textures (PCSX2 pack)" uses a PCSX2 texture pack you already
+  have: pick its folder, restart, and the game uses its textures. The pack is used where it is, not copied.
+- F1 > Controls > Mouse in the game: turn it off to play with a controller without the mouse moving the camera or
+  pressing buttons.
+
+**Changed**
+- When you transform, the vehicle's engine now fades out over a moment instead of stopping dead (on the PS2 it
+  cuts off). Set TF_ENGINE_SOFT_STOP=0 in settings.ini for the original cut. The README now lists what differs from
+  the PS2 on purpose, and how to turn each one off.
+- The FPS counter on built-in graphics now shows the real number of new pictures, so it can read lower than before.
+  The game itself is not slower: it now shows more frames.
+- The old-driver warning reads more clearly, and its link fits on one line.
+
+**Fixed**
+- Built-in graphics (Intel and others): no more coloured boxes around HUD pieces and see-through effects, and no
+  more flicker on effects such as an opening warp gate, while textures load.
+- Built-in graphics: the window no longer redraws the same picture over and over. In full screen on slow laptops
+  the game runs faster (about 16% more frames on a ThinkPad T480s). Thanks to TheBrousse.
+- The setup no longer stops with "prerequisites installed, but not found yet". It installs each tool and checks it
+  at once, it no longer trusts Windows' "already installed" for Python or the Visual Studio Build Tools, it says
+  clearly when Windows asked for permission and nobody answered, and it says which file your antivirus blocked.
+  Its log now records what it found, so problems can be solved quickly.
+
+## 0.6.1
+
+**Fixed**
+- 0.6.0 could not be installed with the European disc: the setup stopped while building the game. Thanks to
+  TheBrousse for the fix.
+
+## 0.6.0
+
+**New**
+- F1 is redesigned: each setting has one kind of control (a switch, a slider or a list), the default list is
+  short, and one "Show all settings" switch shows everything. Quit is now its own tab.
+- F1 > Graphics > "Trees close to you": the trees near the camera fade out (as on the console) or stay.
+- F1 > HD textures: making them now says first what it costs (disk space and time on your graphics card). A
+  finished set can be verified, and any broken images can be made again.
+- On laptops with two graphics chips, the game now uses the stronger one.
+- If your Intel graphics driver is very old, the game says so at start and shows where to get a new one. Old
+  Intel drivers scrambled the picture and the F1 menu.
+
+**Changed**
+- HD textures are no longer made on built-in graphics or cards with under 3.5 GB of video memory: making them
+  in the background made the game stutter or crash there. The update removes an HD set made on such a PC (once),
+  and the game uses its own textures.
+
+**Fixed**
+- The warp gates in levels now swirl, as in the HQ. On every graphics card the swirl stood still.
+- The electric shock effect (EMP grenades, the electric weapons) crackles and flickers again instead of showing a
+  still purple coat, and at the same speed at any frame rate.
+- Intel graphics no longer start with a black screen for a moment.
+- The FPS counter showed 600 or more on some PCs instead of the real rate.
+- The bright band in the sky with the modern glow (bloom) is gone.
+- The European disc: "Press ENTER" now works with the keyboard in all five languages.
+- A rare crash when a warp tunnel started.
+- F1 > Graphics > Resolution showed a size that is not the game's ("Auto (2560 x 1344)") with the native renderer.
+  It now says the game is drawn at the screen's size.
+
+## 0.5.4
+
+**Fixed**
+- An update could crash a PC (the screen went black and the graphics driver restarted) while it was making HD
+  textures, and the update stopped half way. The texture maker now works in smaller pieces on graphics cards that
+  need it, notices a driver restart, and carries on where it was instead of stopping.
+- If the setup window closes or crashes during an update, the update keeps going and finishes. Opening the setup
+  again shows how it went. (This part reaches you from the next update on, since an update runs with the setup
+  from the update before.)
+- A setup run as administrator now puts the shortcuts where every user of the PC sees them, and the player who is
+  signed in can change the game's files (settings, saves, HD textures).
+- If Windows asks for permission during the install, the setup now says so, instead of looking stuck.
+
+**New**
+- The game is also in the Start menu, so Steam's "Add a Non-Steam Game" lists it. Started from Steam or another
+  launcher, the game now counts as running until you quit it.
+
+## 0.5.3
+
+**Fixed**
+- F1 > Controls showed "Invert mouse up / down" twice, with an error message, and changing it (above all with a
+  controller) could switch straight back. It is one row again and keeps your choice.
+
+## 0.5.2
+
+**Fixed**
+- The setup window now accepts the European disc (SLES-52388). In 0.5.1 it still asked for the USA disc and kept
+  the Install button greyed out, so the European support could not be installed. Download the new tfa-setup.exe.
+
+## 0.5.1
+
+**New**
+- The European disc (SLES-52388) is supported, as an experimental option: the setup accepts it and marks it as
+  experimental. It plays in all five of its languages (F1 > Gameplay > Language, text and voices), and its 50 Hz
+  mode now runs at the right speed. Thanks to TheBrousse, who maintains it.
+
+## 0.5.0
+
+**New**
+- F1 > Graphics > Advanced has Smooth textures (on by default): characters and water no longer look blocky when
+  the game's own textures are drawn at high resolutions. Thanks to galaxyawesome.
+- F1 > Controls has "Invert mouse up / down". The game's own Invert Y option now only turns the controller stick
+  around, so a save that had it on no longer turns the mouse upside down.
+
+**Changed**
+- Quit game is now a button at the bottom right of F1, and the top right shows the game's own frame rate.
+
+**Fixed**
+- When the frame rate stepped down because the PC could not keep up, the game froze for a moment at each step,
+  which could look like the jet bike or the camera jumping. The steps no longer freeze the game.
+- With F1 open, mouse clicks no longer reach the game's menus behind it.
+
+## 0.4.9
+
+**New**
+- "Match screen" now also fills screens narrower than 16:9, such as 16:10 (1920x1200), 3:2 and 4:3, instead of
+  showing bars above and below.
+- The stick dead zones in F1 > Controls have an Auto choice, now the default: it measures where each stick rests
+  when you do not touch it, so a worn stick no longer moves you on its own. Thanks to TheBrousse.
+- F1 > About has "Make a report", which puts your logs, your settings and a short summary of your PC into one
+  zip file to send with a bug report (no saves and no game files), and "Open logs folder". F1 > Saves has
+  "Open saves folder".
+
+**Changed**
+- VSync is now off by default, so the frame rate is no longer held at your screen's refresh rate. The picture may
+  tear; turn VSync on in F1 > Graphics if you prefer. If you turned VSync on before, it stays on. On FreeSync and
+  G-Sync screens the game still stays just under the screen's top rate.
+
+**Fixed**
+- On some Intel integrated graphics the game window stayed black from start to end. It now notices this and
+  shows the game another way. Thanks to TheBrousse.
+- Changing VSync or the frame rate limit while in the HQ now takes effect at once. Before, the HQ kept its old
+  frame rate until you left it.
+- Exclusive full screen now fills the whole screen. On some screens it was a few lines short.
+- A level loaded from a state that was saved at 30 frames a second now runs at your frame rate.
 
 ## 0.4.8
 

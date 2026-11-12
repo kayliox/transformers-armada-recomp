@@ -31,6 +31,7 @@
 // the screen's refresh). TF_NATIVE_WARP_DOT=<x>: the dots' size (1 = a PS2 pixel's area). TF_NATIVE_WARP_LOG=1: a line
 // a second while a tunnel shows.
 #include "nr_types.h"
+#include "nr_backend.h"
 
 #include "runtime/ps2_host_display.h"
 #include "runtime/ps2_vu1.h"
@@ -300,6 +301,8 @@ namespace nr::warp
             bool ending = false;       // (the game's own frames came back)
             uint32_t number = 0u;      // tunnels so far
             uint32_t declinedTold = 0u; // (TODO 185 b: the tunnel whose run left to VU1 was logged)
+            uint32_t strayTold = 0u;    // (TODO 185 b: the tunnel whose game batches on the warp code were logged)
+            uint64_t strays = 0u;       // (... and how many there were in it)
             int64_t startNs = 0, lastRunNs = 0;
             uint64_t runs = 0u;
             float seed = 0.0f;
@@ -719,6 +722,12 @@ namespace nr::warp
                     next = due + period;
                 }
                 const double seconds = static_cast<double>(nowNs() - startNs) / 1.0e9;
+                {
+                    std::lock_guard<std::mutex> lock(g_s.mutex);
+                    if (g_s.strays != 0u && g_s.strayTold == number)
+                        std::fprintf(stderr, "[native warp] tunnel %u: %llu game batches sent during it were left out (TODO 185 b)\n", number,
+                                     static_cast<unsigned long long>(g_s.strays));
+                }
                 std::fprintf(stderr, "[native warp] tunnel %u over: %u frames of the program, %llu pictures in %.1f s (%.1f a second, the longest gap %.1f ms)\n",
                              number, tn.frame, static_cast<unsigned long long>(pictures), seconds, seconds > 0.0 ? static_cast<double>(pictures) / seconds : 0.0,
                              static_cast<double>(worstGap) / 1.0e6);
@@ -843,6 +852,37 @@ namespace nr::warp
         }
     }
 
+    // (TODO 185 b) A game batch sent while a tunnel is drawn natively. Start (0x26EEC0) writes the tunnel's program over
+    // the game's microcode in VU1 memory and puts the game's back at Stop; meanwhile VIF1 is not lite (the tunnel's runs
+    // come through it), so a batch of the game's display list sent then starts VU1 at one of the game's own entry
+    // points (0x270, 0x1408, or the warp program's end, 0x1420, by MSCNT) - inside the warp program, where they are
+    // XGKICKs of packets nothing built. Your 18:23 freeze: 30-40 of those a second for the whole tunnel (5.2 s), then
+    // the game waited for ever. A start anywhere but the program's own entry (0), with the warp program in VU1 memory
+    // while a tunnel shows, is left out here - nothing run, the pc as it was: the game's batch draws nothing (the tunnel
+    // covers the screen) and VU1 sends no packet. Logged once a tunnel, counted at its end.
+    bool strayRun(ps2vu1native::Run &run)
+    {
+        if (!g_active.load(std::memory_order_acquire) || run.state->pc == 0u || !run.code)
+            return false;
+        static const uint32_t first = 0x09030014u;
+        uint32_t lower = 0u;
+        std::memcpy(&lower, run.code, 4u);
+        if (lower != first || hashBytes(run.code, kCodeBytes) != kCodeHash)
+            return false;
+        std::lock_guard<std::mutex> lock(g_s.mutex);
+        if (!g_s.active)
+            return false;
+        ++g_s.strays;
+        if (g_s.strayTold != g_s.number)
+        {
+            g_s.strayTold = g_s.number;
+            g_s.strays = 1u;
+            std::fprintf(stderr, "[native warp] tunnel %u: a game batch started VU1 at pc 0x%x on the warp program - left out (TODO 185 b)\n",
+                         g_s.number, run.state->pc);
+        }
+        return true;
+    }
+
     // The tunnel's program offered to the VU1 hook (src/vu1_native.cpp): taken here, nothing run, when the native
     // renderer draws alone. The run's effects kept: its inputs taken from qw1022/1023 (1022.x cleared, as the program
     // does), qw20.x the run count (a tunnel begun: 0 there - Start copies the program's data in afresh), the end pc.
@@ -875,7 +915,7 @@ namespace nr::warp
             check(run.data);
             return false;
         }
-        if (ps2_host_display::emulatedDrawing() || !d3d::drawsPictures())
+        if (ps2_host_display::emulatedDrawing() || !backend().drawsPictures())
             return declined("the GS draws"); // (the GS draws: the program's packets are its pictures)
         uint8_t *data = run.data;
         auto word = [&](uint32_t q, uint32_t l) {

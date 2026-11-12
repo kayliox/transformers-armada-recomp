@@ -22,14 +22,15 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 namespace ai_probe
 {
     namespace
     {
-        constexpr uint32_t kDropShipUpdate = 0x003E28C0u;
-        constexpr uint32_t kGruntActorUpdate = 0x0044A8D0u, kSpiderActorUpdate = 0x00402D20u; // (their vtables' +0x14)
-        constexpr uint32_t kSpiderAim = 0x00401BD0u; // the spider tank's turret aim (actor, dt)
+        constexpr uint32_t kDropShipUpdate = TF_GA(0x003E28C0u);
+        constexpr uint32_t kGruntActorUpdate = TF_GA(0x0044A8D0u), kSpiderActorUpdate = TF_GA(0x00402D20u); // (their vtables' +0x14)
+        constexpr uint32_t kSpiderAim = TF_GA(0x00401BD0u); // the spider tank's turret aim (actor, dt)
         
         PS2Runtime::RecompiledFunction g_dropShipUpdate = nullptr, g_gruntActorUpdate = nullptr, g_spiderActorUpdate = nullptr, g_spiderAim = nullptr;
         std::unordered_map<uint32_t, uint64_t> g_aimSeen;
@@ -52,11 +53,11 @@ namespace ai_probe
         uint64_t g_lastHit = 0u;
         constexpr uint32_t kTrueWithPercentage = 0x002A5260u;
         PS2Runtime::RecompiledFunction g_trueWithPercentage = nullptr;
-        constexpr uint32_t kDropIt = 0x003E0D30u;
+        constexpr uint32_t kDropIt = TF_GA(0x003E0D30u);
         PS2Runtime::RecompiledFunction g_dropIt = nullptr;
         uint32_t g_damage = 0u;
-        constexpr uint32_t kTakeDamage = 0x003E29A0u;
-        constexpr uint32_t kStartDeath = 0x00423F90u, kStartFallToDeath = 0x00424620u;
+        constexpr uint32_t kTakeDamage = TF_GA(0x003E29A0u);
+        constexpr uint32_t kStartDeath = TF_GA(0x00423F90u), kStartFallToDeath = TF_GA(0x00424620u);
         uint64_t g_every = 15u;
         bool g_all = false;
         struct Seen

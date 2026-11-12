@@ -24,9 +24,20 @@ namespace nr
     // N8 item 5: the distance-based mip levels shifted toward the finer ones, in levels (-1: matched to the picture's
     // height, 0: the PS2's; nr_d3d.cpp). From any thread.
     void setTextureSharpness(float shift);
+    // Issue #17: a texture magnified on screen filtered by the draw's MMAG even where the GS's distance rule picks MMIN
+    // (true, the default), or the PS2's choice (false; nr_d3d.cpp). From any thread.
+    void setTextureSmoothing(bool on);
     // (TODO 165 / 161) The frames the drawing left out because it was behind, since the start (nr_thread.cpp): the rate
     // governor (overrides.cpp) takes a lasting share of them as the PC unable to hold the rate.
     unsigned long long framesLeftOutBehind();
+// (TODO 290 fps) The drawing's time a frame (ms: the slower of its reading and its drawing, the GPU's waits included) at
+// that share of the last `frames` frames drawn (0.95: the 95th percentile); 0 while fewer than 8 were drawn. And the
+// GPU's own time a frame (its timestamps), the same way. The rate governor's way up checks a higher rate fits both.
+double drawnFrameMs(double share, unsigned frames);
+double gpuFrameMs(double share, unsigned frames);
+// (TODO 291) The shown pictures' 1% low over the last `seconds` (the rate of the slowest 1% of their intervals, the same
+// as the pacing line's): 0 while fewer than 100 were shown, or with no native picture live.
+double pictureLowRate(double seconds);
     // (TODO 55) The game has moved to another place - a level loaded, the HQ entered or left (overrides.cpp): the
     // textures not drawn since are let go of a little later (nr_capture.cpp evictTextures). From the game's thread.
     void placeChanged();

@@ -5,18 +5,22 @@
 #   ./tools/make_hd_textures.sh --skip-upscale      # extract, convert and make fonts
 #   ./tools/make_hd_textures.sh --crisp-fonts-only  # extract, convert and make fonts
 #   ./tools/make_hd_textures.sh --fonts-only        # font assets only, no GPU or downloads
+#   ./tools/make_hd_textures.sh --verify            # check the set and write hd_textures/verify_report.txt, nothing changed
+#   ./tools/make_hd_textures.sh --remake            # the last report's missing and broken images made again
 # Set PYTHON to select a Python interpreter.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 game=$root/game out=$root/hd_textures py=$root/tools/hd_textures
 python=${PYTHON:-python3}
-skip_upscale=0 crisp_fonts_only=0 fonts_only=0
+skip_upscale=0 crisp_fonts_only=0 fonts_only=0 verify=0 remake=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --skip-upscale) skip_upscale=1 ;;
         --crisp-fonts-only) crisp_fonts_only=1 ;;
         --fonts-only) fonts_only=1 ;;
+        --verify) verify=1 ;;
+        --remake) remake=1 ;;
         --python) shift; [ $# -gt 0 ] || { echo '--python needs a value' >&2; exit 2; }; python=$1 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
@@ -38,13 +42,23 @@ if [ "$fonts_only" = 1 ]; then
     exit 0
 fi
 
+archives=$out/archives converted=$out/converted/textures
+# (TODO 281) F1's "Verify HD textures": the set checked and reported, nothing changed (upscale_textures.py --verify).
+# It needs the verifier and the set itself only: no disc archives, no extraction or upscaling, no Real-ESRGAN download.
+if [ "$verify" = 1 ]; then
+    step 'Verifying the HD textures (nothing is changed)'
+    "$python" -c 'import PIL' 2>/dev/null || { echo "Python's Pillow is missing: pip install pillow" >&2; exit 1; }
+    [ -d "$converted" ] || { echo "no converted textures in $converted: run ./tools/make_hd_textures.sh first" >&2; exit 1; }
+    [ -d "$out/upscaled" ] || { echo "no HD textures in $out/upscaled: run ./tools/make_hd_textures.sh first" >&2; exit 1; }
+    "$python" "$py/upscale_textures.py" "$converted" --out "$out/upscaled" --verify --hd-dir "$out" || exit $?
+    exit 0
+fi
 zips=() inputs=()
 for name in TFA TFA2 TA_XTRAS SOUNDE; do
     zips+=("$game/$name.ZIP")
     [ -f "$game/$name.ZIP" ] || { echo "$game/$name.ZIP not found: run build.sh --iso <your disc> first" >&2; exit 1; }
 done
 "$python" -c 'import PIL' 2>/dev/null || { echo "Python's Pillow is missing: pip install pillow" >&2; exit 1; }
-archives=$out/archives converted=$out/converted/textures
 if [ ! -d "$archives/TFA" ]; then
     step "Extracting the disc's archives into $archives"
     "$python" "$py/extract_pk_archive.py" "${zips[@]}" --out "$archives"
@@ -55,6 +69,11 @@ if [ ! -d "$converted/TFA" ]; then
         [ ! -d "$archives/$name" ] || inputs+=("$archives/$name")
     done
     "$python" "$py/itf_to_png.py" "${inputs[@]}" --out "$converted" --all-palettes
+fi
+# (TODO 281) F1's "Remake N broken images": the last verify's missing and broken ones removed, then made again below.
+if [ "$remake" = 1 ]; then
+    step 'Removing the images the last verify found missing or broken (they are made again below)'
+    "$python" "$py/upscale_textures.py" "$converted" --out "$out/upscaled" --forget-broken --hd-dir "$out"
 fi
 crisp_fonts() {
     if ! ensure_numpy; then
@@ -85,7 +104,7 @@ if [ ! -f "$exe" ]; then
 fi
 # A set made before the maker checked its images, or before its newer checks: every image checked once, broken ones
 # removed and made again below (make_hd_textures.ps1's step; the game reads the same mark).
-if [ -f "$out/upscaled/upscale_manifest.jsonl" ] && [ ! -f "$out/.images_checked_3" ]; then
+if [ "$remake" = 0 ] && [ -f "$out/upscaled/upscale_manifest.jsonl" ] && [ ! -f "$out/.images_checked_3" ]; then
     step 'Checking the HD textures made so far (a few minutes)'
     "$python" "$py/upscale_textures.py" "$converted" --out "$out/upscaled" --check-colours
     printf 'checked %s\n' "$(date +%Y-%m-%dT%H:%M:%S)" >"$out/.images_checked_3"

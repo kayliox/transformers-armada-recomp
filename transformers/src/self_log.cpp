@@ -9,6 +9,8 @@
 
 #include "self_log.h"
 
+#include "install_layout.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -81,7 +83,8 @@ namespace self_log
         if (redirected())
             return;
         std::error_code ec;
-        const fs::path dir = fs::path("runs");
+        // (TODO 279: logs\ of the new folder layout when it is there, else runs\ as before)
+        const fs::path dir = install_layout::isNew() ? install_layout::logsDir() : fs::path("runs");
         fs::create_directories(dir, ec);
         if (!fs::is_directory(dir, ec))
             return;
@@ -93,11 +96,15 @@ namespace self_log
         localtime_s(&local, &now);
         std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &local);
         const std::string base = (dir / (std::string("play_") + stamp)).string();
-        FILE *err = nullptr, *out = nullptr;
-        if (freopen_s(&err, (base + ".err").c_str(), "w", stderr) != 0 || !err)
+        // (freopen, not freopen_s: the secure one opens a file for writing with no sharing at all, so nothing could
+        // read the log of the running game - not the player, and not "Make a report", TODO 279)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+        FILE *err = std::freopen((base + ".err").c_str(), "w", stderr);
+        if (!err)
             return;
-        if (freopen_s(&out, (base + ".out").c_str(), "w", stdout) != 0)
-            out = nullptr;
+        FILE *out = std::freopen((base + ".out").c_str(), "w", stdout);
+#pragma warning(pop)
         SetStdHandle(STD_ERROR_HANDLE, reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(stderr))));
         if (out)
             SetStdHandle(STD_OUTPUT_HANDLE, reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(stdout))));

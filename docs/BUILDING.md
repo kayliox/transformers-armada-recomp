@@ -11,7 +11,8 @@ for example to work on the port.
 - **Python 3.11 or newer** with Pillow and numpy (`pip install pillow numpy`).
 - **Git.**
 - About 15 GB of free space.
-- Your own disc image of **Transformers (USA)**, `SLUS-20668`.
+- Your own disc image of **Transformers (USA)**, `SLUS-20668`, or of the European release, `SLES-52388`
+  (experimental).
 
 `setup.ps1 -InstallPrerequisites` installs the missing tools with winget.
 
@@ -27,7 +28,8 @@ Run it from a normal PowerShell window. CMake finds Visual Studio by itself.
 
 The build:
 
-1. checks that the disc is `SLUS-20668` and extracts it into `game\`;
+1. checks that the disc is `SLUS-20668` or `SLES-52388` and extracts it into `game\` (the release's settings are
+   in `transformers\config\versions\<serial>`; each build is for one release);
 2. finds the functions in the game's program and translates them to C++ with PS2Recomp, into `work\`;
 3. applies this port's patches to PS2Recomp and builds the executable into `out\`.
 
@@ -89,6 +91,15 @@ window of its own (F1 shows how far it is).
 On Linux, run `./tools/make_hd_textures.sh` instead (or add `--fonts-only` for fonts and prompts
 alone). It needs Python 3 with Pillow and numpy, plus curl, unzip and a Vulkan driver for upscaling.
 The native renderer loads them (the emulated one does not, as on Windows).
+
+To check an existing set without upscaling, run `./tools/make_hd_textures.sh --verify`. It needs
+Pillow and the existing `hd_textures/converted/textures` and `hd_textures/upscaled` folders.
+It writes a report and a check cache, but does not change the images. After a check reports missing
+or broken images, `./tools/make_hd_textures.sh --remake` removes those entries and resumes making them;
+good images are kept.
+
+On Linux, F1's HD buttons show these terminal commands; they do not start a background job.
+Close the game before making or remaking textures to keep the two from sharing the graphics card.
 
 ## Play
 

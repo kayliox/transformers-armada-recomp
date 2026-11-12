@@ -6,6 +6,9 @@
 #include "raylib.h"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdlib>
 #include <cctype>
 #include <cfloat>
 #include <cstdio>
@@ -316,6 +319,69 @@ namespace menu_style
         ImGui::Dummy(ImVec2(0.0f, extent.y + size * 0.25f));
     }
 
+    namespace
+    {
+        // (TODO 286 d) The control a row of choices is drawn as.
+        enum class ControlKind { Switch, Segments, Slider, List };
+        bool sameWord(const std::string &a, const char *b)
+        {
+            if (a.size() != std::strlen(b))
+                return false;
+            for (size_t i = 0; i < a.size(); ++i)
+                if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i])))
+                    return false;
+            return true;
+        }
+        int onIndexOf(const std::vector<std::string> &c)
+        {
+            return c.size() == 2 && sameWord(c[1], "On") ? 1 : 0;
+        }
+        // A number at the start ("90", "100%", "1.5x", "60 fps"), else false.
+        bool leadingNumber(const std::string &t, double &v)
+        {
+            char *end = nullptr;
+            v = std::strtod(t.c_str(), &end);
+            return end != t.c_str();
+        }
+        ControlKind controlKindOf(const std::vector<std::string> &c, float width, float size)
+        {
+            static const bool old = [] { const char *e = std::getenv("TF_MENU_CONTROLS"); return e && std::string(e) == "old"; }();
+            if (old)
+                return ControlKind::List;
+            const size_t n = c.size();
+            if (n == 2 && ((sameWord(c[0], "Off") && sameWord(c[1], "On")) || (sameWord(c[0], "On") && sameWord(c[1], "Off"))))
+                return ControlKind::Switch;
+            if (n >= 5)
+            {
+                // a range: every choice a number, in order (one word such as "Off" or "Auto" first allowed)
+                size_t first = 0;
+                double v = 0.0, last = 0.0;
+                if (!leadingNumber(c[0], v))
+                    first = 1;
+                bool range = n - first >= 5;
+                for (size_t i = first; range && i < n; ++i)
+                {
+                    if (!leadingNumber(c[i], v) || (i > first && v <= last))
+                        range = false;
+                    last = v;
+                }
+                if (range)
+                    return ControlKind::Slider;
+            }
+            if (n >= 2 && n <= 4)
+            {
+                ImFont *f = fonts().text;
+                const float segW = (width - 3.0f * static_cast<float>(n - 1)) / static_cast<float>(n);
+                bool fits = true;
+                for (const std::string &t : c)
+                    fits = fits && f->CalcTextSizeA(size * 0.86f, FLT_MAX, 0.0f, t.c_str()).x + size * 0.8f <= segW;
+                if (fits)
+                    return ControlKind::Segments;
+            }
+            return ControlKind::List;
+        }
+    }
+
     int choiceRow(const char *id, const std::string &label, const std::vector<std::string> &choices, int current,
                   bool enabled, const char *badge, const std::string &help)
     {
@@ -397,59 +463,133 @@ namespace menu_style
             dl->AddText(h, bs, ImVec2(ba.x + 5.0f, ba.y + 3.0f), kAmber, badge);
         }
 
-        // The selector: < value >, on the right half.
+        // (TODO 286 d, the approved redesign) One control per kind of setting, in one column of one width at the right:
+        // On / Off a switch, 2 to 4 short choices side by side, a numeric range of 5 or more a slider, anything else a
+        // list that opens under its row with the current choice ticked. TF_MENU_CONTROLS=old: the "< value >" selector
+        // for every row, as before. The controller is the same for each: Left / Right step, Cross holds or flips.
         const float selWidth = std::min(width * 0.46f, size * 17.0f);
         const float selX = b.x - selWidth - size * 0.6f;
         const float selH = height - size * 0.55f;
         const float selY = a.y + (height - selH) * 0.5f;
-        const float arrowW = selH;
-        ImGui::BeginDisabled(!enabled || count == 0);
-        ImGui::SetCursorScreenPos(ImVec2(selX, selY));
-        if (ImGui::InvisibleButton("left", ImVec2(arrowW, selH)) && count > 0)
-            chosen = (current - 1 + count) % count;
-        const bool leftHot = ImGui::IsItemHovered();
-        ImGui::SetCursorScreenPos(ImVec2(selX + arrowW, selY));
-        if (ImGui::InvisibleButton("value", ImVec2(selWidth - 2.0f * arrowW, selH)) && count > 0)
-            ImGui::OpenPopup("list");
-        const bool valueHot = ImGui::IsItemHovered();
-        ImGui::SetCursorScreenPos(ImVec2(selX + selWidth - arrowW, selY));
-        if (ImGui::InvisibleButton("right", ImVec2(arrowW, selH)) && count > 0)
-            chosen = (current + 1) % count;
-        const bool rightHot = ImGui::IsItemHovered();
-        ImGui::EndDisabled();
         const ImVec2 sa(selX, selY), sb(selX + selWidth, selY + selH);
-        dl->AddRectFilled(sa, sb, IM_COL32(10, 13, 18, 255), 2.0f);
-        dl->AddRect(sa, sb, valueHot ? kBlue : kLine, 2.0f);
-        const ImU32 arrowCol = enabled ? kText : kDim;
-        arrow(dl, ImVec2(selX + arrowW * 0.5f, selY + selH * 0.5f), selH * 0.42f, true, leftHot ? kBlue : arrowCol);
-        arrow(dl, ImVec2(sb.x - arrowW * 0.5f, selY + selH * 0.5f), selH * 0.42f, false, rightHot ? kBlue : arrowCol);
-        if (count > 0)
+        const ControlKind kind = controlKindOf(choices, selWidth, size);
+        const ImU32 valueCol = enabled ? IM_COL32(255, 255, 255, 255) : kDim;
+        ImGui::BeginDisabled(!enabled || count == 0);
+        if (kind == ControlKind::Switch)
+        {
+            const int onIndex = onIndexOf(choices);
+            const bool on = std::clamp(current, 0, count - 1) == onIndex;
+            const float sw = selH * 1.9f, sh = selH * 0.78f;
+            const ImVec2 ka(sb.x - sw, selY + (selH - sh) * 0.5f), kb(sb.x, ka.y + sh);
+            ImGui::SetCursorScreenPos(ImVec2(selX, selY));
+            if (ImGui::InvisibleButton("switch", ImVec2(selWidth, selH)))
+                chosen = on ? 1 - onIndex : onIndex;
+            const bool hot = ImGui::IsItemHovered();
+            dl->AddRectFilled(ka, kb, on ? kBlue : IM_COL32(30, 37, 49, 255), sh * 0.5f);
+            if (!on)
+                dl->AddRect(ka, kb, hot ? kBlue : kLine, sh * 0.5f);
+            const float r = sh * 0.5f - 3.0f;
+            const ImVec2 knob(on ? kb.x - sh * 0.5f : ka.x + sh * 0.5f, ka.y + sh * 0.5f);
+            dl->AddCircleFilled(knob, r, enabled ? kText : kDim);
+            const std::string &word = choices[static_cast<size_t>(std::clamp(current, 0, count - 1))];
+            const float vs = size * 0.92f;
+            const ImVec2 we = textFont->CalcTextSizeA(vs, FLT_MAX, 0.0f, word.c_str());
+            dl->AddText(textFont, vs, ImVec2(ka.x - size * 0.5f - we.x, selY + (selH - we.y) * 0.5f), on ? valueCol : kDim, word.c_str());
+        }
+        else if (kind == ControlKind::Segments)
+        {
+            const float gap = 3.0f;
+            const float segW = (selWidth - gap * static_cast<float>(count - 1)) / static_cast<float>(count);
+            for (int i = 0; i < count; ++i)
+            {
+                const ImVec2 pa(selX + static_cast<float>(i) * (segW + gap), selY), pb(pa.x + segW, sb.y);
+                ImGui::SetCursorScreenPos(pa);
+                ImGui::PushID(i);
+                if (ImGui::InvisibleButton("seg", ImVec2(segW, selH)))
+                    chosen = i;
+                const bool hot = ImGui::IsItemHovered();
+                ImGui::PopID();
+                const bool sel = i == current;
+                dl->AddRectFilled(pa, pb, sel ? kBlue : IM_COL32(30, 37, 49, 255), 2.0f);
+                if (!sel && hot)
+                    dl->AddRect(pa, pb, kBlue, 2.0f);
+                const std::string &t = choices[static_cast<size_t>(i)];
+                const float vs = size * 0.86f;
+                const ImVec2 te = textFont->CalcTextSizeA(vs, FLT_MAX, 0.0f, t.c_str());
+                dl->AddText(textFont, vs, ImVec2(pa.x + (segW - te.x) * 0.5f, selY + (selH - te.y) * 0.5f),
+                            sel ? IM_COL32(8, 10, 15, 255) : (enabled ? kDim : IM_COL32(90, 98, 112, 255)), t.c_str());
+            }
+        }
+        else if (kind == ControlKind::Slider)
         {
             const std::string &value = choices[static_cast<size_t>(std::clamp(current, 0, count - 1))];
             const float vs = size * 0.92f;
-            const float room = selWidth - 2.0f * arrowW - 8.0f;
-            std::string shown = value;
-            while (shown.size() > 3 && textFont->CalcTextSizeA(vs, FLT_MAX, 0.0f, shown.c_str()).x > room)
-                shown = shown.substr(0, shown.size() - 4) + "...";
-            const ImVec2 ve = textFont->CalcTextSizeA(vs, FLT_MAX, 0.0f, shown.c_str());
-            dl->AddText(textFont, vs, ImVec2(selX + (selWidth - ve.x) * 0.5f, selY + (selH - ve.y) * 0.5f),
-                        enabled ? IM_COL32(255, 255, 255, 255) : kDim, shown.c_str());
-            // the dots: where the value is among the choices
-            if (count > 1 && count <= 12)
+            const float valueW = size * 4.2f;
+            const float tx0 = selX + selH * 0.4f, tx1 = sb.x - valueW;
+            const float ty = selY + selH * 0.5f;
+            ImGui::SetCursorScreenPos(ImVec2(selX, selY));
+            ImGui::InvisibleButton("slider", ImVec2(selWidth - valueW + selH * 0.4f, selH));
+            const bool hot = ImGui::IsItemHovered();
+            if (ImGui::IsItemActive() && count > 1)
             {
-                const float dot = 3.0f, gap = 4.0f;
-                const float total = count * dot + (count - 1) * gap;
-                float x = selX + (selWidth - total) * 0.5f;
-                for (int i = 0; i < count; ++i, x += dot + gap)
-                    dl->AddRectFilled(ImVec2(x, sb.y + 3.0f), ImVec2(x + dot, sb.y + 5.0f), i == current ? kRed : kLine);
+                const float t = std::clamp((ImGui::GetIO().MousePos.x - tx0) / std::max(tx1 - tx0, 1.0f), 0.0f, 1.0f);
+                const int at = static_cast<int>(std::lround(t * static_cast<float>(count - 1)));
+                if (at != current)
+                    chosen = at;
+            }
+            const float t = count > 1 ? static_cast<float>(std::clamp(current, 0, count - 1)) / static_cast<float>(count - 1) : 0.0f;
+            const float kx = tx0 + (tx1 - tx0) * t;
+            dl->AddRectFilled(ImVec2(tx0, ty - 3.0f), ImVec2(tx1, ty + 3.0f), IM_COL32(30, 37, 49, 255), 3.0f);
+            dl->AddRectFilled(ImVec2(tx0, ty - 3.0f), ImVec2(kx, ty + 3.0f), enabled ? kBlue : kDim, 3.0f);
+            dl->AddCircleFilled(ImVec2(kx, ty), selH * 0.3f, hot ? IM_COL32(255, 255, 255, 255) : kText);
+            const ImVec2 ve = textFont->CalcTextSizeA(vs, FLT_MAX, 0.0f, value.c_str());
+            dl->AddText(textFont, vs, ImVec2(sb.x - ve.x, selY + (selH - ve.y) * 0.5f), valueCol, value.c_str());
+        }
+        else
+        {
+            ImGui::SetCursorScreenPos(ImVec2(selX, selY));
+            if (ImGui::InvisibleButton("value", ImVec2(selWidth, selH)) && count > 0)
+                ImGui::OpenPopup("list");
+            const bool hot = ImGui::IsItemHovered();
+            dl->AddRectFilled(sa, sb, IM_COL32(30, 37, 49, 255), 2.0f);
+            dl->AddRect(sa, sb, hot ? kBlue : kLine, 2.0f);
+            const float caret = selH * 0.22f;
+            const ImVec2 cc(sb.x - selH * 0.55f, selY + selH * 0.5f);
+            dl->AddTriangleFilled(ImVec2(cc.x - caret, cc.y - caret * 0.5f), ImVec2(cc.x + caret, cc.y - caret * 0.5f),
+                                  ImVec2(cc.x, cc.y + caret * 0.6f), enabled ? kDim : IM_COL32(90, 98, 112, 255));
+            if (count > 0)
+            {
+                const std::string &value = choices[static_cast<size_t>(std::clamp(current, 0, count - 1))];
+                const float vs = size * 0.92f;
+                const float room = selWidth - selH * 1.3f;
+                std::string shown = value;
+                while (shown.size() > 3 && textFont->CalcTextSizeA(vs, FLT_MAX, 0.0f, shown.c_str()).x > room)
+                    shown = shown.substr(0, shown.size() - 4) + "...";
+                const ImVec2 ve = textFont->CalcTextSizeA(vs, FLT_MAX, 0.0f, shown.c_str());
+                dl->AddText(textFont, vs, ImVec2(selX + size * 0.6f, selY + (selH - ve.y) * 0.5f), valueCol, shown.c_str());
             }
         }
+        ImGui::EndDisabled();
+        // The list, under its own row and as wide as the control (every kind opens it from the value with Enter on a held
+        // row's double click; the list kind on a click).
+        ImGui::SetNextWindowPos(ImVec2(selX, sb.y + 2.0f));
+        ImGui::SetNextWindowSizeConstraints(ImVec2(selWidth, 0.0f), ImVec2(selWidth, size * 22.0f));
         if (ImGui::BeginPopup("list"))
         {
             ImGui::PushFont(textFont, size);
             for (int i = 0; i < count; ++i)
-                if (ImGui::Selectable(choices[static_cast<size_t>(i)].c_str(), i == current, 0, ImVec2(selWidth, 0.0f)))
+            {
+                const bool sel = i == current;
+                if (ImGui::Selectable(choices[static_cast<size_t>(i)].c_str(), sel, 0, ImVec2(selWidth - size * 1.6f, 0.0f)))
                     chosen = i;
+                if (sel)
+                {
+                    const ImVec2 ra = ImGui::GetItemRectMin(), rb = ImGui::GetItemRectMax();
+                    const float cx = rb.x + size * 0.5f, cy = (ra.y + rb.y) * 0.5f;
+                    ImGui::GetWindowDrawList()->AddPolyline(std::array<ImVec2, 3>{ImVec2(cx - 6.0f, cy), ImVec2(cx - 2.0f, cy + 4.0f), ImVec2(cx + 6.0f, cy - 5.0f)}.data(),
+                                                          3, kBlue, 0, 2.5f);
+                }
+            }
             ImGui::PopFont();
             ImGui::EndPopup();
         }

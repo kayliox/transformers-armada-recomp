@@ -19,6 +19,8 @@ file(GLOB_RECURSE TF_DECOMP_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DI
 file(GLOB TF_NATIVE_RENDER_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/native_render/*.cpp")
 # (The large images' BC7 encoder, TODO 94: bc7enc, MIT / public domain - native_render/ext/bc7enc/README.txt.)
 list(APPEND TF_NATIVE_RENDER_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/native_render/ext/bc7enc/bc7enc.cpp")
+# (TODO 290 (17): its BC7 decoder too, same commit - a PCSX2 pack's DDS images read)
+list(APPEND TF_NATIVE_RENDER_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/native_render/ext/bc7enc/bc7decomp.cpp")
 # Direct3D 12 and its GL interop are Windows' alone; elsewhere nr_none.cpp stands in. On Linux TF_VKD3D_DIR (a static
 # vkd3d 2.1 or newer, Wine's Direct3D 12 on Vulkan) brings nr_d3d.cpp back: nr_none.cpp then stubs only the GL interop.
 if(WIN32)
@@ -35,8 +37,9 @@ else()
 endif()
 # (per file, not for the target: a new definition or include folder there would compile all of the game's code again)
 if(TF_NATIVE_VKD3D)
-    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/native_render/nr_capture.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/native_render/nr_none.cpp"
+    # (main.cpp and nr_capture.cpp ask nr_backend.cpp's nativeBackendChosen() at run time instead: the same question,
+    # and right for a Vulkan-only build too.)
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/native_render/nr_none.cpp"
         PROPERTIES COMPILE_DEFINITIONS TF_NATIVE_RENDERER=1)
     set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/native_render/nr_d3d.cpp" PROPERTIES
         COMPILE_DEFINITIONS TF_NATIVE_RENDERER=1 INCLUDE_DIRECTORIES "${TF_VKD3D_DIR}/include/vkd3d;${TF_VKD3D_DIR}/include")
@@ -116,14 +119,37 @@ target_include_directories(TransformersRecomp PRIVATE
 
 target_link_libraries(TransformersRecomp PRIVATE ps2_runtime)
 
+# The release this build is for (build.ps1 passes it from the disc): its executable's name and CRC32 from its
+# config (config/game.json for the USA release, config/versions/<serial>/game.json for the others).
+set(TF_GAME_VERSION "SLUS-20668" CACHE STRING "The release built: SLUS-20668 (USA) or a serial under config/versions")
+if(TF_GAME_VERSION STREQUAL "SLUS-20668")
+    set(TF_GAME_JSON "${CMAKE_CURRENT_SOURCE_DIR}/config/game.json")
+else()
+    set(TF_GAME_JSON "${CMAKE_CURRENT_SOURCE_DIR}/config/versions/${TF_GAME_VERSION}/game.json")
+endif()
+file(READ "${TF_GAME_JSON}" _tf_game_json)
+string(JSON TF_ELF_NAME GET "${_tf_game_json}" elf_name)
+string(JSON _tf_elf_crc GET "${_tf_game_json}" elf_crc32)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${TF_GAME_JSON}")
+target_compile_definitions(TransformersRecomp PRIVATE TF_ELF_NAME="${TF_ELF_NAME}" TF_ELF_CRC32=0x${_tf_elf_crc}u
+                           TF_GAME_SERIAL="${TF_GAME_VERSION}")
+if(TF_GAME_VERSION STREQUAL "SLES-52388")
+    target_compile_definitions(TransformersRecomp PRIVATE TF_GAME_PAL=1) # (game_version.h: TF_VA)
+endif()
+message(STATUS "Transformers: release ${TF_GAME_VERSION} (${TF_ELF_NAME})")
+
+# The disc's extracted files: game\ in the checkout, or the install's data\game once its folders were moved (TODO 279,
+# docs/INSTALL_LAYOUT_PLAN.md): build.ps1 passes the one it uses. The grass's VU1 program and the exe's icon read it.
+set(TF_GAME_DIR "${CMAKE_SOURCE_DIR}/game" CACHE PATH "The disc's extracted files (build.ps1 passes where they are)")
+
 # The grass's VU1 program as straight C++ (vu1_native.cpp includes it): a translation of the game's own microcode,
 # so it is made from the game's executable at build time (tools/make_vu1_grass.py), never kept in the repository.
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(TF_VU1_GRASS_INC "${TF_GENERATED_DIR}/vu1_grass47dd.inc")
 add_custom_command(OUTPUT "${TF_VU1_GRASS_INC}"
     COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/make_vu1_grass.py"
-            "${CMAKE_SOURCE_DIR}/game/SLUS_206.68" "${TF_VU1_GRASS_INC}"
-    DEPENDS "${CMAKE_SOURCE_DIR}/game/SLUS_206.68" "${CMAKE_SOURCE_DIR}/tools/make_vu1_grass.py"
+            "${TF_GAME_DIR}/${TF_ELF_NAME}" "${TF_VU1_GRASS_INC}"
+    DEPENDS "${TF_GAME_DIR}/${TF_ELF_NAME}" "${CMAKE_SOURCE_DIR}/tools/make_vu1_grass.py"
             "${CMAKE_SOURCE_DIR}/tools/vu1_grass47dd_lags.json" "${CMAKE_SOURCE_DIR}/tools/vu1_recompile.py"
             "${CMAKE_SOURCE_DIR}/tools/vu1_trace.py" "${CMAKE_SOURCE_DIR}/tools/vu1_batch.py"
     COMMENT "The grass's VU1 program, from the game's executable"
@@ -143,10 +169,144 @@ endif()
 add_dependencies(TransformersRecomp tf_version)
 # The exe's icon, made from the player's disc into the build folder (icon.cmake, TODO 198).
 include("${CMAKE_CURRENT_SOURCE_DIR}/icon.cmake")
+
+# The launcher (TODO 279, release B: launcher/launcher.cpp): "Transformers Armada.exe", put beside tfa-setup.exe in a
+# player's install folder by build.ps1. A small program of its own (no window, the game's icon when there is one),
+# built into the same folder as the game.
+if(WIN32)
+    add_executable(tfa_launcher WIN32 "${CMAKE_CURRENT_SOURCE_DIR}/launcher/launcher.cpp")
+    set_target_properties(tfa_launcher PROPERTIES OUTPUT_NAME "Transformers Armada")
+    target_compile_features(tfa_launcher PRIVATE cxx_std_20)
+    if(EXISTS "${CMAKE_CURRENT_BINARY_DIR}/tf_icon/transformers.rc")
+        target_sources(tfa_launcher PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/tf_icon/transformers.rc")
+    endif()
+endif()
 if(WIN32)
     target_link_libraries(TransformersRecomp PRIVATE d3d12 dxgi d3dcompiler)
 elseif(TF_NATIVE_VKD3D)
     target_link_libraries(TransformersRecomp PRIVATE ${TF_VKD3D_LIBS})
+endif()
+
+# The Vulkan backend (native_render/vulkan/, chosen at start with TF_GFX_API=vulkan; Direct3D 12 stays the default)
+# and its SDL3 window. The Vulkan headers, the volk loader (it loads the system's Vulkan at run time: no Vulkan SDK
+# needed to build) and SDL3 (static) are fetched like raylib. Off by default while it is in development (on, every build
+# fetches ~310 MB more): -DTF_VULKAN=ON, or build.ps1 -Vulkan. Off: Direct3D 12 alone, nothing fetched.
+option(TF_VULKAN "Build the Vulkan backend (TF_GFX_API=vulkan) and its SDL3 window" OFF)
+if(TF_VULKAN)
+    include(FetchContent)
+    # (headers and volk.c only: their own CMake projects are not added - SOURCE_SUBDIR names a folder they do not have)
+    FetchContent_Declare(tf_vulkan_headers
+        GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
+        GIT_TAG vulkan-sdk-1.4.363.0
+        GIT_SHALLOW TRUE
+        SOURCE_SUBDIR not-a-cmake-project)
+    FetchContent_Declare(tf_volk
+        GIT_REPOSITORY https://github.com/zeux/volk.git
+        GIT_TAG vulkan-sdk-1.4.363.0
+        GIT_SHALLOW TRUE
+        SOURCE_SUBDIR not-a-cmake-project)
+    set(SDL_SHARED OFF)
+    set(SDL_STATIC ON)
+    set(SDL_TEST_LIBRARY OFF)
+    set(SDL_TESTS OFF)
+    set(SDL_EXAMPLES OFF)
+    set(SDL_INSTALL OFF)
+    FetchContent_Declare(tf_sdl3
+        GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+        GIT_TAG release-3.4.18
+        GIT_SHALLOW TRUE)
+    # The Vulkan Memory Allocator (its header alone) for the images and buffers.
+    FetchContent_Declare(tf_vma
+        GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+        GIT_TAG v3.4.0
+        GIT_SHALLOW TRUE
+        SOURCE_SUBDIR not-a-cmake-project)
+    FetchContent_MakeAvailable(tf_vulkan_headers tf_volk tf_sdl3 tf_vma)
+    # The shader compiler for SPIR-V, used by the build only: DXC's release (its dxcompiler.dll, loaded by the bake below;
+    # the same HLSL as Direct3D 12's). The Windows SDK's DXC has no SPIR-V; this one does. Nothing of it ships.
+    if(WIN32)
+        FetchContent_Declare(tf_dxc
+            URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/dxc_2026_09_29.zip
+            URL_HASH SHA256=ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+            SOURCE_SUBDIR not-a-cmake-project)
+        FetchContent_MakeAvailable(tf_dxc)
+    endif()
+    add_library(tf_volk STATIC "${tf_volk_SOURCE_DIR}/volk.c")
+    target_include_directories(tf_volk PRIVATE "${tf_volk_SOURCE_DIR}" "${tf_vulkan_headers_SOURCE_DIR}/include")
+    target_compile_definitions(tf_volk PRIVATE VK_NO_PROTOTYPES)
+    # The HLSL the backend draws with: Direct3D 12's own string literals, taken from nr_d3d.cpp into a header at build time
+    # (looked at again when nr_d3d.cpp changes, written only when its shaders did), so both backends draw with one source
+    # until the HLSL moves into files of its own. Its own target: the bake and the backend both wait for it.
+    set(TF_VK_GEN "${CMAKE_CURRENT_BINARY_DIR}/tf_vulkan_gen")
+    add_custom_command(OUTPUT "${TF_VK_GEN}/nr_hlsl_sources.h"
+        COMMAND ${CMAKE_COMMAND} "-DSRC=${CMAKE_CURRENT_SOURCE_DIR}/native_render/nr_d3d.cpp" "-DOUT=${TF_VK_GEN}/nr_hlsl_sources.h"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/extract_hlsl.cmake"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/native_render/nr_d3d.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/extract_hlsl.cmake"
+        COMMENT "Vulkan backend: the HLSL from nr_d3d.cpp")
+    add_custom_target(tf_vulkan_hlsl DEPENDS "${TF_VK_GEN}/nr_hlsl_sources.h")
+    # The SPIR-V built into the game (native_render/vulkan/nr_vulkan_shaders.h): a small program of the build's own
+    # (bake_spirv.cpp, never shipped) loads the fetched DXC's dxcompiler.dll and compiles every shader the backend makes,
+    # the pixel shader's 64 variants included, into a table of SPIR-V words (nr_spirv_baked.cpp) - again whenever the HLSL
+    # or the bake changes (its program is then built again). So the game needs no shader compiler and no dxcompiler.dll.
+    # Without a compiler for this system (DXC is fetched for Windows only so far) the table is empty and the backend says
+    # so at start.
+    set(TF_VK_BAKED "${TF_VK_GEN}/nr_spirv_baked.cpp")
+    if(WIN32)
+        add_executable(tf_vulkan_bake
+            "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/bake_spirv.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/nr_vulkan_dxc.cpp")
+        target_include_directories(tf_vulkan_bake PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/native_render"
+                                   "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan" "${TF_VK_GEN}" "${tf_dxc_SOURCE_DIR}/inc")
+        target_compile_features(tf_vulkan_bake PRIVATE cxx_std_20)
+        # (its own folder: not beside the game)
+        set_target_properties(tf_vulkan_bake PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tf_vulkan_bake")
+        add_dependencies(tf_vulkan_bake tf_vulkan_hlsl)
+        add_custom_command(OUTPUT "${TF_VK_BAKED}"
+            COMMAND tf_vulkan_bake "${tf_dxc_SOURCE_DIR}/bin/x64/dxcompiler.dll" "${TF_VK_BAKED}"
+            DEPENDS tf_vulkan_bake
+            COMMENT "Vulkan backend: its shaders compiled to SPIR-V (every variant)")
+    elseif(NOT EXISTS "${TF_VK_BAKED}")
+        file(WRITE "${TF_VK_BAKED}" "// No SPIR-V: no shader compiler for this system yet (transformers/CMakeLists.txt).
+#include \"nr_vulkan_shaders.h\"
+namespace nr::vulkan::shaders
+{
+    const Baked kBaked[] = {{0ull, nullptr, 0u}};
+    const size_t kBakedCount = 0;
+}
+")
+    endif()
+    # The backend is a library of its own (native_render/vulkan/ is outside the native_render/*.cpp glob above): SDL3's
+    # and Vulkan's include folders and defines stay on its files. Linked straight to the game target, SDL3's include
+    # folders went onto every one of the game's command lines (even through $<LINK_ONLY:...>), and switching between a
+    # build with and without this compiled all of the game's code again.
+    add_library(tf_vulkan_backend STATIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/nr_vulkan.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/nr_vulkan_vma.cpp"
+        "${TF_VK_BAKED}")
+    add_dependencies(tf_vulkan_backend tf_vulkan_hlsl)
+    target_include_directories(tf_vulkan_backend PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/native_render"
+                               "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan" "${tf_volk_SOURCE_DIR}"
+                               "${tf_vulkan_headers_SOURCE_DIR}/include" "${tf_vma_SOURCE_DIR}/include" "${TF_VK_GEN}")
+    target_compile_definitions(tf_vulkan_backend PRIVATE TF_VULKAN=1 VK_NO_PROTOTYPES VMA_STATIC_VULKAN_FUNCTIONS=0
+                               VMA_DYNAMIC_VULKAN_FUNCTIONS=1)
+    target_compile_features(tf_vulkan_backend PRIVATE cxx_std_20)
+    target_link_libraries(tf_vulkan_backend PRIVATE tf_volk SDL3::SDL3-static)
+    target_link_libraries(TransformersRecomp PRIVATE tf_vulkan_backend)
+endif()
+
+# nr_backend.cpp chooses the backend: told on its own command line which native ones this build has (Windows' Direct3D
+# 12, vkd3d's, Vulkan's), so it never names one that is not linked in (nr_none.cpp stands in otherwise).
+set(TF_BACKEND_DEFINITIONS "")
+if(WIN32 OR TF_NATIVE_VKD3D)
+    list(APPEND TF_BACKEND_DEFINITIONS TF_NATIVE_RENDERER=1)
+endif()
+if(TF_VULKAN)
+    list(APPEND TF_BACKEND_DEFINITIONS TF_VULKAN=1)
+endif()
+if(TF_BACKEND_DEFINITIONS)
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/native_render/nr_backend.cpp" PROPERTIES
+        COMPILE_DEFINITIONS "${TF_BACKEND_DEFINITIONS}")
 endif()
 
 # register_functions.cpp is one 50 MB constructor filling the function table

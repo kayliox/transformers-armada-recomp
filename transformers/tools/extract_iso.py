@@ -1,10 +1,12 @@
-"""Extract your own Transformers (USA) disc image for the recompilation.
+"""Extract your own Transformers disc image for the recompilation.
 
 Copies every file from the ISO 9660 filesystem into <out_dir>, keeping the
-disc's folder layout, and checks that the executable is the SLUS-20668 build
-this project targets. Nothing from the disc is ever part of the repository.
+disc's folder layout, and checks that the executable is the build of a release
+this project has a config for (USA SLUS-20668: config/; others:
+config/versions/<serial>/). Nothing from the disc is ever part of the repository.
 
 Usage: python extract_iso.py "Transformers (USA).iso" game
+       python extract_iso.py --detect "Transformers (Europe).iso"   (prints the release's serial)
 """
 
 import argparse
@@ -13,7 +15,9 @@ import sys
 import zlib
 from pathlib import Path
 
-from ps2elf import load_game_config
+import os
+
+from ps2elf import known_versions, load_game_config
 
 SECTOR = 2048
 
@@ -80,17 +84,29 @@ class Iso:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("iso", help="your Transformers (USA) disc image")
-    ap.add_argument("out_dir", help="folder to extract into (e.g. game)")
+    ap.add_argument("iso", help="your Transformers disc image")
+    ap.add_argument("out_dir", nargs="?", help="folder to extract into (e.g. game)")
     ap.add_argument("--force", action="store_true", help="extract even if the executable does not match")
+    ap.add_argument("--detect", action="store_true", help="only print the serial of the disc's release")
     args = ap.parse_args()
 
-    cfg = load_game_config()
     iso = Iso(args.iso)
     files = list(iso.walk())
     names = {str(p).upper() for p, _ in files}
+    # (the release: TF_GAME_VERSION when set, else the one whose executable is on the disc)
+    version = os.environ.get("TF_GAME_VERSION")
+    if not version:
+        version = next((v for v, elf in known_versions().items() if elf in names), None)
+    if args.detect:
+        if not version:
+            sys.exit(f"{args.iso}: no known Transformers release ({', '.join(known_versions())}).")
+        print(version)
+        return
+    if not args.out_dir:
+        ap.error("out_dir is needed")
+    cfg = load_game_config(version)
     if cfg["elf_name"] not in names and not args.force:
-        sys.exit(f"{args.iso} does not contain {cfg['elf_name']}; this is not Transformers (USA, {cfg['serial']}).")
+        sys.exit(f"{args.iso} does not contain {cfg['elf_name']}; this is not Transformers ({cfg['region']}, {cfg['serial']}).")
 
     out = Path(args.out_dir)
     total = sum(r["size"] for _, r in files)
@@ -110,7 +126,7 @@ def main():
 
     if elf_crc is not None and f"{elf_crc:08x}" != cfg["elf_crc32"]:
         msg = (f"{cfg['elf_name']} has CRC32 {elf_crc:08x}, expected {cfg['elf_crc32']}. "
-               "Only the USA release is supported.")
+               f"This is not the {cfg['serial']} release this build expects.")
         if not args.force:
             sys.exit(msg)
         print("Warning: " + msg)

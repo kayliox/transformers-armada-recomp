@@ -233,6 +233,24 @@ instructions = [
   { address = "0x430274", value = "0xc784a1a8" }, # 0x430190: a patch's kinds of tree drawn within (the same)
   # The forest's 3D trees (TODO 124): CreateInstance's limit (400, addiu $v1, $zero, 0x190) read from the
   # padding word 0x6CD29C that overrides.cpp sets (installForest: TF_FOREST_CAP, 400 with TF_FOREST=old).
+# (TODO 275) The trees between the camera and the player (0x429510): a tree within the near distance of the camera
+# (the squared distance 0x6CDF60, 49 or less - 0x284C70 sets it each frame from the camera's distance to the
+# player) fades out, one past the far one (0x6CDF64, 81) back in - a count a frame in the instance's byte +0xF5,
+# the picture gone after three. Each count adds a step from 0x6CB0FC (a word of padding before .sdata that no code
+# uses) that overrides.cpp sets every frame - 1 on the frames where the console's 30-a-second tick passes, else 0:
+# the fade lasts its 0.1 s at any rate (at 30 always 1, the game's own). The patch swaps the redundant reload of the
+# counter for the step's load. And the near and far distances are read from 0x6CB0F8 / 0x6CB0F4 (the same padding),
+# which overrides.cpp keeps as the game's (F1 "Trees close to you": fade) or -1 (stay: no tree is that near).
+  { address = "0x429f30", value = "0xc7818008" }, # 0x429510: lwc1 $f1, -0x7FF8($gp) (was lwc1 $f1, -0x5190($gp))
+  { address = "0x42a000", value = "0xc7818004" }, # 0x429510: lwc1 $f1, -0x7FFC($gp) (was lwc1 $f1, -0x518C($gp): the far one, 0x6CB0F4)
+  # (`replaces`: the word each one replaces - the three move instructions around, so another release's build checks
+  # these words as they are, tools/make_config.py)
+  { address = "0x429fe0", value = "0x9381800c", replaces = "0x24420001" }, # 0x429510 fade out: lbu $at, -0x7FF4($gp) (was addiu $v0, $v0, 0x1)
+  { address = "0x429fe4", value = "0x00411021", replaces = "0xa24200f5" }, # addu $v0, $v0, $at (was sb $v0, 0xF5($s2))
+  { address = "0x429fe8", value = "0xa24200f5", replaces = "0x924200f5" }, # sb $v0, 0xF5($s2) (was lbu $v0, 0xF5($s2))
+  { address = "0x42a0b0", value = "0x9381800c", replaces = "0x24420001" }, # 0x429510 fade in: lbu $at, -0x7FF4($gp) (was addiu $v0, $v0, 0x1)
+  { address = "0x42a0b4", value = "0x00411021", replaces = "0xa24200f5" }, # addu $v0, $v0, $at (was sb $v0, 0xF5($s2))
+  { address = "0x42a0b8", value = "0xa24200f5", replaces = "0x924200f5" }, # sb $v0, 0xF5($s2) (was lbu $v0, 0xF5($s2))
   { address = "0x4293c4", value = "0x8f83a1ac" }, # 0x4293C0: lw $v1, -0x5E54($gp) (was addiu $v1, $zero, 0x190)
   # The drawing of those instances (0x429510) writes a record for each one it draws into a static array of 400
   # (0x728220, 0x60 bytes each) and a pointer to each into a list of 400 (0x731820, sorted by 0x42AC00) - no

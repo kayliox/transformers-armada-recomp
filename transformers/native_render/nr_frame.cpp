@@ -37,6 +37,10 @@ namespace nr
     // (log2(lines / 448): the GS's distance-based choice made for the PS2's 448 lines), 0 the PS2's, above 0 that many.
     std::atomic<float> g_texSharp{-1.0f};
     void setTextureSharpness(float shift) { g_texSharp.store(shift, std::memory_order_relaxed); }
+    // Issue #17 (smooth textures): a texture magnified on screen takes the draw's MMAG filter even where the GS's
+    // distance rule picks MMIN (nr_d3d.cpp sampleGs). On by default; off: the PS2's choice.
+    std::atomic<bool> g_texSmooth{true};
+    void setTextureSmoothing(bool on) { g_texSmooth.store(on, std::memory_order_relaxed); }
 }
 
 namespace nr::frame
@@ -102,7 +106,7 @@ namespace nr::frame
     {
         using Constants = draw::Constants;               // (the layout the shaders read: nr_draw.h)
         using PictureConstants = draw::PictureConstants; // (a picture's: the shader's b1)
-        using d3d::qualityPreset;
+        int qualityPreset() { return backend().qualityPreset(); } // (the backend in use: nr_backend.cpp)
         uint32_t writeMaskOf(uint32_t fbmsk) { return draw::writeMaskOf(fbmsk); } // (nr_draw.h)
 
         // A mesh as the frame builder keeps it: the device's mesh (its buffers), or where a mesh of this frame's alone went
@@ -260,6 +264,7 @@ namespace nr::frame
         GpuTexture g_standIn;           // (slot 0: the white texture - its colour in g_standInColour)
         float g_standInColour[4] = {};
         std::unordered_map<uint64_t, std::array<float, 4>> g_averages; // (a texture's average colour, by id)
+        std::unordered_map<uint64_t, bool> g_cutOuts; // (TODO 290 (14): a small texture with clear texels, by id: no stand-in)
         const double kTexBudgetMs = [] {
             const char *e = std::getenv("TF_NATIVE_TEXBUDGET");
             return e && *e ? std::atof(e) : 3.0;
@@ -620,7 +625,10 @@ namespace nr::frame
             return g.pictureH > 448u ? std::log2(static_cast<float>(g.pictureH) / 448.0f) : 0.0f;
         }
 
-        void tex1Constants(uint64_t tex1, float *lod, float *lodf) { draw::tex1Constants(tex1, texSharpShift(), lod, lodf); } // (nr_draw.h)
+        void tex1Constants(uint64_t tex1, float *lod, float *lodf)
+        {
+            draw::tex1Constants(tex1, texSharpShift(), g_texSmooth.load(std::memory_order_relaxed), lod, lodf); // (nr_draw.h)
+        }
 
 
         // (P3 S3) The frame builder's textures asked of the device's later upload (uploadTextureLater), by the texture's
@@ -681,6 +689,29 @@ namespace nr::frame
             return &g_standIn;
         }
 
+        // (TODO 290 (14)) A small texture with clear texels (a HUD piece, a sprite, an effect): never stood in for. The stand-in
+        // is one flat colour over the whole quad - its clear parts too: a solid box in the texture's average colour, a frame
+        // or two (bbatts's Iris Xe: boxes around the HUD and the Autobot insignia, effects flickering when a warp gate opened;
+        // a slower GPU spends its texture budget sooner, so stand-ins come there). Made at once instead (they are small).
+        bool noStandIn(const Texture &texture)
+        {
+            const size_t n = texture.pixels.size();
+            if (n == 0u || n > 256u * 256u)
+                return false;
+            if (g_cutOuts.size() > 8192u)
+                g_cutOuts.clear();
+            auto [it, fresh] = g_cutOuts.try_emplace(texture.id, false);
+            if (fresh)
+            {
+                const size_t step = std::max<size_t>(1u, n / 4096u);
+                size_t clear = 0, count = 0;
+                for (size_t i = 0; i < n; i += step, ++count)
+                    clear += ((texture.pixels[i] >> 24) & 0xFFu) < 16u;
+                it->second = clear * 100u >= count; // (1% of its texels or more clear)
+            }
+            return it->second;
+        }
+
         GpuTexture *textureFor(const std::shared_ptr<const Texture> &texture, bool standInOk = false)
         {
             // (TODO 177) A texture converted on the pool whose content has a large image loaded already: that one, from
@@ -706,12 +737,12 @@ namespace nr::frame
             // (A game texture already on the uploader's way: its stand-in until it is done - or, with the frame's
             // budget not spent, made here after all: a stand-in lasts a frame or two, not the uploader's queue.
             // The uploader's copy, when it comes, is let go of - takeUploaded.)
-            if (standInOk && !texture->upscaled && g_laterAsked.count(texture->id) && !texture->pixels.empty() &&
+            if (standInOk && !texture->upscaled && g_laterAsked.count(texture->id) && !texture->pixels.empty() && !noStandIn(*texture) &&
                 !(kTexBudgetMs > 0.0 && g_frameMakeMs < kTexBudgetMs))
                 return standInFor(*texture);
             // (Over the frame's creation budget: to the uploader, the stand-in drawn meanwhile.)
             if (standInOk && !texture->upscaled && kTexBudgetMs > 0.0 && g_frameMakeMs >= kTexBudgetMs &&
-                texture->pixels.size() == static_cast<size_t>(texture->width) * texture->height && !texture->pixels.empty() &&
+                texture->pixels.size() == static_cast<size_t>(texture->width) * texture->height && !texture->pixels.empty() && !noStandIn(*texture) &&
                 askLater(texture, true))
                 return standInFor(*texture);
             // (A game texture is made here, when first drawn with: it has nothing to stand in for it, and
@@ -728,7 +759,8 @@ namespace nr::frame
             }
             // (TODO 152) A palette (256 entries or fewer: the depth fog's, the lens filters') is never put off: it costs
             // nothing to make, and without it the pass is drawn from GS memory or left out - a frame of another colour.
-            if (texture->pixels.size() > 256u && g_frameMade > 0 && (g_frameMade >= kTexCap.first || g_frameTexels + texture->pixels.size() > kTexCap.second))
+            if (texture->pixels.size() > 256u && g_frameMade > 0 && !noStandIn(*texture) &&
+                (g_frameMade >= kTexCap.first || g_frameTexels + texture->pixels.size() > kTexCap.second))
             {
                 ++g_frameDeferred;
                 return nullptr;
@@ -1037,7 +1069,9 @@ namespace nr::frame
             float threshold[3] = {}, strength[3] = {};
             size_t chain = 0, additions = 0;
             // The chain's vignette: its strips of one grey each (a copy modulated by a colour, a band of the buffer), in the
-            // buffer's order - after the chain's turn, top to bottom on the screen. 0: none found (a flat bloom).
+            // buffer's order - after the chain's turn, top to bottom on the screen. 0: none found (a flat bloom). Each is the
+            // grey's own weight (grey / 0x80, the GS's modulation), as the game's glow takes it: the vignette follows the
+            // sun down the screen, often only two or three bands lit and none brighter than half (TODO 271).
             float profile[8] = {};
             int profileN = 0;
         };
@@ -1160,15 +1194,13 @@ namespace nr::frame
                 if (strips.size() >= 4u && strips.size() <= 8u)
                 {
                     std::sort(strips.begin(), strips.end());
-                    float sum = 0.0f;
-                    for (const auto &s : strips)
-                        sum += s.second;
-                    if (sum > 0.0f)
-                    {
-                        out.profileN = static_cast<int>(strips.size());
-                        for (int k = 0; k < out.profileN; ++k)
-                            out.profile[k] = strips[static_cast<size_t>(k)].second * static_cast<float>(out.profileN) / sum; // (mean 1)
-                    }
+                    // (TODO 271: not scaled to a mean of 1 any more - with the sun's band alone lit, Deep Amazon's sunset, that
+                    // made its two bands 5.7 and 2.3 times the glow, where the game gives them 0.43 and 0.17: a yellow-white
+                    // band across the sky with a hard edge; in the other states measured 3 to 27 times the game's glow. The F1 strength slider
+                    // stays the way to more.)
+                    out.profileN = static_cast<int>(strips.size());
+                    for (int k = 0; k < out.profileN; ++k)
+                        out.profile[k] = strips[static_cast<size_t>(k)].second;
                 }
             }
             out.found = out.additions != 0u;
@@ -1787,7 +1819,9 @@ namespace nr::frame
         // (the render scale: that share of the window's size, the picture shown enlarged - setRenderScale; 100 unless set)
         const int scale = renderScale();
         const int window = g_windowLines.load(std::memory_order_relaxed) * scale / 100;
+#if defined(__linux__)
         const int windowWidth = g_windowWidth.load(std::memory_order_relaxed) * scale / 100;
+#endif
         // (TODO 255) A movie shown as a band of the picture's rows (ps2_host_display::setPictureBand): the picture as
         // many lines taller as the band is short of it, so the band itself still has the window's lines.
         float bandTop = 0.0f, bandBottom = 1.0f;
@@ -1795,8 +1829,14 @@ namespace nr::frame
         const float bandLines = linesFixed > 0 ? 1.0f : 1.0f / std::max(0.25f, bandBottom - bandTop);
         const float shape = input.displayAspect > 0.5f ? input.displayAspect : 4.0f / 3.0f;
         const float tall = (window > 0 ? window : 1080) * bandLines;
+#if defined(__linux__)
+        // (Linux: the window's lines, or its width over the picture's shape in a narrower, letterboxed window - a 16:9
+        // picture on the Steam Deck's 16:10 screen - the extra lines would be drawn and then scaled away.)
         const float lines = linesFixed > 0 ? static_cast<float>(linesFixed) :
             windowWidth > 0 ? std::min(tall, windowWidth / shape) : tall;
+#else
+        const float lines = linesFixed > 0 ? static_cast<float>(linesFixed) : tall;
+#endif
         const uint32_t linesWanted = static_cast<uint32_t>(
             std::clamp(static_cast<int>(std::lround(lines)), 240, 4320));
         const uint32_t height = linesWanted, width = (static_cast<uint32_t>(std::lround(linesWanted * shape)) + 7u) & ~7u;

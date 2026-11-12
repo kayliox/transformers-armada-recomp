@@ -29,6 +29,7 @@
 #include "photo_mode.h"
 
 #include "game_config.h"
+#include "menu_mouse.h"
 #include "port_ext.h"
 #include "tuning.h"
 
@@ -477,8 +478,10 @@ namespace photo_mode
         const bool slow = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
         const float speed = 10.0f * (fast ? 5.0f : 1.0f) * (slow ? 0.2f : 1.0f); // units (about metres) a second
         const float turn = 1.6f * (slow ? 0.3f : 1.0f);                         // radians a second (arrow keys)
-        const Vector2 mouse = IsWindowFocused() ? GetMouseDelta() : Vector2{0.0f, 0.0f};
-        const float wheel = GetMouseWheelMove();
+        // (TODO 290 (6): F1 > Controls > Mouse in the game Off - not the mouse either)
+        const bool mouseOn = menu_mouse::gameMouseOn();
+        const Vector2 mouse = IsWindowFocused() && mouseOn ? GetMouseDelta() : Vector2{0.0f, 0.0f};
+        const float wheel = mouseOn ? GetMouseWheelMove() : 0.0f;
 
         std::lock_guard<std::mutex> guard(g_lock);
         if (IsKeyPressed(KEY_R))

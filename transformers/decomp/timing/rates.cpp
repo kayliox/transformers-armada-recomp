@@ -2,6 +2,7 @@
 
 #include "timing.h"
 
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 #include "port.h"
 
 namespace tf::timing
@@ -10,12 +11,16 @@ namespace tf::timing
     {
         // The standard the rates are for: a PAL console in its 60 Hz mode counts as NTSC.
         // (Inline in each of the three functions below in the original.)
+        // PC: NTSC in every mode. The VBlanks are the PC's, 60 a second (the runtime's), and the
+        // PAL release in its 50 Hz mode timed for 50 ran 20% fast: its game clock 11.8 s in 10.1 s.
+        // So the game is timed as in its own 60 Hz mode, its frame rate unchanged; the 50 Hz
+        // mode keeps its picture (TvStandard below).
         int32_t RateStandard()
         {
             int32_t standard = tvStandard;
             if (pal60 != 0 && standard == 1)
                 standard = 0;
-            return standard;
+            return standard == 1 ? 0 : standard;
         }
 
         // PC: a rate of the console's (59.94) at the PC port's level rate R: 59.94 x R / 60, a
@@ -29,6 +34,8 @@ namespace tf::timing
 
         // The return address of the period's call in a car's reset (0x31F6D0).
         constexpr uint32_t kCarResetReturn = 0x0031F7E0u;
+        // The creature effects' update (taCreatureEffectSwitcher, 0x533010, 0x6C8 bytes): its calls of the period.
+        constexpr uint32_t kEffectsUpdate = TF_GA(0x00533010u), kEffectsUpdateSize = 0x6C8u;
     }
 
     f32 LevelFrameRate(int rate)
@@ -77,6 +84,11 @@ namespace tf::timing
         // at every rate (overrides.cpp, "The cars").
         if (port::levelRate() != 0 && decomp::guest().gpr(31) == kCarResetReturn)
             return ConsoleFramePeriod();
+        // PC: (TODO 290) the creature effects' update steps a console frame while the electric shock runs - every 30th
+        // of a second at the PC port's rate (overrides.cpp effectsUpdate) - and takes that frame's time.
+        if (port::levelRate() != 0 && port::effectsAtConsoleStep())
+            if (const uint32_t ra = decomp::guest().gpr(31); ra > kEffectsUpdate && ra < kEffectsUpdate + kEffectsUpdateSize)
+                return ConsoleFramePeriod();
         f32 rate = frameRates[RateStandard()];
         if (halfRate != 0)
             rate = rate / 2.0f;
@@ -115,6 +127,26 @@ namespace tf::timing
         return port::levelRate() != 0 ? 0 : static_cast<int32_t>(holdAtThirty);
     }
 
+    // 0x32E800: the TV standard - 0 NTSC, 1 PAL (a PAL console in its 60 Hz mode: 0).
+    int32_t TvStandard()
+    {
+        // PC: the places that time the game by it see the 60 Hz mode (RateStandard): a PAL
+        // console's speed-up of a frame's movement (0x3C9E80, x1.2 at 50 Hz), the in-level movies'
+        // standard (0x3199E0, kept with the rate it reads next) and the films, "p" at 25
+        // pictures a second or "n" at 29.97 with the field rate (0x4CDAE0) - the n films, timed
+        // in the runtime's NTSC fields (MPEG.cpp) as in the 60 Hz mode. Every other caller sets
+        // the picture up (the display's offsets and height, the menus' text) and sees the mode.
+        // (Return addresses: the USA release's TV standard is always 0.)
+        const uint32_t caller = decomp::guest().gpr(31);
+        if (caller == TF_GA(0x3C9F94u) || caller == 0x319AACu || caller == TF_GA(0x4CDB50u))
+            return RateStandard();
+        int32_t standard = tvStandard;
+        if (pal60 != 0 && standard == 1)
+            standard = 0;
+        return standard;
+    }
+
+    DECOMP_FUNCTION(0x32E800, TvStandard, "timing");
     DECOMP_FUNCTION(0x32E840, TvFieldRate, "timing");
     DECOMP_FUNCTION(0x32E8B0, TargetFrameRate, "timing");
     DECOMP_FUNCTION(0x32E910, FramePeriod, "timing");

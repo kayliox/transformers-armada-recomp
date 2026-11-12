@@ -38,6 +38,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 namespace sound_nodes
 {
@@ -128,7 +129,7 @@ namespace sound_nodes
     // Decomp: in 0x381CB0 multiply the pitch step by dt*30 and count the two in time.
     namespace
     {
-        constexpr uint32_t kWindUpdate = 0x00381CB0u;
+        constexpr uint32_t kWindUpdate = TF_GA(0x00381CB0u);
         PS2Runtime::RecompiledFunction g_windUpdate = nullptr;
         struct WindOwed
         {

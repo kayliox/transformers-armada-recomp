@@ -213,7 +213,14 @@ if ($Hooks) { . $Hooks }
 $pre = Get-PortPrefix $Repo $Port   # ("" in a clone of the game's repository; "port/" when one holds this folder)
 # (git never asks for anything in a window without anyone to answer: the game's update is unattended)
 if ($Play) { $env:GIT_TERMINAL_PROMPT = "0"; $env:GCM_INTERACTIVE = "never" }
-try { Start-Transcript -Path (Join-Path $Repo "update.log") -Force | Out-Null } catch {}
+# (TODO 279: the install's logs\ when its folders were moved; update.log in the checkout before that)
+$UpdateLog = Join-Path $Repo "update.log"
+if (Test-Path -LiteralPath (Join-Path $Port "tools\install_layout.ps1")) {
+    . (Join-Path $Port "tools\install_layout.ps1")
+    $logs = Get-LayoutLogsDir $Port
+    if ($logs) { $UpdateLog = Join-Path $logs "update.log" }
+}
+try { Start-Transcript -Path $UpdateLog -Force | Out-Null } catch {}
 
 if ($WaitForPid -gt 0) {
     $game = Get-Process -Id $WaitForPid -ErrorAction SilentlyContinue
@@ -224,7 +231,10 @@ if ($WaitForPid -gt 0) {
 }
 
 if (-not (Test-Path $StateFile)) { Fail "run setup.ps1 first (this copy was never set up)" }
-$state = Get-Content $StateFile -Raw | ConvertFrom-Json
+# (an empty or damaged .setup.json - a write cut off - is a warning, not a stop: only its disc path and build mark are read)
+$state = $null
+try { $state = Get-Content $StateFile -Raw | ConvertFrom-Json } catch {}
+if (-not $state) { Write-Host "warning: .setup.json is empty or damaged: it is written again at the end" -ForegroundColor Yellow; $state = [pscustomobject]@{} }
 if (-not $Binaries -and $state.PSObject.Properties["Binaries"]) { $Binaries = $state.Binaries }
 $Python = Find-Python
 if (-not $Python) { Fail "Python 3.11+ not found: run setup.ps1 again" }

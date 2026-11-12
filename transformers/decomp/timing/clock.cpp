@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 namespace tf::timing
 {
@@ -67,7 +68,7 @@ namespace tf::timing
     }
 
     DECOMP_FUNCTION(0x108780, ClockSeconds, "timing");
-    DECOMP_FUNCTION(0x41E8F0, GameClock_Construct, "timing");
-    DECOMP_FUNCTION(0x41E820, GameClock_SetStep, "timing");
-    DECOMP_FUNCTION(0x41E840, GameClock_Advance, "timing");
+    DECOMP_FUNCTION(TF_GA(0x41E8F0), GameClock_Construct, "timing");
+    DECOMP_FUNCTION(TF_GA(0x41E820), GameClock_SetStep, "timing");
+    DECOMP_FUNCTION(TF_GA(0x41E840), GameClock_Advance, "timing");
 }

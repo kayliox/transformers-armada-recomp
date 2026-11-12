@@ -6,6 +6,7 @@
 #include "runtime/ee_scheduler.h"
 
 #include <cstdio>
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 namespace tf::timing
 {
@@ -85,9 +86,9 @@ namespace tf::timing
             g.copyGpr(kA0, kS0);
             if (g.gpr(kS0) != 0u)
             {
-                DECOMP_CALL(g, 0x4A11D0u, kAfterLoopStartsA)
+                DECOMP_CALL(g, TF_GA(0x4A11D0u), kAfterLoopStartsA)
                 g.copyGpr(kA0, kS0);
-                DECOMP_CALL(g, 0x4A1080u, kAfterLoopStartsB)
+                DECOMP_CALL(g, TF_GA(0x4A1080u), kAfterLoopStartsB)
             }
             for (;;)
             {

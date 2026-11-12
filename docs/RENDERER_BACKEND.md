@@ -25,12 +25,14 @@ rendering fix is made in the shared files, so it reaches every backend.
 
 ## 2. The backend's outer calls
 
-The rest of the game talks to the backend through a few calls. Today they are free functions in `nr::d3d`, declared in
+The rest of the game talks to the backend through a few calls. They were free functions in `nr::d3d`, declared in
 `nr_types.h` and `nr_glshare.h`, and the callers (`nr_capture.cpp`, `nr_thread.cpp`, `nr_present.cpp`, `nr_hires.cpp`,
-`nr_warp.cpp`, `src/overrides.cpp`) call them directly. `nr_backend.h` holds the same calls as one interface,
+`nr_warp.cpp`, `src/overrides.cpp`) called them directly. `nr_backend.h` holds the same calls as one interface,
 `nr::Backend`, which the Direct3D 12 backend implements by forwarding to those functions. A second backend
-implements `nr::Backend`; the first step is to make the callers use `nr::backend()` instead of `nr::d3d::` (a
-mechanical change) and to choose the backend at start.
+implements `nr::Backend`. Done: the callers use `nr::backend()` instead of `nr::d3d::` (only the shared-texture type
+`d3d::SharedPicture` and `d3d::kSharedPictures` stay), and `nr_backend.cpp` chooses the backend once at start:
+`TF_GFX_API=vulkan` the Vulkan backend (`nr_vulkan.cpp`, in development), anything else Direct3D 12. `nr::backend()`
+and `gfx::device()` are defined there; the Direct3D 12 backend's own are `d3d12Backend()` and `gfx::deviceD3d12()`.
 
 | Call | Thread | What it does |
 |---|---|---|
@@ -41,10 +43,11 @@ mechanical change) and to choose the backend at start.
 | `waitForFrameSlot()` | render thread | Wait until the next frame slot is free; returns the ms waited. |
 | `render(frame, shotPath)` | render thread | Draw the frame (section 3). With `shotPath`, also save the picture as a BMP. |
 | `preUpload(texture)` | any | A game texture made ahead, handed to the uploader at the next frame. |
-| `latestPicture(pixels, rowPitch, index, w, h, serial, meta)`, `pictureShown(index)` | window thread | The next CPU picture, in the order the pictures were handed over: the hand-over's mapped read-back itself, held (not read back into again) until the window calls `pictureShown` after its upload. |
+| `latestPicture(pixels, rowPitch, index, serial, meta)`, `pictureShown(index)` | window thread | Linux only: the next CPU picture, in the order the pictures were handed over: the hand-over's mapped read-back itself, held (not read back into again) until the window calls `pictureShown` after its upload. Windows keeps 0.6's `latestPicture(pixels, width, height, serial, has3D)`, which copies the newest picture into a vector. |
 | `setSharedPictures(on)`, `latestShared(picture, serial)`, `sharedHeld(index)` | window thread | The newest picture as a texture the window imports, and which one the window still holds. |
 | `waitPicture(serial, untilNs, lastNs)`, `pacingMode()` | window thread | The pacer: wait for the next picture by its due time. |
-| `setWindowSize`, `setAntiAliasing`, `setSupersampling`, `setSpeedupsForced` | any | Settings, used from the next frame. |
+| `setWindowSize(w, h)` (Linux) / `setWindowLines(h)` (Windows: what 0.6 and earlier use) | window thread | The window's size in pixels, called every frame by the picture provider, not only on a resize. It is one or two relaxed atomic stores (Linux also stores the width), so calling it each frame costs next to nothing; the next picture uses it (Linux: as many lines as the window shows, or its width over the picture's shape in a narrower window; Windows: the window's lines, as 0.6 does). |
+| `setAntiAliasing(mode)`, `setSupersampling(on)`, `setSpeedupsForced(on)` | any | Settings, used from the next frame: the anti-aliasing pass (0 off, 1 FXAA, 2 SMAA 1x), supersampling (the 3D drawn at 1.5x the picture's pixels and averaged down), and a checking aid that forces the picture-keeping speed-ups on or off (-1: as the settings say). |
 | `largeImageCap`, `largeImageBudget`, `largeImageBytes`, `adapterMemoryMB`, `qualityPreset` | any | The HD textures' video-memory budget and the quality preset. |
 | `gpuPictureMs`, `gpuExtraMs`, `cpuPictureMs`, `replayWaitMs`, `slotWaitMs`, `pacerDelayMs` | render or window thread | Timing figures for the frame pacer and the stats lines. |
 
@@ -143,7 +146,7 @@ The depth convention is the GS's: larger is nearer, depth is cleared to 0 and te
 |---|---|---|
 | `createTexture(w, h, Format, levels)` | `RGBA8` or `BC7` (the HD images). Texture 0 is a white 1 x 1 texture. | a placed resource in `pool::` heaps, a descriptor slot (8,192 in all) |
 | `uploadTexture(id, level, texels, rowBytes)` | Levels given in order on this frame; the texture is usable once the last level is given. | through the staging ring (`g_texRing`), copies recorded on the frame's list |
-| `uploadTextureLater(id, source, urgent)` | The texture is made and uploaded off the render thread when the device gets to it, its texels read from `source` then (gone by then: skipped). `urgent` goes before the large images. | the uploader thread (`up::`) on a copy queue; `takeUploaded` writes its view at a frame's start |
+| `uploadTextureLater(id, source, urgent)` | The texture is made and uploaded off the render thread when the device gets to it, its texels read from `source` then (gone by then: skipped). `urgent` goes before the large images. An RGBA8 source's mip chain goes down to 1 x 1: the levels it does not carry are box-filtered by the device (`frame::mipChain`) - the pictures depend on it (with the given levels alone, distant foliage read its sharp top level and came out brighter). | the uploader thread (`up::`) on a copy queue; `takeUploaded` writes its view at a frame's start |
 | `textureReady(id)` | Its upload reached the GPU. Until then the frame builder draws the game's own texture or a stand-in. | |
 | `releaseTexture(id)` | Freed once the frames using it are done. | |
 | `textureSlotsFree()`, `textureBytes(id)` | Room for more textures (0: a new one is refused); a texture's video memory (the HD images' budget). | free descriptor slots; allocation size |
@@ -296,10 +299,11 @@ The native picture reaches the window in one of two ways, chosen at start:
   `kSharedPictures` (24) shareable `RGBA8` textures with NT handles. The window imports them into OpenGL with
   `GL_EXT_memory_object_win32` (`nr_glshare.cpp`) and draws the one handed over (`latestShared`). The backend never draws
   into a texture the window holds (`sharedHeld`) or the newest one handed over.
-- **CPU pixels**: the picture is read back and the window uploads it straight from the mapped read-back
+- **CPU pixels**: the picture is read back and the window uploads it: on Linux straight from the mapped read-back
   (`latestPicture`, then `pictureShown`), one hand-over of four in turn so a newer picture never replaces one
-  waiting; it is presented as it is handed over, paced like the shared textures. This is the path on Linux, the
-  fallback when the import fails (for example under Wine/Proton), and with `TF_NATIVE_SHARE=0`.
+  waiting, presented as it is handed over, paced like the shared textures; on Windows as 0.6 does, the newest
+  picture copied into a vector. This is the path on Linux, the fallback when the import fails (for example under
+  Wine/Proton), and with `TF_NATIVE_SHARE=0`.
 
 The pacer (`pace::` in `nr_d3d.cpp`, `waitPicture` on the window's side) hands each picture over at its due time
 (`PictureOut::dueNs`) plus a delay that follows the GPU's times, so pictures reach the screen evenly.
@@ -329,7 +333,7 @@ only the tone mapping's SDR part exists (`ToneMap`). For an HDR mode:
 - A setting for paper white and peak brightness, since displays differ.
 
 The hand-over is the part of the backend that is least separated today: the window's side lives in `nr_present.cpp`
-and `nr_glshare.cpp`, and calls `nr::d3d` directly. Changing it is part of the SDL3 work.
+and `nr_glshare.cpp`, the calls go through `nr::backend()`, and changing it is part of the SDL3 work.
 
 ## 8. Build integration
 
@@ -345,6 +349,27 @@ and `nr_glshare.cpp`, and calls `nr::d3d` directly. Changing it is part of the S
   variants are `PSV_` defines: either compile the variants a run asks for, or a fixed list, or the whole shader only
   (`PipelineDesc::variant` 0 gives the same pixels, only slower).
 - The public build (`build.ps1 -Public`) builds the same renderer files; keep it building.
+- **The Vulkan backend's build** (`TF_VULKAN`, a CMake option, off by default while it is in development:
+  `build.ps1 -Vulkan` or `-DTF_VULKAN=ON` turns it on, and the build folder keeps it): the Vulkan headers and the volk loader
+  (`vulkan-sdk-1.4.363.0`) and SDL3 (`release-3.4.18`, static) are fetched at configure time like raylib; volk loads the
+  system's Vulkan at run time, so building needs no Vulkan SDK. The backend (`native_render/vulkan/`, outside the
+  `native_render/*.cpp` glob) is a static library of its own, `tf_vulkan_backend`, that links them privately: their
+  include folders and defines stay on its files, so the game's other files keep their command lines (no full recompile
+  when switching between a build with and without it). Off (`-DTF_VULKAN=OFF`, the default) builds Direct3D 12 alone and
+  fetches nothing.
+  Its draws also fetch the Vulkan Memory Allocator (`v3.4.0`, its header) and, on Windows, DXC's release (`v1.9.2609`,
+  checked by its SHA-256; the Windows SDK's DXC has no SPIR-V), which only the build uses: a small program of the build's
+  own (`native_render/vulkan/bake_spirv.cpp`, target `tf_vulkan_bake`) loads its `dxcompiler.dll` and compiles every
+  shader the backend makes, the pixel shader's 64 variants included, into a table of SPIR-V words built into the game
+  (`nr_spirv_baked.cpp` in the build folder, read through `nr_vulkan_shaders.h`). CMake runs it again whenever the HLSL
+  changes, so every build path (build.ps1, `cmake --build`, the IDE) has it, and the game needs no shader compiler and no
+  `dxcompiler.dll`. Each shader is found by a key over DXC's switches, the HLSL, entry point, profile and defines, so a
+  shader the bake's list lacks is reported at start rather than taken stale. Until the HLSL moves into files of its own,
+  the build takes it from `nr_d3d.cpp`'s string literals into a generated header (`native_render/vulkan/extract_hlsl.cmake`,
+  looked at again when `nr_d3d.cpp` changes and written only when its shaders did), so both backends draw with one source. For the same pixels as `D3DCompile`'s, DXC is given `-HV 2018` (the language as D3DCompile
+  reads it), `ddx`/`ddy` as `ddx_coarse`/`ddy_coarse` (D3DCompile's meaning of them), and Vulkan 1.3 as its target, so
+  that `discard` demotes the pixel to a helper as Direct3D's does rather than ending it (`OpKill` left its 2 x 2
+  neighbours' derivatives - their texture levels - undefined).
 
 ## 9. The acceptance test
 
@@ -394,4 +419,6 @@ same frame rate as before. S1 named the neutral types (`nr_backend.h`). S2 moved
 the targets; the textures, meshes and rings; the state and draws; the copies, the effects and the anti-aliasing; the
 queries, statistics, predication and read-backs (the occlusion probe became an effect read back through `readTarget`);
 and finally the frame's life (`prepareFrame`, `beginFrame`, `endFrame`), after which the frame builder moved into
-`nr_frame.cpp`. Left for later: the window hand-over (section 7) and the callers' switch to `nr::backend()`.
+`nr_frame.cpp`. The callers then moved to `nr::backend()`, and the hand-over followed: Linux hands over its mapped
+read-back in turn, keeping each picture until the window has uploaded it, while Windows keeps 0.6's copied newest
+picture. The window's own side stayed in `nr_present.cpp` and `nr_glshare.cpp` (section 7).

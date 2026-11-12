@@ -14,10 +14,23 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+// The return address a wrapped function was called with: $ra, or in a decomp-bridge build where a call out from native
+// code carries the bridge's sentinel there, the original call site's (decomp_bridge/bridge_runtime.cpp defines it).
+// Use the real $ra by default; a private bridge can override it on either toolchain.
+extern "C" uint32_t tfCallerReturnAddress(R5900Context *ctx);
+extern "C" uint32_t tfCallerReturnAddressDefault(R5900Context *ctx) { return GPR_U32(ctx, 31); }
+#if defined(_MSC_VER)
+#pragma comment(linker, "/alternatename:tfCallerReturnAddress=tfCallerReturnAddressDefault")
+#else
+extern "C" uint32_t tfCallerReturnAddress(R5900Context *ctx)
+    __attribute__((weak, alias("tfCallerReturnAddressDefault")));
+#endif
 #include <set>
 #include <string>
 #include <tuple>
 #include <vector>
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 namespace ultrawide
 {
@@ -25,6 +38,7 @@ namespace ultrawide
     {
         constexpr float kGameWide = 16.0f / 9.0f; // the game's own widescreen shape: the data's base
         constexpr float kMaxShape = 2.4f;
+        constexpr float kNarrowest = 4.0f / 3.0f; // (TODO 282: the narrowest shape of the widescreen picture)
         constexpr uint32_t kWidescreenByte = 0x006CF004u; // the renderer's copy of the WIDESCREEN option
         constexpr uint32_t kFourThirds = 0x006CB1FCu;     // the 4/3 the pixel aspect is multiplied by in widescreen
         constexpr uint32_t kFourThirdsBits = 0x3FAAAAABu;
@@ -38,7 +52,7 @@ namespace ultrawide
 
         // The calls (jal / jalr addresses) whose result is widened, and the callers that decide it
         // for the calls made inside the two frustum builders.
-        constexpr uint32_t kFovCalls[] = {0x0020C7E4u, 0x0020B570u, 0x00358F38u, 0x003542C8u, 0x001BFB04u,
+        constexpr uint32_t kFovCalls[] = {0x0020C7E4u, 0x0020B570u, TF_GA(0x00358F38u), TF_GA(0x003542C8u), 0x001BFB04u,
                                           0x002B8B2Cu, 0x002B8E34u, 0x002B8E50u, 0x002B8EA0u};
         // Both frustum builders take their HORIZONTAL half-angle from the field of view and the
         // vertical one from it times the display mode's pixel aspect (vlCameraSpaceFrustum: +8/+C
@@ -52,16 +66,27 @@ namespace ultrawide
         constexpr uint32_t kFovInCameraFrustum = 0x001F4B38u;
         constexpr uint32_t kCameraFrustumForFov[] = {0x002B8A1Cu,  // taRenderingInfo (effects, particles)
                                                      0x002191A4u,  // the scene traversal (culling)
-                                                     0x0042A868u}; // the eco code (culling)
-        constexpr uint32_t kCameraFrustumForCulling[] = {0x002191A4u, 0x0042A868u};
+                                                     TF_GA(0x0042A868u)}; // the eco code (culling)
+        constexpr uint32_t kCameraFrustumForCulling[] = {0x002191A4u, TF_GA(0x0042A868u)};
         constexpr uint32_t kFovInBuildFrustum = 0x0020AC28u;
-        constexpr uint32_t kBuildFrustumForFov[] = {0x00270618u, 0x00273F64u, 0x004368C4u, 0x00564E4Cu, // water, sky, eco globe, rain
-                                                    0x002B3FD0u, 0x002B40B0u, 0x005BAFA8u,              // in-view tests
-                                                    0x004296F4u, 0x0042E42Cu};                          // the eco code (culling)
-        constexpr uint32_t kBuildFrustumForCulling[] = {0x004296F4u, 0x0042E42Cu}; // the eco code's (trees, plants)
-        constexpr uint32_t kTanCall = 0x0042E3BCu;                                  // ecoQuadtree::Render
+        constexpr uint32_t kBuildFrustumForFov[] = {0x00270618u, 0x00273F64u, TF_GA(0x004368C4u), TF_GA(0x00564E4Cu), // water, sky, eco globe, rain
+                                                    0x002B3FD0u, 0x002B40B0u, TF_GA(0x005BAFA8u),              // in-view tests
+                                                    TF_GA(0x004296F4u), TF_GA(0x0042E42Cu)};                          // the eco code (culling)
+        constexpr uint32_t kBuildFrustumForCulling[] = {TF_GA(0x004296F4u), TF_GA(0x0042E42Cu)}; // the eco code's (trees, plants)
+        constexpr uint32_t kTanCall = TF_GA(0x0042E3BCu);                                  // ecoQuadtree::Render
         constexpr uint32_t kAspectInBuildFrustum = 0x0020AC04u;
         constexpr uint32_t kAspectInCameraFrustum = 0x001F4BB0u;
+        // The sun (TODO 108: "the glare and lens flare placed right at 21:9"). The sun's quad and its lens flare
+        // (taSun's draw 0x409610: 0x409300 and 0x408A10) are billboards made from the camera's axes (the rendering
+        // info's rows +0x180 right / +0x190 up) times size x tan(fov/2) (+0x1B4, from the widened field of view): wider
+        // than 16:9 the horizontal comes out right and the vertical the shape times too tall - the glare a tall oval
+        // reaching far up and down. While taSun draws, the up row is divided by the shape. The sun's place was right
+        // all along (its quad sits at the camera + 2000 x the sun's direction, drawn by the projection; the visibility
+        // test's spot, 0x20B3D0, measured on it - TF_NATIVE_OCCLOG). The shape is 1 at 16:9 (and the FOV slider alone
+        // widens both axes alike), so 16:9 is untouched. TF_SUN_OLD=1: as before.
+        constexpr uint32_t kSunDraw = TF_GA(0x00409610u);
+        constexpr uint32_t kRenderingInfoNow = 0x006CF330u; // the current taRenderingInfo (data: the same in PAL)
+        constexpr uint32_t kRenderingInfoUp = 0x190u;
 
         template <size_t N>
         bool contains(const uint32_t (&list)[N], uint32_t value)
@@ -145,7 +170,7 @@ namespace ultrawide
 
         void fovHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            const uint32_t call = GPR_U32(ctx, 31) - 8u;
+            const uint32_t call = tfCallerReturnAddress(ctx) - 8u;
             g_fov(rdram, ctx, runtime); // (a leaf: it returns)
             const uint32_t from = call == kFovInCameraFrustum ? g_cameraFrustumFrom : (call == kFovInBuildFrustum ? g_buildFrustumFrom : 0u);
             const bool inCamera = call == kFovInCameraFrustum, inBuild = call == kFovInBuildFrustum;
@@ -170,7 +195,7 @@ namespace ultrawide
 
         void tanHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            const uint32_t call = GPR_U32(ctx, 31) - 8u;
+            const uint32_t call = tfCallerReturnAddress(ctx) - 8u;
             g_tan(rdram, ctx, runtime); // (a leaf)
             const float k = wideK() * fovFactor();
             const bool widen = call == kTanCall || extra(call);
@@ -179,10 +204,63 @@ namespace ultrawide
                 ctx->f[0] *= k;
         }
 
+        bool sunOld()
+        {
+            static const bool old = [] { const char *e = std::getenv("TF_SUN_OLD"); return e && *e == '1'; }();
+            return old;
+        }
+
+        // The up row while taSun draws (above): divided on the way in, put back on the way out. A draw that stops for
+        // the scheduler before it is done returns here early and finishes later on its own: then the row is put back
+        // at the next draw, unless the rendering info was made again meanwhile (each frame).
+        PS2Runtime::RecompiledFunction g_sunDraw = nullptr;
+        struct SunRow
+        {
+            uint32_t at = 0;
+            float row[3] = {};
+            float divided[3] = {};
+            bool pending = false;
+        } g_sunRow;
+        void sunRowRestore(uint8_t *rdram)
+        {
+            if (!g_sunRow.pending)
+                return;
+            g_sunRow.pending = false;
+            // (only while it still holds what was written: a rendering info made again since keeps its own)
+            uint8_t *p = getMemPtr(rdram, g_sunRow.at);
+            if (p && std::memcmp(p, g_sunRow.divided, sizeof(g_sunRow.divided)) == 0)
+                std::memcpy(p, g_sunRow.row, sizeof(g_sunRow.row));
+        }
+
+        void sunDrawHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t returnAddress = GPR_U32(ctx, 31);
+            sunRowRestore(rdram);
+            const float shape = wideK();
+            if (shape != 1.0f && !sunOld())
+            {
+                uint32_t info = 0;
+                if (const uint8_t *now = getMemPtr(rdram, kRenderingInfoNow))
+                    std::memcpy(&info, now, sizeof(info));
+                if (uint8_t *p = info ? getMemPtr(rdram, info + kRenderingInfoUp) : nullptr)
+                {
+                    g_sunRow.at = info + kRenderingInfoUp;
+                    std::memcpy(g_sunRow.row, p, sizeof(g_sunRow.row));
+                    g_sunRow.pending = true;
+                    for (int i = 0; i < 3; ++i)
+                        g_sunRow.divided[i] = g_sunRow.row[i] / shape;
+                    std::memcpy(p, g_sunRow.divided, sizeof(g_sunRow.divided));
+                }
+            }
+            g_sunDraw(rdram, ctx, runtime);
+            if (ctx->pc == returnAddress)
+                sunRowRestore(rdram);
+        }
+
         void displayInfoHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t returnAddress = GPR_U32(ctx, 31);
-            const uint32_t call = returnAddress - 8u;
+            const uint32_t call = tfCallerReturnAddress(ctx) - 8u;
             const uint32_t info = GPR_U32(ctx, 4);
             g_displayInfo(rdram, ctx, runtime);
             if (ctx->pc != returnAddress)
@@ -206,7 +284,7 @@ namespace ultrawide
 
         void cameraFrustumHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            const uint32_t from = GPR_U32(ctx, 31) - 8u;
+            const uint32_t from = tfCallerReturnAddress(ctx) - 8u;
             const uint32_t frustum = GPR_U32(ctx, 4);
             g_cameraFrustumFrom = from;
             g_cameraFrustum(rdram, ctx, runtime);
@@ -227,7 +305,7 @@ namespace ultrawide
 
         void buildFrustumHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            g_buildFrustumFrom = GPR_U32(ctx, 31) - 8u;
+            g_buildFrustumFrom = tfCallerReturnAddress(ctx) - 8u;
             g_buildFrustum(rdram, ctx, runtime);
         }
 
@@ -266,6 +344,7 @@ namespace ultrawide
         hook(runtime, kGetDisplayModeInfo, g_displayInfo, displayInfoHook);
         hook(runtime, kCameraSpaceFrustum, g_cameraFrustum, cameraFrustumHook);
         hook(runtime, kBuildFrustum, g_buildFrustum, buildFrustumHook);
+        hook(runtime, kSunDraw, g_sunDraw, sunDrawHook);
     }
 
     void setInHq(bool inHq) { g_inHq.store(inHq, std::memory_order_relaxed); }
@@ -299,8 +378,17 @@ namespace ultrawide
             const int w = g_windowW.load(std::memory_order_relaxed), h = g_windowH.load(std::memory_order_relaxed);
             s = h > 0 ? static_cast<float>(w) / static_cast<float>(h) : kGameWide;
         }
-        return std::clamp(s, kGameWide, kMaxShape);
+        // (TODO 282) Narrower than 16:9 too, down to 4:3: a 16:10 screen got the 16:9 picture with a bar above and
+        // below. The view keeps its height and gives up width, down to about the game's own 4:3 view at 4:3; the 2D
+        // is a 4:3 area in the middle at every shape, so it fits. A hidden window (the tests', 640x480) that follows
+        // "the screen" keeps 16:9 as before, so the tests' pictures do not change; a shape asked for by number
+        // (TF_ASPECT=16:10) is taken there too.
+        static const bool hidden = std::getenv("PS2X_WINDOW_HIDDEN") && *std::getenv("PS2X_WINDOW_HIDDEN") == '1';
+        const bool followsWindow = g_chosen.load(std::memory_order_relaxed) == 0.0f;
+        return std::clamp(s, followsWindow && hidden ? kGameWide : kNarrowest, kMaxShape);
     }
+
+    float wideFactor() { return g_k.load(std::memory_order_relaxed); }
 
     void frame(uint8_t *rdram)
     {
@@ -351,12 +439,12 @@ namespace ultrawide
             return;
         float value = (4.0f / 3.0f) * k;
         uint32_t bits = kFourThirdsBits;
-        if (k > 1.0f)
+        if (k != 1.0f) // (TODO 282: narrower than 16:9 too)
             std::memcpy(&bits, &value, sizeof(bits));
         if (bits != current)
             std::memcpy(p, &bits, sizeof(bits));
         lastWritten = bits;
-        constantK = k > 1.0f ? k : 1.0f;
+        constantK = k;
     }
 
     void addSettings()
@@ -367,7 +455,8 @@ namespace ultrawide
         s.label = "Picture shape";
         s.order = 31;
         s.help = "With Widescreen on: the game's own 16:9, or wider (hor+: more at the sides, the HUD at the screen's "
-                 "edges). 'The screen's' follows the window, up to 2.4:1. Movies stay 4:3.";
+                 "edges), or narrower for a 16:10 or 4:3 screen (less at the sides). 'The screen's' follows the window, from "
+                 "4:3 up to 2.4:1. Movies stay 4:3.";
         s.choices = {{"16:9", "16:9 (the game's)"}, {"21:9", "21:9"}, {"screen", "The screen's"}, {"2.4", "2.4:1 (the widest)"}};
         s.defaultValue = "screen"; // (the window's shape: a 16:9 window stays 16:9, an ultrawide one fills)
         s.apply = [](const std::string &value)

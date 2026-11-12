@@ -22,6 +22,10 @@ namespace view_turn
 
 namespace nr
 {
+    // (TODO 290 fps) A frame's own time on the GPU, from the backend's timestamps once they are read (nr_thread.cpp keeps
+    // the last ones: nr::gpuFrameMs in nr_install.h, the rate governor's way up).
+    void noteGpuFrame(double ms);
+
     // A vertex in the model's space, as a geometry set holds it (decoded once per set).
     struct Vertex
     {
@@ -412,10 +416,16 @@ namespace nr
     {
         struct SharedPicture; // (nr_glshare.h: a picture in a texture the window imports, or its moment on the CPU path)
 
+#if defined(__linux__)
         // The window's size in pixels (the window's thread, nr_present.cpp, each frame): the native picture is drawn
         // with as many lines as it shows in the window (the window's height, or fewer when it is narrower than the
         // picture's shape), unless TF_NATIVE_HEIGHT says otherwise.
         void setWindowSize(int width, int height);
+#else
+        // The window's height in pixels (the window's thread, nr_present.cpp, each frame): the
+        // native picture is drawn with that many lines unless TF_NATIVE_HEIGHT says otherwise.
+        void setWindowLines(int lines);
+#endif
 
         // The large images' video memory policy (TODO 94), from the adapter's video memory (its dedicated
         // memory; TF_NATIVE_VRAM_MB=<n> pretends another size): the longest side a large image is used at
@@ -452,6 +462,7 @@ namespace nr
         // (N9 stage 3) The pacer's delay after a picture's moment (ms): how late the GPU's pictures are ready.
         double pacerDelayMs();
 
+#if defined(__linux__)
         // The next picture the window has not shown (RGBA8, R in the low byte), in a readback of the renderer's
         // that it uploads straight from: `pixels` is its first row (mapped; `rowPitch` bytes a row - width * 4 when
         // the rows have no padding), `index` the readback to give back with pictureShown() once the upload has
@@ -462,6 +473,11 @@ namespace nr
         // (N9) The window is done with the picture's pixels (its GL upload has returned): the readback may be drawn
         // into again. The window's thread, after latestPicture().
         void pictureShown(int index);
+#else
+        // The latest picture drawn (RGBA8, R in the low byte), copied into `pixels` when newer than
+        // `serial` (which is then updated); false when there is none newer. (Any thread.)
+        bool latestPicture(std::vector<uint32_t> &pixels, uint32_t &width, uint32_t &height, uint64_t &serial, bool &has3D);
+#endif
 
         // The device, queue, shaders and pipeline made on a thread of their own (seconds: the
         // shaders' compilation), so the game never waits for them; frames before are not drawn.

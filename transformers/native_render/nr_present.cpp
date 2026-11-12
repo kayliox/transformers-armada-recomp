@@ -6,7 +6,9 @@
 // the window's GL reads itself (nr_glshare.h: no copy through the CPU); otherwise the CPU hand-over
 // uploads straight from the renderer's mapped readback (no copy on the render side), which the window
 // gives back once the upload has returned. TF_NATIVE_SHARE=0 keeps the CPU hand-over.
+#include "graphics_driver.h"
 #include "nr_types.h"
+#include "nr_backend.h"
 #include "nr_glshare.h"
 #include "view_turn.h"
 
@@ -21,6 +23,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <functional>
+#include <mutex>
 #include <vector>
 
 namespace tf::port
@@ -56,6 +61,16 @@ namespace nr
             std::chrono::steady_clock::time_point since{};
         };
         Pacing g_pacing;
+
+        // (TODO 291) The shown pictures' intervals of the last 30 s, for the fps line's 1% low (nr::pictureLowRate): what
+        // the player sees. Before, the line's 1% low came from the game's frames, which the game's own wait for a VBlank
+        // inside a frame pairs into a late one and a short one while the pictures stay even - at a pinned 80 on the RX 5700
+        // XT 216 of 535 frames took 18-23 ms, the pictures' 1% low 71: the user's "1% low sinking 66 -> 44" at a flat 78.
+        struct ShownIntervals
+        {
+            std::mutex mutex;
+            std::deque<std::pair<int64_t, float>> v; // (when shown, ns; the interval before it, ms)
+        } g_shownIntervals;
 
         int64_t nowNs()
         {
@@ -143,7 +158,14 @@ namespace nr
             if (p.since == std::chrono::steady_clock::time_point{})
                 p.since = now;
             if (p.lastShownNs != 0 && ns - p.lastShownNs < 1000000000ll) // (not across a pause of a second: a movie, a load)
+            {
                 p.between.push_back(static_cast<double>(ns - p.lastShownNs) / 1.0e6);
+                std::lock_guard<std::mutex> lock(g_shownIntervals.mutex); // (TODO 291: nr::pictureLowRate)
+                auto &v = g_shownIntervals.v;
+                v.emplace_back(ns, static_cast<float>(ns - p.lastShownNs) / 1.0e6f);
+                while (!v.empty() && (ns - v.front().first > 30000000000ll || v.size() > 32768u))
+                    v.pop_front();
+            }
             p.lastShownNs = ns;
             {
                 std::chrono::steady_clock::time_point vb{};
@@ -220,10 +242,23 @@ namespace nr
             if (!g_pacedLive.load(std::memory_order_relaxed))
                 return -1;
             int64_t lastNs = 0;
-            if (d3d::waitPicture(g_takenSerial.load(std::memory_order_relaxed),
+            if (backend().waitPicture(g_takenSerial.load(std::memory_order_relaxed),
                                  std::chrono::duration_cast<std::chrono::nanoseconds>(until.time_since_epoch()).count(), lastNs))
                 return 1;
-            if (lastNs == 0 || nowNs() - lastNs > 100000000ll)
+            // (How long without a picture counts as none coming: 100 ms, or three of the recent intervals between them where
+            // the renderer is slower than that - on a low-end PC in full screen it hands over one every 140-200 ms, and at
+            // 100 ms the window dropped back to its own redraws every other picture. A second at most. Unchanged at 30
+            // pictures a second and above: three intervals are then 100 ms or less. PR #18, TheBrousse.)
+            static int64_t seenNs = 0, intervalNs = 0;
+            if (lastNs != 0 && lastNs != seenNs)
+            {
+                const int64_t d = seenNs != 0 ? lastNs - seenNs : 0;
+                if (d > 0 && d < 1000000000ll)
+                    intervalNs = intervalNs == 0 ? d : (intervalNs * 7 + d) / 8;
+                seenNs = lastNs;
+            }
+            const int64_t noneAfterNs = std::clamp<int64_t>(3 * intervalNs, 100000000ll, 1000000000ll);
+            if (lastNs == 0 || nowNs() - lastNs > noneAfterNs)
             {
                 g_pacedLive.store(false, std::memory_order_relaxed);
                 return -1;
@@ -260,14 +295,24 @@ namespace nr
             }
             uint32_t w = 0, h = 0;
             static bool has3D = false;
-            d3d::setWindowSize(GetRenderWidth(), GetRenderHeight()); // (the picture drawn at the size shown in the window)
+#if defined(__linux__)
+            backend().setWindowSize(GetRenderWidth(), GetRenderHeight()); // (the picture drawn at the size shown in the window)
+#else
+            backend().setWindowLines(GetRenderHeight()); // (the picture drawn at the window's own lines)
+#endif
             // The shared textures, on the first frame (the window's GL context is current here).
             static int share = 0;
             if (share == 0)
             {
                 const char *v = std::getenv("TF_NATIVE_SHARE");
-                share = (!v || *v != '0') && glshare::available() ? 1 : -1;
-                d3d::setSharedPictures(share == 1);
+                // (TODO 290) Intel's drivers: the CPU hand-over from the start. The N100's UHD Graphics read the shared
+                // pictures as zeros (a black start until the check gave up on them), an Iris Xe on an old driver could
+                // not share at all; TF_NATIVE_SHARE=1 tries the sharing all the same.
+                const bool intel = graphics_driver::vendor() == 0x8086u && !(v && *v == '1');
+                if (intel)
+                    std::fprintf(stderr, "[native render] an Intel graphics card: pictures handed over through the CPU (TF_NATIVE_SHARE=1: shared)\n");
+                share = (!v || *v != '0') && !intel && glshare::available() ? 1 : -1;
+                backend().setSharedPictures(share == 1);
             }
             struct Imported
             {
@@ -278,12 +323,16 @@ namespace nr
             static int sharedShown = -1;
             static uint32_t sharedW = 0, sharedH = 0;
             d3d::SharedPicture sp;
-            const uint64_t serialBefore = serial;
-            bool fresh = false;
+#if defined(__linux__)
             const uint8_t *src = nullptr;
             uint32_t pitch = 0;
             int readback = -1;
-            if (share == 1 && d3d::latestShared(sp, serial) && sp.index >= 0 && sp.index < d3d::kSharedPictures)
+#else
+            static std::vector<uint32_t> pixels;
+#endif
+            const uint64_t serialBefore = serial;
+            bool fresh = false;
+            if (share == 1 && backend().latestShared(sp, serial) && sp.index >= 0 && sp.index < d3d::kSharedPictures)
             {
                 fresh = true;
                 g_takenSerial.store(serial, std::memory_order_relaxed);
@@ -303,7 +352,7 @@ namespace nr
                         // hand-over for the rest of the session, from the next frame on.
                         std::fprintf(stderr, "[native render] shared pictures cannot be read by the window: the CPU hand-over from now on\n");
                         share = -1;
-                        d3d::setSharedPictures(false);
+                        backend().setSharedPictures(false);
                     }
                 }
                 if (sp.stamp)
@@ -314,12 +363,51 @@ namespace nr
                     sharedW = sp.width;
                     sharedH = sp.height;
                     has3D = sp.has3D;
-                    d3d::sharedHeld(sp.index);
+                    backend().sharedHeld(sp.index);
+                    // The import checked by what GL reads from it: Intel's driver (the N100's UHD Graphics, 2026-11-10)
+                    // imports the shared textures without an error and reads zeros - the window stayed black while the
+                    // game ran (a player's report). Every 10th picture is read back until one shows anything (a picture
+                    // the renderer made is opaque, even a black one); six reads of nothing but zeros (60 pictures, a
+                    // second or two) and the CPU hand-over takes over for the session. TF_NATIVE_SHARE_CHECK=0: no check.
+                    static const bool check = !(std::getenv("TF_NATIVE_SHARE_CHECK") && *std::getenv("TF_NATIVE_SHARE_CHECK") == '0');
+                    static int checked = 0, zeroReads = 0;
+                    static bool verified = false;
+                    if (check && !verified && share == 1 && ++checked % 10 == 1)
+                    {
+                        unsigned colour = 0u, alpha = 0u;
+                        if (glshare::readBack(im.texture, sp.width, sp.height, colour, alpha))
+                        {
+                            // (TF_NATIVE_SHARE_TEST=zeros: read as nothing but zeros, as Intel's driver does - tests of the
+                            // fallback to the CPU hand-over, TODO 284)
+                            static const bool zeros = std::getenv("TF_NATIVE_SHARE_TEST") && std::strcmp(std::getenv("TF_NATIVE_SHARE_TEST"), "zeros") == 0;
+                            if (zeros)
+                                colour = alpha = 0u;
+                            if (colour != 0u || alpha != 0u)
+                            {
+                                verified = true;
+                                std::fprintf(stderr, "[native render] the window reads the shared pictures (colour up to %u, alpha up to %u)\n",
+                                             colour, alpha);
+                            }
+                            else if (++zeroReads >= 6)
+                            {
+                                std::fprintf(stderr, "[native render] the window's GL reads only zeros from the shared pictures (%d pictures): "
+                                                     "the CPU hand-over from now on\n",
+                                             checked);
+                                share = -1;
+                                backend().setSharedPictures(false);
+                            }
+                        }
+                    }
                 }
                 else
-                    d3d::sharedHeld(sharedShown); // (not imported: the one still shown stays held - latestShared marked the new one)
+                    backend().sharedHeld(sharedShown); // (not imported: the one still shown stays held - latestShared marked the new one)
             }
-            else if (share != 1 && d3d::latestPicture(src, pitch, readback, serial, sp))
+            // (TODO 284) The picture taken, as the shared path marks it: the paced hand-over (paceWait) waits for one
+            // newer than this. Unmarked, every wait found the CPU hand-over's picture "new" again - the window drew
+            // as fast as it could and counted each draw: the FPS counter read 600-1500 (TF_NATIVE_SHARE=0, Proton, the
+            // Intel fallback). (PR #18, TheBrousse: and marked fresh, so it is paced and logged as a shared picture is, below.)
+#if defined(__linux__)
+            else if (share != 1 && backend().latestPicture(src, pitch, readback, serial, sp))
             {
                 fresh = true;
                 g_takenSerial.store(serial, std::memory_order_relaxed);
@@ -349,8 +437,26 @@ namespace nr
                 else
                     UpdateTexture(shown, tight);
                 // (The upload has its copy: the readback is the renderer's again.)
-                d3d::pictureShown(readback);
+                backend().pictureShown(readback);
             }
+#else
+            else if (share != 1 && backend().latestPicture(pixels, w, h, serial, has3D))
+            {
+                fresh = true;
+                g_takenSerial.store(serial, std::memory_order_relaxed);
+                if (shown.id == 0u || shown.width != static_cast<int>(w) || shown.height != static_cast<int>(h))
+                {
+                    if (shown.id != 0u)
+                        UnloadTexture(shown);
+                    Image image{pixels.data(), static_cast<int>(w), static_cast<int>(h), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                    shown = LoadTextureFromImage(image);
+                    SetTextureFilter(shown, TEXTURE_FILTER_BILINEAR);
+                    std::fprintf(stderr, "[native render] live picture: %ux%u\n", w, h);
+                }
+                else
+                    UpdateTexture(shown, pixels.data());
+            }
+#endif
             // (No new native picture for a while - a movie, a screen the native renderer does not draw
             // yet: the GS's is shown, not a stale one.)
             static auto lastNew = std::chrono::steady_clock::time_point{};
@@ -496,6 +602,7 @@ namespace nr
                 height = static_cast<int>(sharedH);
                 return true;
             }
+#if defined(__linux__)
             // (N9: the CPU hand-over too is shown as each picture is handed over, not at the next VBlank - the
             // window's pacer waits for the serial, and while no picture comes the 100 ms rule takes it back.)
             {
@@ -516,11 +623,47 @@ namespace nr
                 else if (pacingLogOn())
                     ++g_pacing.repeats;
             }
+#else
+            // The CPU hand-over's picture: paced and logged as a shared one (shown when it is handed over). (PR #18, TheBrousse)
+            {
+                const uint64_t skipped = serialBefore != 0u && serial > serialBefore + 1u ? serial - serialBefore - 1u : 0u;
+                if (fresh && g_pacerOn)
+                {
+                    g_pendingShown = true;
+                    g_pendingPicture = d3d::SharedPicture{};
+                    g_pendingSkipped = skipped;
+                }
+                else if (fresh)
+                    noteShown(d3d::SharedPicture{}, skipped);
+                else if (pacingLogOn())
+                    ++g_pacing.repeats;
+                g_pacedLive.store(true, std::memory_order_relaxed);
+            }
+#endif
             texture = shown.id;
             width = shown.width;
             height = shown.height;
             return true;
         }
+    }
+
+    double pictureLowRate(double seconds)
+    {
+        std::vector<float> v;
+        {
+            std::lock_guard<std::mutex> lock(g_shownIntervals.mutex);
+            const int64_t now = nowNs(), window = static_cast<int64_t>(seconds * 1.0e9);
+            for (auto it = g_shownIntervals.v.rbegin(); it != g_shownIntervals.v.rend() && now - it->first <= window; ++it)
+                v.push_back(it->second);
+        }
+        if (v.size() < 100u)
+            return 0.0;
+        const size_t count = v.size() / 100u;
+        std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(count - 1u), v.end(), std::greater<float>());
+        double sum = 0.0;
+        for (size_t i = 0; i < count; ++i)
+            sum += v[i];
+        return sum > 0.0 ? 1000.0 * static_cast<double>(count) / sum : 0.0;
     }
 
     void startLivePicture()
@@ -531,7 +674,7 @@ namespace nr
         ps2_host_display::setPictureProvider(&provide);
         std::fprintf(stderr, "[native render] the native picture is shown live\n");
         // (N9) Shown as it is handed over (TF_PACING, nr_d3d.cpp): paced by default; TF_PACING=0 at the VBlanks, as before.
-        if (d3d::pacingMode() != 0)
+        if (backend().pacingMode() != 0)
         {
             g_pacerOn = true;
             ps2_host_display::PicturePacer pacer;
@@ -539,7 +682,7 @@ namespace nr
             pacer.presented = &pacePresented;
             ps2_host_display::setPicturePacer(pacer);
             std::fprintf(stderr, "[native render] pictures shown as they are handed over (%s)\n",
-                         d3d::pacingMode() == 2 ? "paced: each at its frame's moment plus a steady delay" : "as soon as the GPU is done");
+                         backend().pacingMode() == 2 ? "paced: each at its frame's moment plus a steady delay" : "as soon as the GPU is done");
         }
     }
 }

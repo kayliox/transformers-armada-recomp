@@ -164,6 +164,12 @@ namespace native_sound::mixer
             Phase phase = Phase::Off;
             float level = 0.0f, releaseStep = 0.0f;
             double phaseLeft = 0.0;
+            bool softStop = false; // (TODO 290 (10)) this release is the engine's soft stop at a transformation
+            // The SPU2's envelope (the default, sirensAdsr below): the ADSR words SIRENS3 writes for this tone or
+            // instrument, the envelope level 0..7FFFh and its rate counter, stepped as the SPU2 does every sample.
+            uint16_t adsr1 = 0x0D0Fu, adsr2 = 0x5FE2u;
+            int32_t env = 0;
+            uint32_t envCounter = 0u;
             uint32_t counter = 0, position = 0;
             int16_t history[4] = {};
             // (from the tone, the pitch and the envelope, worked out where they are set - prepareVoice -
@@ -194,6 +200,130 @@ namespace native_sound::mixer
             v.decayStep = v.envelope.decay <= 0.0f ? 0.0f : static_cast<float>((1.0 - v.envelope.sustain) * dt / v.envelope.decay);
         }
 
+        // ---- the SPU2's envelope, as SIRENS3 sets it up (2026-11-11, lane D) ------------------------------
+        // SIRENS3 turns an instrument's ADSR in seconds into the SPU2's ADSR words when it makes the instrument
+        // (SIRENS3.IRX 0x375E8, called from the constructor at 0x378B4): the attack and the release are at least
+        // 0.0005 s; each of attack, decay, sustain level and release becomes the index of the nearest entry of a
+        // table of times (128 attack rates, 16 decay shifts, 16 sustain levels, 32 release shifts; data in the
+        // module, read here from the disc's copy); ADSR1 = attack << 8 | decay << 4 | sustain (linear attack),
+        // ADSR2 = 5FE0h | release (an exponential release, the sustain held). A tone without an instrument gets the
+        // same from all-zero times with sustain 1 (0D0Fh / 5FE2h, measured on the emulated IOP, 321 of 443 key-ons
+        // in Amazon). The voice's level then follows the SPU2's own envelope stepper (the IOP model's
+        // iop_spu2.cpp, psx-spx), every 48 kHz sample - the PS2's curves: an exponential release where straight
+        // ramps used to run, which ended long releases (engine idle 2.6 s, the dropship's 5.4 s) differently.
+        // TF_NATIVE_SOUND_ENV=ramps: the straight ramps in seconds, as before.
+        struct SirensTables
+        {
+            std::vector<float> attack, decay, sustain, release;
+            bool ok = false;
+        };
+        SirensTables g_sirens;
+
+        bool spu2Envelope()
+        {
+            static const bool on = [] {
+                const char *env = std::getenv("TF_NATIVE_SOUND_ENV");
+                return !(env && std::strcmp(env, "ramps") == 0);
+            }();
+            return on && g_sirens.ok;
+        }
+
+        void loadSirensTables(const std::filesystem::path &irx)
+        {
+            g_sirens = SirensTables{};
+            std::ifstream f(irx, std::ios::binary);
+            std::vector<uint8_t> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            auto at = [&](size_t o) {
+                uint32_t w = 0;
+                std::memcpy(&w, &d[o], 4);
+                float x;
+                std::memcpy(&x, &w, 4);
+                return x;
+            };
+            // Found by the sustain levels (1/16 .. 16/16); the decay times are the 16 floats before them, the
+            // release times the 32 after, then the 128 attack times.
+            for (size_t o = 16u * 4u; o + (16u + 32u + 128u) * 4u <= d.size(); o += 4u)
+            {
+                bool levels = true;
+                for (int k = 0; k < 16 && levels; ++k)
+                    levels = at(o + static_cast<size_t>(k) * 4u) == static_cast<float>(k + 1) / 16.0f;
+                if (!levels)
+                    continue;
+                auto take = [&](size_t from, int n) {
+                    std::vector<float> t(static_cast<size_t>(n));
+                    for (int k = 0; k < n; ++k)
+                        t[static_cast<size_t>(k)] = at(from + static_cast<size_t>(k) * 4u);
+                    return t;
+                };
+                SirensTables s;
+                s.decay = take(o - 16u * 4u, 16);
+                s.sustain = take(o, 16);
+                s.release = take(o + 16u * 4u, 32);
+                s.attack = take(o + 48u * 4u, 128);
+                auto rising = [](const std::vector<float> &t) {
+                    for (size_t k = 1; k < t.size(); ++k)
+                        if (!(t[k] >= t[k - 1]) || !std::isfinite(t[k]))
+                            return false;
+                    return t.front() > 0.0f;
+                };
+                s.ok = rising(s.decay) && rising(s.release) && rising(s.attack);
+                if (s.ok)
+                {
+                    g_sirens = std::move(s);
+                    std::fprintf(stderr, "[native sound] the SPU2 envelope: SIRENS3's ADSR tables found in %s (attack %.5f..%.0f s, "
+                                         "release %.5f..%.0f s)\n",
+                                 irx.filename().string().c_str(), g_sirens.attack.front(), g_sirens.attack.back(),
+                                 g_sirens.release.front(), g_sirens.release.back());
+                    return;
+                }
+            }
+            std::fprintf(stderr, "[native sound] SIRENS3's ADSR tables not found in %s: the envelopes are straight ramps\n",
+                         irx.string().c_str());
+        }
+
+        // The index of the table entry nearest to `value` (SIRENS3 0x37724: the first entry above it, or the one
+        // before when that is nearer; the last when none is above it).
+        int nearestIndex(const std::vector<float> &t, float value)
+        {
+            size_t i = 1;
+            while (i < t.size() && !(value < t[i]))
+                ++i;
+            if (i == t.size())
+                return static_cast<int>(t.size()) - 1;
+            return value - t[i - 1] > t[i] - value ? static_cast<int>(i) : static_cast<int>(i) - 1;
+        }
+
+        void sirensAdsr(const Envelope &e, uint16_t &adsr1, uint16_t &adsr2)
+        {
+            constexpr float kShortest = 0.0005f;
+            const float attack = e.attack < kShortest ? kShortest : e.attack;
+            const float release = e.release < kShortest ? kShortest : e.release;
+            const int ar = nearestIndex(g_sirens.attack, attack), dr = nearestIndex(g_sirens.decay, e.decay);
+            const int sl = nearestIndex(g_sirens.sustain, e.sustain), rr = nearestIndex(g_sirens.release, release);
+            adsr1 = static_cast<uint16_t>(((ar & 0x7F) << 8) | ((dr & 0xF) << 4) | (sl & 0xF));
+            adsr2 = static_cast<uint16_t>(0x5FE0 | (rr & 0x1F));
+        }
+
+        // One step of an SPU2 envelope level (iop_spu2.cpp's stepLevel, psx-spx's ADSR).
+        void spu2StepLevel(int32_t &level, uint32_t &counter, int shift, int step, bool exponential, bool decreasing)
+        {
+            uint32_t counterStep = 0x8000u >> std::max(0, shift - 11);
+            int32_t levelStep = step * (1 << std::max(0, 11 - shift));
+            if (exponential)
+            {
+                if (decreasing)
+                    levelStep = static_cast<int16_t>((levelStep * level) >> 15);
+                else if (level > 0x6000)
+                    counterStep >>= 2;
+            }
+            counter += std::max<uint32_t>(1u, counterStep);
+            if (counter >= 0x8000u)
+            {
+                counter = 0u;
+                level = std::clamp<int32_t>(level + levelStep, 0, 0x7FFF);
+            }
+        }
+
         void startPhase(Voice &v, Phase p)
         {
             v.phase = p;
@@ -217,8 +347,95 @@ namespace native_sound::mixer
             }
         }
 
+        // The SPU2's envelope for a sample (iop_spu2.cpp's stepEnvelope): attack to 7FFFh, decay to the sustain level,
+        // sustain until the key-off, release to 0. The delay before the attack (an instrument's DelayTime) stays in
+        // seconds, as before.
+        void stepSpu2Envelope(Voice &v)
+        {
+            int shift = 0, step = 0;
+            bool exponential = false, decreasing = false;
+            int32_t target = 0;
+            switch (v.phase)
+            {
+            case Phase::Delay:
+                v.phaseLeft -= 1.0 / kRate;
+                if (v.phaseLeft <= 0.0)
+                    v.phase = Phase::Attack;
+                return;
+            case Phase::Attack:
+            {
+                const int rate = (v.adsr1 >> 8) & 0x7F;
+                shift = rate >> 2;
+                step = 7 - (rate & 3);
+                exponential = (v.adsr1 & 0x8000u) != 0u;
+                target = 0x7FFF;
+                break;
+            }
+            case Phase::Decay:
+                shift = (v.adsr1 >> 4) & 0xF;
+                step = -8;
+                exponential = decreasing = true;
+                target = static_cast<int32_t>((v.adsr1 & 0xFu) + 1u) << 11;
+                break;
+            case Phase::Sustain:
+            {
+                const int rate = (v.adsr2 >> 6) & 0x7F;
+                shift = rate >> 2;
+                step = 7 - (rate & 3);
+                exponential = (v.adsr2 & 0x8000u) != 0u;
+                decreasing = (v.adsr2 & 0x4000u) != 0u;
+                if (decreasing)
+                    step = ~step;
+                break;
+            }
+            case Phase::Release:
+                if (v.softStop) // (TODO 290 (10): the engine's 0.15 s fade at a transformation, a straight ramp)
+                {
+                    v.level = std::max(0.0f, v.level - v.releaseStep);
+                    v.env = static_cast<int32_t>(v.level * 32768.0f);
+                    if (v.level <= 0.0f)
+                    {
+                        v.env = 0;
+                        v.phase = Phase::Off;
+                    }
+                    return;
+                }
+                shift = v.adsr2 & 0x1F;
+                step = -8;
+                exponential = (v.adsr2 & 0x20u) != 0u;
+                decreasing = true;
+                break;
+            default:
+                return;
+            }
+            spu2StepLevel(v.env, v.envCounter, shift, step, exponential, decreasing);
+            v.level = static_cast<float>(v.env) / 32768.0f;
+            if (v.phase == Phase::Sustain)
+            {
+                if (v.env == 0 && decreasing)
+                    v.phase = Phase::Off;
+                return;
+            }
+            if (decreasing ? v.env <= target : v.env >= target)
+            {
+                if (v.phase == Phase::Release)
+                {
+                    v.env = 0;
+                    v.level = 0.0f;
+                    v.phase = Phase::Off;
+                }
+                else
+                    v.phase = v.phase == Phase::Attack ? Phase::Decay : Phase::Sustain;
+            }
+        }
+
         void stepEnvelope(Voice &v)
         {
+            if (spu2Envelope())
+            {
+                stepSpu2Envelope(v);
+                return;
+            }
             const double dt = 1.0 / kRate;
             switch (v.phase)
             {
@@ -695,6 +912,45 @@ namespace native_sound::mixer
         double g_mixedUntil = -1.0;
         double g_fraction = 0.0;
 
+        // TF_NATIVE_SOUND_SOLO=<prefix>[,<prefix>...] (a measuring aid, lane D 2026-11-11): only the voices whose tone's
+        // name starts with one of these (any case) are heard, and no stream - the sounds under test alone in a dump
+        // (PS2X_AUDIO_DUMP), for comparing envelopes and fades. Everything still plays on, unheard.
+        const std::vector<std::string> &soloPrefixes()
+        {
+            static const std::vector<std::string> list = [] {
+                std::vector<std::string> v;
+                const char *env = std::getenv("TF_NATIVE_SOUND_SOLO");
+                std::string cur;
+                for (const char *c = env; c && *c; ++c)
+                {
+                    if (*c == ',')
+                    {
+                        if (!cur.empty())
+                            v.push_back(cur);
+                        cur.clear();
+                    }
+                    else
+                        cur.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(*c))));
+                }
+                if (!cur.empty())
+                    v.push_back(cur);
+                return v;
+            }();
+            return list;
+        }
+        bool soloHeard(const Voice &v)
+        {
+            const auto &list = soloPrefixes();
+            if (list.empty())
+                return true;
+            std::string name = v.tone ? v.tone->name : v.toneName;
+            for (char &c : name)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            for (const std::string &p : list)
+                if (name.rfind(p, 0) == 0)
+                    return true;
+            return false;
+        }
         // (TODO 213) toPad: the game alerts go to padL / padR instead of the PC's mix (pad_speaker.h).
         void mixVoices(float &dryL, float &dryR, float &sendL, float &sendR, bool toPad, float &padL, float &padR)
         {
@@ -715,7 +971,12 @@ namespace native_sound::mixer
                 // number, or a dry or send level not a number (never so from the game), take the long way.
                 const bool silent = (v.level == 0.0f || (v.gainLeft == 0.0f && v.gainRight == 0.0f && std::fabs(v.level) <= 1.0f)) &&
                                     !std::isnan(v.dry) && !std::isnan(v.send);
-                const float sample = silent ? 0.0f : static_cast<float>(gauss(v.history, v.counter)) * v.level;
+                // (With the SPU2's envelope the level is the hardware's own: an instrument whose decay is the fastest (most of them,
+                // and every plain tone: 0D0Fh) drops to half on the step after its attack - the 0.5 that kOutputGain stood in for
+                // until now, as measured on the emulated SPU2. Its voices so take x2 here: the mix as the emulated SPU2's,
+                // instrument by instrument, where the ramps had every voice at the same level.)
+                const float spuGain = spu2Envelope() ? 2.0f : 1.0f;
+                const float sample = silent ? 0.0f : static_cast<float>(gauss(v.history, v.counter)) * v.level * spuGain;
                 v.counter += v.pitchReg;
                 bool ended = false;
                 while (v.counter >= 0x1000u && !ended)
@@ -728,6 +989,8 @@ namespace native_sound::mixer
                     v.phase = Phase::Off; // the data ended (no loop): the channel is free at once
                     reqEnd(handle, v, "data ended");
                 }
+                if (!soloHeard(v))
+                    continue;
                 const float l = sample * v.gainLeft, r = sample * v.gainRight;
                 if (req)
                     v.peak = std::max(v.peak, v.level * std::max(std::fabs(v.gainLeft), std::fabs(v.gainRight)));
@@ -748,6 +1011,22 @@ namespace native_sound::mixer
 
         void mixStreams(float &dryL, float &dryR, bool toPad, float &padL, float &padR)
         {
+            const float keep[4] = {dryL, dryR, padL, padR}; // (TF_NATIVE_SOUND_SOLO: no stream heard)
+            struct Restore
+            {
+                const float *k;
+                float &a, &b, &c, &d;
+                ~Restore()
+                {
+                    if (!soloPrefixes().empty())
+                    {
+                        a = k[0];
+                        b = k[1];
+                        c = k[2];
+                        d = k[3];
+                    }
+                }
+            } restore{keep, dryL, dryR, padL, padR};
             for (auto &[handle, s] : g_streams)
             {
                 if (!s.playing)
@@ -803,6 +1082,7 @@ namespace native_sound::mixer
     {
         g_disc = cdRoot;
         g_reverb.loadPresets();
+        loadSirensTables(g_disc / "IOP" / "SIRENS3.IRX");
     }
 
     namespace
@@ -924,6 +1204,11 @@ namespace native_sound::mixer
                     v.envelope = in->envelope;
             }
         }
+        if (g_sirens.ok)
+        {
+            // (a tone without an instrument: SIRENS3's all-zero times with sustain 1 - not kToneEnvelope's 5 ms)
+            sirensAdsr(v.envelope.given ? v.envelope : Envelope{}, v.adsr1, v.adsr2);
+        }
         if (!v.tone)
         {
             // (once a name: one sound asked for again and again hid the others behind a count)
@@ -953,6 +1238,61 @@ namespace native_sound::mixer
         v.send = std::clamp(send, 0.0f, 1.0f);
         v.dry = std::clamp(dry, 0.0f, 1.0f);
         prepareVoice(v);
+    }
+
+    // (TODO 290 (10), the user's choice 2026-11-11) The vehicle's engine loops fade out over 0.15 s when the game keys
+    // them off at a transformation, instead of the PS2's cut: the game keys them off in the frame packet that starts
+    // the transformation's sound (Transform_Car / Transform_Robot / Transform_Fail), and Optimus's truck engine
+    // (Truck_ThrottleOn/Off) has a release time of 0 - the SPU2's fastest, about 2 ms. Only an engine loop (the
+    // truck's, Red Alert's jeep, the shared eng_ ones) whose own release is shorter than the fade, and only at a
+    // transformation; every other key-off is the game's own. TF_ENGINE_SOFT_STOP=0: the console's cut.
+    namespace
+    {
+        constexpr float kSoftStopSeconds = 0.15f;
+        std::vector<int32_t> g_engineStops; // engine loops keyed off in this packet
+        double g_transformKeyed = -1e9;      // the mix clock of the last transformation sound's key-on
+        bool g_transformThisPacket = false;
+
+        bool softStopOn()
+        {
+            static const bool on = [] {
+                const char *env = std::getenv("TF_ENGINE_SOFT_STOP");
+                return !(env && *env == '0');
+            }();
+            return on;
+        }
+
+        bool startsWith(const std::string &s, const char *prefix)
+        {
+            const size_t n = std::strlen(prefix);
+            if (s.size() < n)
+                return false;
+            for (size_t i = 0; i < n; ++i)
+                if (std::tolower(static_cast<unsigned char>(s[i])) != prefix[i])
+                    return false;
+            return true;
+        }
+
+        bool engineLoop(const Voice &v)
+        {
+            return v.tone && v.tone->loop &&
+                   (startsWith(v.toneName, "truck_") || startsWith(v.toneName, "jeep_") || startsWith(v.toneName, "eng_"));
+        }
+
+        bool transformSound(const std::string &tone) { return startsWith(tone, "transform_"); }
+
+        void softStop(int32_t handle, Voice &v)
+        {
+            if (v.phase != Phase::Release || v.envelope.release >= kSoftStopSeconds || v.level <= 0.0f)
+                return;
+            v.phaseLeft = kSoftStopSeconds;
+            v.releaseStep = v.level / static_cast<float>(kSoftStopSeconds * kRate);
+            v.softStop = true;
+            static const bool log = std::getenv("TF_ENGINE_SOFT_STOP_LOG") != nullptr;
+            if (log || reqLog())
+                std::fprintf(stderr, "[ns] %.3f engine loop h %d '%s' fades out over %.2f s (a transformation)\n", g_mixedUntil, handle,
+                             toneOf(v), kSoftStopSeconds);
+        }
     }
 
     void play(int32_t handle)
@@ -1018,7 +1358,15 @@ namespace native_sound::mixer
         v.counter = 0;
         std::fill(std::begin(v.history), std::end(v.history), int16_t(0));
         v.level = 0.0f;
+        v.env = 0;
+        v.envCounter = 0u;
         v.keyedAt = ++g_keyCount;
+        v.softStop = false;
+        if (handle >= 0 && transformSound(v.toneName))
+        {
+            g_transformKeyed = g_mixedUntil;
+            g_transformThisPacket = true;
+        }
         startPhase(v, v.envelope.delay > 0.0f ? Phase::Delay : Phase::Attack);
         fetch(v);
         // TF_NATIVE_SOUND_KON=1: each key-on as the SPU2 register log has it (PS2X_SPU2_LOG=2), to compare.
@@ -1033,10 +1381,10 @@ namespace native_sound::mixer
                 peak = std::max(peak, std::abs(static_cast<int>(x)));
             }
             const double rms = v.tone->pcm.empty() ? 0.0 : std::sqrt(sum / static_cast<double>(v.tone->pcm.size()));
-            std::fprintf(stderr, "[ns kon] %.3f h %d tone '%s' (%zu samples, rms %.0f, peak %d, %u Hz, loop %d) pitch %04x vol %04x %04x prio %d send %.2f dry %.2f env %.3f/%.3f/%.3f/%.3f active %d\n",
+            std::fprintf(stderr, "[ns kon] %.3f h %d tone '%s' (%zu samples, rms %.0f, peak %d, %u Hz, loop %d) pitch %04x vol %04x %04x prio %d send %.2f dry %.2f env %.3f/%.3f/%.3f/%.3f adsr %04x %04x active %d\n",
                          g_mixedUntil, handle, v.tone->name.c_str(), v.tone->pcm.size(), rms, peak, v.tone->sampleRate, v.tone->loop ? 1 : 0,
                          pitchRegister(v.tone->sampleRate, v.pitch), v.volumeWords[0], v.volumeWords[1], v.priority, v.send, v.dry,
-                         v.envelope.attack, v.envelope.decay, v.envelope.sustain, v.envelope.release, active);
+                         v.envelope.attack, v.envelope.decay, v.envelope.sustain, v.envelope.release, v.adsr1, v.adsr2, active);
         }
     }
 
@@ -1049,7 +1397,25 @@ namespace native_sound::mixer
                 std::fprintf(stderr, "[ns req] %.3f koff h %d '%s' after %.3f s peak %.3f\n", g_reqClock, handle, toneOf(it->second),
                              g_reqClock - it->second.keyedTime, it->second.peak);
             startPhase(it->second, Phase::Release);
+            it->second.softStop = false;
+            if (handle >= 0 && softStopOn() && engineLoop(it->second))
+            {
+                if (g_transformThisPacket || g_mixedUntil - g_transformKeyed < 0.25)
+                    softStop(handle, it->second);
+                else
+                    g_engineStops.push_back(handle); // (the transformation's key-on may come later in this packet)
+            }
         }
+    }
+
+    void endPacket()
+    {
+        if (g_transformThisPacket)
+            for (int32_t h : g_engineStops)
+                if (auto it = g_voices.find(h); it != g_voices.end())
+                    softStop(h, it->second);
+        g_engineStops.clear();
+        g_transformThisPacket = false;
     }
 
     void rewind(int32_t handle) { play(handle); }
@@ -1290,15 +1656,19 @@ namespace native_sound::mixer
         }
         else
         {
-            // ADPCM, the two channels alternating in 16-byte blocks (PAL movies; not on this disc)
-            for (uint32_t b = 0; b + 32u <= size; b += 32u)
-            {
-                int16_t l[28], r[28];
-                data::decodeBlock(bytes + b, l, s.h1[0], s.h2[0]);
-                data::decodeBlock(bytes + b + 16u, r, s.h1[1], s.h2[1]);
-                s.eeLeft.insert(s.eeLeft.end(), l, l + 28);
-                s.eeRight.insert(s.eeRight.end(), r, r + 28);
-            }
+            // ADPCM (the European disc's movies, SShd type 0x10): the two channels alternate every 0x20 bytes,
+            // two 16-byte blocks of one channel, then two of the other (the interleave of all 82 of them).
+            // Read as 16-byte alternation, half of each channel's blocks went to the other one: static.
+            constexpr uint32_t kInterleave = 0x20u;
+            for (uint32_t row = 0; row + 2u * kInterleave <= size; row += 2u * kInterleave)
+                for (uint32_t b = 0; b < kInterleave; b += 16u)
+                {
+                    int16_t l[28], r[28];
+                    data::decodeBlock(bytes + row + b, l, s.h1[0], s.h2[0]);
+                    data::decodeBlock(bytes + row + kInterleave + b, r, s.h1[1], s.h2[1]);
+                    s.eeLeft.insert(s.eeLeft.end(), l, l + 28);
+                    s.eeRight.insert(s.eeRight.end(), r, r + 28);
+                }
         }
         ++s.chunksQueued;
         s.playing = true;
@@ -1599,7 +1969,7 @@ namespace native_sound::mixer
                 o << "P " << h << ' ' << static_cast<int>(v.phase) << ' ' << bits(v.level) << ' ' << bits(static_cast<float>(v.phaseLeft)) << ' '
                   << bits(v.releaseStep) << ' ' << v.position << ' ' << v.counter << ' ' << v.keyedAt << ' '
                   << static_cast<uint16_t>(v.history[0]) << ' ' << static_cast<uint16_t>(v.history[1]) << ' '
-                  << static_cast<uint16_t>(v.history[2]) << ' ' << static_cast<uint16_t>(v.history[3]) << "\n";
+                  << static_cast<uint16_t>(v.history[2]) << ' ' << static_cast<uint16_t>(v.history[3]) << ' ' << v.envCounter << "\n";
         for (const auto &[h, s] : g_streams)
         {
             o << "S " << h << ' ' << s.pcm << ' ' << s.eeFed << ' ' << s.looping << ' ' << s.playing << ' ' << bits(s.loudness) << ' '
@@ -1696,6 +2066,10 @@ namespace native_sound::mixer
                 g_keyCount = std::max(g_keyCount, keyed);
                 for (int i = 0; i < 4; ++i)
                     v.history[i] = static_cast<int16_t>(static_cast<uint16_t>(hist[i]));
+                // (the SPU2 envelope's level and its rate counter - older records: the counter from 0)
+                v.env = std::clamp(static_cast<int32_t>(std::lround(v.level * 32768.0f)), 0, 0x7FFF);
+                uint32_t envCounter = 0u;
+                v.envCounter = (l >> envCounter) ? envCounter : 0u;
             }
             else if (kind == "S")
             {

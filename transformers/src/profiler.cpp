@@ -11,6 +11,7 @@
 #if defined(_WIN32)
 
 // Before windows.h, whose macros clash with names in the runtime headers.
+#include "install_layout.h"
 #include "ps2_runtime.h"
 #include "runtime/ee_scheduler.h"
 
@@ -935,10 +936,8 @@ namespace
 
     std::filesystem::path runsDir()
     {
-        std::error_code e;
-        const std::filesystem::path dir = std::filesystem::current_path(e) / "runs";
-        std::filesystem::create_directories(dir, e);
-        return dir;
+        // (TODO 279: logs\ of the new folder layout when it is there, else runs\ as before)
+        return install_layout::logsDir();
     }
 
     std::string stamp()
@@ -1552,6 +1551,23 @@ void tfPostTestKey(int vk, bool down)
     PostMessageW(window, down ? WM_KEYDOWN : WM_KEYUP, static_cast<WPARAM>(vk), lp);
 }
 
+// (Tests: TF_CLICK_TEST, TODO 286) A left click at (x, y) of the window's client area as the mouse would make it: the
+// cursor moved there and the button down, or the button up - no focus needed.
+void tfPostTestClick(int x, int y, bool down)
+{
+    const HWND window = g_tfTestWindow.load();
+    if (!window)
+        return;
+    const LPARAM lp = MAKELPARAM(x, y);
+    if (down)
+    {
+        PostMessageW(window, WM_MOUSEMOVE, 0, lp);
+        PostMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, lp);
+    }
+    else
+        PostMessageW(window, WM_LBUTTONUP, 0, lp);
+}
+
 #pragma comment(lib, "winmm.lib")
 
 #endif
@@ -1783,6 +1799,7 @@ void tfLogCallStack(const char *label)
     backtrace_symbols_fd(frames, count, STDERR_FILENO);
 }
 
+void tfPostTestClick(int, int, bool) {}
 void tfWatchdogFrame() {}
 void tfNoteFrameWork(bool, double) {}
 void tfKeepFullSpeedInBackground() {}

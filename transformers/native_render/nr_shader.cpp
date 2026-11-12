@@ -33,6 +33,10 @@ namespace nr
             uint32_t start, end;
             uint64_t hash;
             Routine routine;
+            // (TODO 290) Found at any address: the game builds each image by putting the shaders' code one after the
+            // other (vlRenderDeviceUtility::BuildShaderBlock), so the same routine lands at another address in another
+            // image - its code, position-independent, the same bytes.
+            bool anywhere = false;
         };
 
         // (src/vu1_native.cpp's overlay table, the same byte ranges and hashes.)
@@ -51,7 +55,11 @@ namespace nr
             {0x2B00u, 0x2CB8u, 0x429FB896A6A5D839ull, Routine::FadeByPlane},
             {0x13B0u, 0x1408u, 0x460D9E912CA3A637ull, Routine::ConstantColour},
             {0x21F0u, 0x2800u, 0xDF0443C249D0BCE8ull, Routine::LightWithHighlight},
-            {0x1AC0u, 0x1C20u, 0x1FE1C6C429DB90A8ull, Routine::TransformTexture},
+            // (TODO 290) vlShader_TextureTransform's code (0x5DFC50), found anywhere: in images 1a707099ecafadff (at 0x3b60)
+            // and 83f1438f69bcf7be (at 0x2500) it is the scroll of a level's open warp gate - its swirl (WARP3) and its
+            // haze, both drawn with their texture standing still while it was known at 0x1ac0 alone (the HQ's gate,
+            // in images where it sits there, turned).
+            {0x1AC0u, 0x1C20u, 0x1FE1C6C429DB90A8ull, Routine::TransformTexture, true},
             {0x1C20u, 0x1DF0u, 0xDD4A81CC9C0BA94Dull, Routine::ScaleAndOffsetColours},
             {0x1D10u, 0x21F0u, 0xF72677CDF8F26FDCull, Routine::LitMeshPrepare},
             {0x2800u, 0x2BE0u, 0xA7C29B1C9E68F5B0ull, Routine::LitMeshDraw},
@@ -86,6 +94,12 @@ namespace nr
             // x, y; ST the half sizes; colour.a the height / 10), the block's q10.w which face the batch draws. Unknown,
             // its three vertices drew as one triangle a batch: the dark shards, and none of the city.
             {0x22C0u, 0x2AD8u, 0x01EBE0476A31640Dull, Routine::CityBlocks},
+            // (TODO 290) taShader_ElectricShock's code (0x5FF410-0x5FF7C0; 0x1ac0 of image 83f1438f69bcf7be, read on
+            // captured batches, PS2X_VU1_CAPTURE="1ac0/q35 1410/q38 0480/qd@83f1#4"): a stunned creature drawn again as
+            // a crackling shell - each vertex pushed out by q0.z along its direction from q2 (the creature's centre),
+            // ST that direction's y, z plus q0.xy (the effect's jumping offset), the colour q1 (its flicker). Unknown,
+            // it drew the electricShock texture on the mesh's own UVs at full colour: a still purple coat.
+            {0x1AC0u, 0x1E70u, 0x40F490F10159C61Eull, Routine::ElectricShock, true},
         };
 
         struct Tracker
@@ -121,7 +135,16 @@ namespace nr
                 r = Routine::Clip;
             else
                 for (const Known &k : kKnown)
-                    if (k.start == address && hashBytes(t.micro + k.start, k.end - k.start) == k.hash)
+                {
+                    // (TODO 290: TF_NATIVE_ANYWHERE=0 - each routine known at its own address alone, as before;
+                    // TF_NATIVE_SHOCK=0 - the electric shock left unknown, as before)
+                    static const bool anywhereOff = std::getenv("TF_NATIVE_ANYWHERE") && *std::getenv("TF_NATIVE_ANYWHERE") == '0';
+                    static const bool shockOff = std::getenv("TF_NATIVE_SHOCK") && *std::getenv("TF_NATIVE_SHOCK") == '0';
+                    if (shockOff && k.routine == Routine::ElectricShock)
+                        continue;
+                    const uint32_t size = k.end - k.start;
+                    const bool at = k.start == address || (k.anywhere && !anywhereOff && address + size <= sizeof(t.micro));
+                    if (at && hashBytes(t.micro + address, size) == k.hash)
                     {
                         static const bool oceanFadeOff = std::getenv("TF_NATIVE_OCEANFADE") && *std::getenv("TF_NATIVE_OCEANFADE") == '0';
                         if (oceanFadeOff && k.start == 0x2B00u && k.routine == Routine::FadeByPlane)
@@ -129,6 +152,7 @@ namespace nr
                         r = k.routine;
                         break;
                     }
+                }
             t.identified[address] = r;
             return r;
         }

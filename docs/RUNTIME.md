@@ -27,7 +27,7 @@ find all of this in [DEBUGGING.md](DEBUGGING.md), where things stand in [STATUS.
 ## The patches
 
 The submodule's working tree is where the work happens; each patch file is written by hand, one
-per change (upstream's areas keep their `0001`-`0166` names; this port adds `1001` and up), and
+per change (upstream's patches keep their names through `0171`; this port adds `1001` and up), and
 the series is checked before every commit of this repository:
 
 ```powershell
@@ -37,6 +37,9 @@ python tools\make_patches.py --verify
 It checks out the pinned commit into `out\patch_verify`, applies every patch there in sorted
 order and compares every changed and new file with the working tree (line endings aside). It
 reads the submodule without touching its files or its index, and it never rewrites the patches.
+
+The bare command keeps upstream's writer behavior: it deletes all existing `.patch` files and replaces the series
+with five grouped area patches (`0001`–`0005`). Do not run it to maintain this hand-written series.
 
 | Patch | Covers |
 |---|---|

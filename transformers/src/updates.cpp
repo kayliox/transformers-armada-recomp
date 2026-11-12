@@ -1205,6 +1205,12 @@ namespace updates
         return text;
     }
 
+    std::string buildLine()
+    {
+        return std::string(*TF_VERSION_NAME ? TF_VERSION_NAME : "?") + ", commit " + TF_VERSION_COMMIT + ", branch " + TF_VERSION_BRANCH + ", " +
+               TF_VERSION_DATE + " (" + TF_VERSION_KIND + (TF_VERSION_LOCAL ? ", with local changes" : "") + ")";
+    }
+
     void drawAbout(PS2Runtime &runtime, const std::function<void()> &settings)
     {
 #if defined(PS2X_ENABLE_DEBUG_UI)

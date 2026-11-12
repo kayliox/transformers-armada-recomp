@@ -31,6 +31,7 @@ param(
     [switch]$SkipRecompile,
     [switch]$NoPatches,     # leave PS2Recomp as it is (when editing it directly)
     [switch]$Public,        # the public build (no overlay\: no mods) into out\build-public, from a tree that has the overlay
+    [switch]$Vulkan,        # the Vulkan backend too (-DTF_VULKAN=ON; in development, off by default). The build folder keeps it.
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$OverlayArgs  # the overlay's own (overlay\build_hooks.ps1)
 )
 
@@ -42,12 +43,52 @@ if (-not $env:GIT_CONFIG_COUNT) {
     $env:GIT_CONFIG_KEY_1 = "safe.directory"; $env:GIT_CONFIG_VALUE_1 = "*"
 }
 $Root = $PSScriptRoot
-$Game = Join-Path $Root "game"
+# (TODO 279) The disc's files: game\ here, or the install's data\game once its folders were moved (tools\install_layout.ps1)
+. (Join-Path $Root "tools\install_layout.ps1")
+$Game = Get-GameDataDir $Root
 $Work = Join-Path $Root "work"
 $Build = Join-Path $Root $(if ($Public) { "out\build-public" } else { "out\build" })
 $ToolsBuild = Join-Path $Root "out\tools"
 $Tools = Join-Path $Root "transformers\tools"
-$ElfName = "SLUS_206.68"
+
+# --- The release being built: USA (SLUS-20668, transformers\config\) or another one with its own
+# config (transformers\config\versions\<serial>\). TF_GAME_VERSION when set; else the release whose
+# executable is in game\; else the disc image's (extract_iso.py --detect). The Python tools read
+# TF_GAME_VERSION for the config they use.
+$Versions = [ordered]@{}
+$Versions["SLUS-20668"] = (Get-Content (Join-Path $Root "transformers\config\game.json") -Raw | ConvertFrom-Json).elf_name
+foreach ($f in Get-ChildItem (Join-Path $Root "transformers\config\versions") -Filter game.json -Recurse -ErrorAction SilentlyContinue) {
+    $Versions[$f.Directory.Name] = (Get-Content $f.FullName -Raw | ConvertFrom-Json).elf_name
+}
+$GameVersion = $env:TF_GAME_VERSION
+if (-not $GameVersion) {
+    $GameVersion = @($Versions.Keys | Where-Object { Test-Path (Join-Path $Game $Versions[$_]) }) | Select-Object -First 1
+}
+if (-not $GameVersion) {
+    $disc = if ($Iso) { $Iso } else { (Get-ChildItem $Root -Filter *.iso -File | Select-Object -First 1).FullName }
+    if ($disc) { $GameVersion = (& python (Join-Path $Tools "extract_iso.py") --detect $disc | Out-String).Trim() }
+}
+if (-not $GameVersion) { $GameVersion = "SLUS-20668" }
+if (-not $Versions.Contains($GameVersion)) { throw "No config for the release $GameVersion (transformers\config\versions\$GameVersion)." }
+$env:TF_GAME_VERSION = $GameVersion
+$ElfName = $Versions[$GameVersion]
+# Another release runs the USA hooks at its own addresses (transformers\src\game_version.h, TF_GA): every code address
+# the C++ uses must be written with TF_GA, or that build would hook the wrong place.
+if ($GameVersion -ne "SLUS-20668") {
+    & python (Join-Path $Tools "check_pal_addresses.py")
+    if ($LASTEXITCODE -ne 0) { throw "Code addresses not translated for $GameVersion (see above)." }
+    # (docs\PAL_ADDRESSES.md) The private tree's mods (overlay\) use USA addresses that are not wrapped: another release
+    # is built without them, as -Public builds.
+    if (-not $Public -and (Test-Path -LiteralPath (Join-Path $Root "overlay"))) {
+        Write-Host "The mods (overlay\) are USA only: $GameVersion is built without them." -ForegroundColor Yellow
+        $Public = $true
+        $Build = Join-Path $Root "out\build-public"
+    }
+} else {
+    # (docs\PAL_ADDRESSES.md) The USA build checks the same, as a warning: an address added without TF_GA shows at once.
+    & python (Join-Path $Tools "check_pal_addresses.py") | Out-Host
+    if ($LASTEXITCODE -ne 0) { Write-Host "warning: code addresses without TF_GA (above): the European build would stop on them. docs\PAL_ADDRESSES.md" -ForegroundColor Yellow }
+}
 
 # --- Timing: each step's time, a summary at the end, the record used for the next estimates -------
 $Clock = [Diagnostics.Stopwatch]::StartNew()
@@ -87,13 +128,37 @@ function Usual([string]$stage) {
     return ""
 }
 
+# A program this build made on the player's PC and then runs (the recompiler, the analyzer, the game's own shader
+# bake): an antivirus may quarantine it as soon as it is written - a player's "hypersensitive" one flagged
+# ps2_analyzer.exe at every try. That is said plainly, with what to do; nothing is turned off or excluded for him.
+$BuiltHere = @{ "ps2_analyzer.exe" = "PS2Recomp\ps2xAnalyzer"; "ps2_recomp.exe" = "PS2Recomp\ps2xRecomp"; "TransformersRecomp.exe" = "transformers" }
+function Get-AntivirusBlockMessage([string]$Exe) {
+    $leaf = Split-Path $Exe -Leaf
+    "Your antivirus blocked $leaf. It is built on your PC from the open-source code in $(Join-Path $Root $BuiltHere[$leaf]). " +
+    "Don't turn the antivirus off: add the game folder ($Root) as an exclusion, or restore the file and allow it, " +
+    "then run the setup again (finished steps are kept)."
+}
+# Whether a run of a program built here was stopped by an antivirus: the file gone (quarantined right after the
+# build), Windows' "contains a virus" (225 / 0xC0000906 STATUS_VIRUS_INFECTED) or access denied to it.
+function Test-AntivirusBlock([string]$Exe, $Code, [string]$Text) {
+    if (-not $BuiltHere.ContainsKey((Split-Path $Exe -Leaf))) { return $false }
+    if (-not (Test-Path -LiteralPath $Exe)) { return $true }
+    if ($Code -in 225, -1073739514, 3221227782) { return $true }
+    return ($Text -match "contains a virus|potentially unwanted software|Access is denied|0xC0000906")
+}
+function Assert-NotBlocked([string]$Exe, $Code = 0, [string]$Text = "") {
+    if (Test-AntivirusBlock $Exe $Code $Text) { throw (Get-AntivirusBlockMessage $Exe) }
+}
+
 function Run {
     param([string]$Exe, [string[]]$Arguments)
     # Windows PowerShell turns any stderr line from a native tool into an
     # error record; judge success by the exit code only.
     $ErrorActionPreference = "Continue"
-    & $Exe @Arguments 2>&1 | ForEach-Object { "$_" }
-    if ($LASTEXITCODE -ne 0) { throw "$Exe failed with exit code $LASTEXITCODE" }
+    if ($BuiltHere.ContainsKey((Split-Path $Exe -Leaf))) { Assert-NotBlocked $Exe }
+    try { & $Exe @Arguments 2>&1 | ForEach-Object { "$_" } }
+    catch { Assert-NotBlocked $Exe -1 "$_"; throw }
+    if ($LASTEXITCODE -ne 0) { Assert-NotBlocked $Exe $LASTEXITCODE; throw "$Exe failed with exit code $LASTEXITCODE" }
 }
 function RunLogged {
     param([string]$Exe, [string[]]$Arguments, [string]$Log)
@@ -102,14 +167,20 @@ function RunLogged {
     # alone took ~80 s instead of ~8 (TODO 115). Its error output is added at the end.
     $quoted = @($Arguments | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } })
     $err = "$Log.stderr"
-    $p = Start-Process -FilePath $Exe -ArgumentList $quoted -WorkingDirectory (Get-Location).ProviderPath -NoNewWindow -Wait -PassThru `
-        -RedirectStandardOutput $Log -RedirectStandardError $err
+    Assert-NotBlocked $Exe
+    try {
+        $p = Start-Process -FilePath $Exe -ArgumentList $quoted -WorkingDirectory (Get-Location).ProviderPath -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput $Log -RedirectStandardError $err
+    } catch { Assert-NotBlocked $Exe -1 "$($_.Exception.Message)"; throw }
     if (Test-Path -LiteralPath $err) {
         $bytes = [IO.File]::ReadAllBytes($err)
         if ($bytes.Length) { $f = [IO.File]::Open($Log, [IO.FileMode]::Append); try { $f.Write($bytes, 0, $bytes.Length) } finally { $f.Dispose() } }
         Remove-Item -LiteralPath $err -ErrorAction SilentlyContinue
     }
-    if ($p.ExitCode -ne 0) { throw "$(Split-Path $Exe -Leaf) failed with exit code $($p.ExitCode), see $Log" }
+    if ($p.ExitCode -ne 0) {
+        Assert-NotBlocked $Exe $p.ExitCode
+        throw "$(Split-Path $Exe -Leaf) failed with exit code $($p.ExitCode), see $Log"
+    }
 }
 
 foreach ($tool in "cmake", "python", "git") {
@@ -236,8 +307,10 @@ function Get-GeneratorArgs([string]$Dir) {
     $a + @("-G", $vs[0].Generator, "-DCMAKE_GENERATOR_INSTANCE=$($vs[0].Path)")
 }
 $genArgs = Get-GeneratorArgs $ToolsBuild
-$cmakeArgs = @("-S", $Root, "-B", $Build) + (Get-GeneratorArgs $Build)
+$cmakeArgs = @("-S", $Root, "-B", $Build, "-DTF_GAME_VERSION=$GameVersion") + (Get-GeneratorArgs $Build)
 if ($Public) { $cmakeArgs += "-DTF_OVERLAY_DIR=" } # (the overlay left out: transformers\CMakeLists.txt)
+if ($Vulkan) { $cmakeArgs += "-DTF_VULKAN=ON" }     # (the Vulkan backend: transformers\CMakeLists.txt; -DTF_VULKAN=OFF turns it off again)
+$cmakeArgs += "-DTF_GAME_DIR=$Game"                 # (the disc's files where they are: game\ or the install's data\game)
 
 # What the translation (steps 3-4) depends on, one line per input: "<name> <SHA-256>". The
 # recompiler and analyzer are the programs themselves - MSBuild relinks them only when a source
@@ -285,6 +358,8 @@ if (-not $SkipRecompile) {
     Run cmake (@("-S", (Join-Path $Root "PS2Recomp"), "-B", $ToolsBuild,
                  "-DPS2X_BUILD_RUNTIME=OFF", "-DPS2X_BUILD_TEST=OFF", "-DPS2X_BUILD_STUDIO=OFF") + $genArgs)
     Run cmake @("--build", $ToolsBuild, "--config", $Config, "--target", "ps2_recomp", "ps2_analyzer", "--", "/m", "/v:m")
+    # (both there right after the build: an antivirus that took one says so here, not as a puzzling failure later)
+    foreach ($t in "ps2xAnalyzer\$Config\ps2_analyzer.exe", "ps2xRecomp\$Config\ps2_recomp.exe") { Assert-NotBlocked (Join-Path $ToolsBuild $t) }
 
     # 3-4. Recompile, when its inputs changed ---------------------------------
     $inputsFile = Join-Path $Work "translation-inputs.txt"
@@ -510,7 +585,7 @@ $lastCompileAt = $null
 $lastShown = -100.0
 $buildStart = $Clock.Elapsed.TotalSeconds
 $ErrorActionPreference = "Continue"
-& cmake @("--build", $Build, "--config", $Config, "--target", "TransformersRecomp", "--", "/m", "/v:m", "/p:UseMultiToolTask=true") 2>&1 | ForEach-Object {
+& cmake @("--build", $Build, "--config", $Config, "--target", "TransformersRecomp", "tfa_launcher", "--", "/m", "/v:m", "/p:UseMultiToolTask=true") 2>&1 | ForEach-Object {
     $line = "$_"
     if ($line -match '^\s+([\w.+-]+)\.(c|cc|cpp|cxx)\s*$') {
         $compiled++
@@ -547,6 +622,7 @@ $linkSeconds = $end - $(if ($lastCompileAt) { $lastCompileAt } else { $buildStar
 # changed - the first build, or a changed shader - the renderer's file is compiled again and linked (~1 min). So no
 # start compiles them, the first one on a PC included.
 $builtExe = Join-Path $Build "transformers\$Config\TransformersRecomp.exe"
+Assert-NotBlocked $builtExe
 $bakedTable = Join-Path $Build "transformers\baked\nr_shaders_baked.inc"
 # (The shaders live in nr_d3d.cpp: when that file is as at the last bake and the table holds shaders, the bake - ~45 s
 # on a small PC - is left out. bake-input.txt records the file's hash.)
@@ -560,9 +636,11 @@ if ((Test-Path -LiteralPath $builtExe) -and $bakeDone) {
 } elseif (Test-Path -LiteralPath $builtExe) {
     Step "Building the renderer's shaders into the game" "shaders"
     $ErrorActionPreference = "Continue"
-    & $builtExe --bake-shaders $bakedTable 2>&1 | ForEach-Object { "  $_" }
+    $bakeText = ""
+    try { & $builtExe --bake-shaders $bakedTable 2>&1 | ForEach-Object { "  $_" } } catch { $bakeText = "$_" }
     $baked = $LASTEXITCODE
     $ErrorActionPreference = "Stop"
+    if (Test-AntivirusBlock $builtExe $baked $bakeText) { throw (Get-AntivirusBlockMessage $builtExe) }
     if ($baked -eq 2) {
         Run cmake @("--build", $Build, "--config", $Config, "--target", "TransformersRecomp", "--", "/m", "/v:m", "/p:UseMultiToolTask=true") | Out-Null
     }
@@ -572,6 +650,29 @@ if ((Test-Path -LiteralPath $builtExe) -and $bakeDone) {
         Write-Host "  warning: the shaders could not be built in; the game compiles them at its first start instead" -ForegroundColor Yellow
     }
     Close-Stage
+}
+
+# --- The install's folders (TODO 279, docs/INSTALL_LAYOUT_PLAN.md) ---------------------------------
+# In a player's install (tfa-setup.exe in the folder above): the launcher "Transformers Armada.exe" put beside the setup
+# program, and the player's things moved out of the checkout once (tools\move_layout.ps1: the backup first, saves
+# copied and checked, nothing deleted). Never in a developer's checkout (no tfa-setup.exe above it). Every install
+# moves, RecompLauncher's too (recomplauncher.json names the new places) and one built without the mods (a European
+# disc on the mods' repository builds as -Public): the new layout is the standard, with no way back. A failure here
+# leaves the game as it was built: it never fails the build.
+$installRoot = Get-InstallRoot $Root
+if ($installRoot) {
+    $launcher = Join-Path $Build "transformers\$Config\Transformers Armada.exe"
+    if (Test-Path -LiteralPath $launcher) {
+        $dest = Join-Path $installRoot "Transformers Armada.exe"
+        try {
+            if (-not (Test-Path -LiteralPath $dest) -or (Get-FileHash -LiteralPath $dest).Hash -ne (Get-FileHash -LiteralPath $launcher).Hash) {
+                Copy-Item -LiteralPath $launcher -Destination $dest -Force
+                Write-Host "  The launcher: $dest"
+            }
+        } catch { Write-Host "  warning: the launcher was not copied to $dest ($($_.Exception.Message)); Play.bat and tfa-setup.exe start the game as before" -ForegroundColor Yellow }
+    }
+    # (it decides itself: once, or an interrupted move carried on)
+    & (Join-Path $Root "tools\move_layout.ps1") -GameFolder $Root -Root $installRoot
 }
 
 # --- The record for the next estimates, and the summary ---------------------------------------

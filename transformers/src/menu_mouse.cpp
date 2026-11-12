@@ -40,6 +40,7 @@
 #include "port_ext.h"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -50,6 +51,7 @@
 
 #include "raylib.h"
 #include "runtime/ps2_sony_pad.h"
+#include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 
 // profiler.cpp (Windows): the window's own clicks and wheel since the last call, and the cursor hidden for a controller
 // (TODO 175).
@@ -70,6 +72,7 @@ namespace menu_mouse
         std::atomic<float> g_wheel{0.0f};
         std::atomic<bool> g_wantCursor{false}; // (the game thread's answer: a menu is up)
         std::atomic<bool> g_enabled{true};     // TF_MENU_MOUSE
+        std::atomic<bool> g_gameMouse{true};   // TF_MOUSE (TODO 290 (6)): off = no mouse input in the game at all
 
         // --- The game thread's side -----------------------------------------------------------
         constexpr uint32_t kSetBarPositions = 0x00312820u;
@@ -106,12 +109,12 @@ namespace menu_mouse
         constexpr uint32_t kBaseUpdate = 0x001A0C20u; // (the ring's own slot 16; the others call it)
         OwnScreen g_own[] = {
             {kBaseUpdate, 0x006BD8F0u, "taScreenPrGRing", Kind::Ring, nullptr},
-            {0x003F6E90u, 0x006BD880u, "taScreenPrGRingCharacterSelect", Kind::Ring, nullptr},
-            {0x004F1720u, 0x006C4410u, "taScreenPrGRingLevelSelect", Kind::Ring, nullptr},
-            {0x004EEA00u, 0x006C4360u, "taScreenPrGWarpGate", Kind::Ring, nullptr},
-            {0x004E3C70u, 0x006C3E40u, "taScreenPrGRingMiniconSelect", Kind::Ring, nullptr},
-            {0x004E5D10u, 0x006C3ED0u, "taScreenPrGRingMiniconButtonSelect", Kind::Grid, nullptr},
-            {0x003F4A50u, 0x006BD810u, "taScreenPrGHQComm", Kind::Confirm, nullptr},
+            {TF_GA(0x003F6E90u), 0x006BD880u, "taScreenPrGRingCharacterSelect", Kind::Ring, nullptr},
+            {TF_GA(0x004F1720u), 0x006C4410u, "taScreenPrGRingLevelSelect", Kind::Ring, nullptr},
+            {TF_GA(0x004EEA00u), 0x006C4360u, "taScreenPrGWarpGate", Kind::Ring, nullptr},
+            {TF_GA(0x004E3C70u), 0x006C3E40u, "taScreenPrGRingMiniconSelect", Kind::Ring, nullptr},
+            {TF_GA(0x004E5D10u), 0x006C3ED0u, "taScreenPrGRingMiniconButtonSelect", Kind::Grid, nullptr},
+            {TF_GA(0x003F4A50u), 0x006BD810u, "taScreenPrGHQComm", Kind::Confirm, nullptr},
             {0x0033B690u, 0x006B77C0u, "taScreenPrGTitle", Kind::Title, nullptr},
         };
         constexpr uint64_t kOwnStale = 6u; // game frames an update may be missed (it can yield inside 0x1A0C20)
@@ -261,6 +264,28 @@ namespace menu_mouse
 
     void addSettings()
     {
+        // (TODO 290 (6), bbatts: a controller player wants the mouse out of the game) Off: the window never takes the mouse
+        // for the camera (main.cpp: no capture, so no turning and no mouse buttons in play), and the game's menus get no
+        // pointing or clicks. The F1 overlay keeps the mouse either way.
+        if (const char *env = std::getenv("TF_MOUSE"); env && *env)
+            g_gameMouse.store(*env != '0');
+        {
+            ps2_settings::Setting m;
+            m.key = "TF_MOUSE";
+            m.section = "Mouse";
+            m.label = "Mouse in the game";
+            m.order = 30;
+            m.help = "Off: the game takes no mouse input at all - no camera, no buttons, no pointing in its menus - for playing "
+                     "with a controller without the mouse getting in the way. The F1 menu still works with the mouse.";
+            m.choices = {{"1", "On"}, {"0", "Off"}};
+            m.defaultValue = "1";
+            m.apply = [](const std::string &value)
+            {
+                g_gameMouse.store(value != "0");
+                return true;
+            };
+            ps2_settings::add(m);
+        }
         if (const char *env = std::getenv("TF_MENU_MOUSE"); env && *env)
             g_enabled.store(*env != '0');
         ps2_settings::Setting s;
@@ -321,7 +346,7 @@ namespace menu_mouse
         return started;
     }
 
-    void windowFrame(int windowWidth, int windowHeight)
+    void windowFrame(int windowWidth, int windowHeight, bool overlayOpen)
     {
         if (windowWidth <= 0 || windowHeight <= 0)
             return;
@@ -329,6 +354,27 @@ namespace menu_mouse
         // comes back when the mouse moves (profiler.cpp's window procedure).
         if (padUsedNow())
             tfHideCursorForPad();
+        // (TODO 286 a) The F1 overlay (or the debugger) up: the window's clicks and wheel are the overlay's, never the game
+        // menu's under it - they were also handed to the pause menu, the HQ's screens and the front end, which pressed their
+        // buttons through the overlay. Taken and dropped while it is up, and for a quarter of a second after it closes: the
+        // click on an overlay button that closes it arrives in the frame it closed.
+        static auto overlaySeen = std::chrono::steady_clock::time_point{};
+        const auto nowOverlay = std::chrono::steady_clock::now();
+        if (overlayOpen)
+            overlaySeen = nowOverlay;
+        if (overlayOpen || nowOverlay - overlaySeen < std::chrono::milliseconds(250))
+        {
+            int dropLeft = 0, dropRight = 0;
+            float dropWheel = 0.0f;
+            tfTakeMenuMouse(dropLeft, dropRight, dropWheel);
+            g_u.store(-1.0f, std::memory_order_relaxed);
+            g_v.store(-1.0f, std::memory_order_relaxed);
+            static const bool log = std::getenv("TF_OVERLAY_INPUT_LOG") && *std::getenv("TF_OVERLAY_INPUT_LOG") == '1';
+            if (log && (dropLeft > 0 || dropRight > 0 || dropWheel != 0.0f))
+                std::fprintf(stderr, "[menu mouse] the overlay %s: %d left / %d right clicks, wheel %.2f kept from the game\n",
+                             overlayOpen ? "is up" : "just closed", dropLeft, dropRight, dropWheel);
+            return;
+        }
         // (TODO 175) The clicks and wheel of the window's messages: raylib's pressed / wheel are its last poll's only, and
         // the runtime polls several times a picture - a click between them was lost.
         int clicksLeft = 0, clicksRight = 0;
@@ -355,6 +401,8 @@ namespace menu_mouse
     }
 
     bool wantsCursor() { return g_wantCursor.load(std::memory_order_relaxed); }
+
+    bool gameMouseOn() { return g_gameMouse.load(std::memory_order_relaxed); }
 
     uint16_t padButtons()
     {
@@ -406,7 +454,7 @@ namespace menu_mouse
                              word(rdram, kGame) != 0u ? 1 : 0, paused ? 1 : 0);
             lastVtable = menuVtable;
         }
-        const bool active = shown && g_enabled.load(std::memory_order_relaxed);
+        const bool active = shown && g_enabled.load(std::memory_order_relaxed) && g_gameMouse.load(std::memory_order_relaxed);
         // (TODO 175) A list the HQ shows on a hologram panel (its Options, Controller, Audio..., the "Are you sure?" of
         // its Exit - taScreenExit): the 2D drawn into the panel, the panel in 3D, slanted, wherever the camera has it -
         // the rows are not where the 2D has them on the screen. No pointing there: the wheel steps, a left click takes the

@@ -1,0 +1,92 @@
+Subject: [PATCH] Runtime: "auto" for the stick dead zone settings - a worn stick's rest, measured on the pad
+
+A worn stick does not come back to the centre: a wired Xbox 360 pad rests with its left stick 12% off it
+(XInput 1310 / -3723 of 32767, unchanged over 5 s untouched) and its right one 7-9%, past the 5% default, so
+the robot walked and the car steered with the stick let go. The dead zone settings of patch 0163 can be raised
+by hand; "auto" (PS2X_STICK_LEFT_DEADZONE / PS2X_STICK_RIGHT_DEADZONE = auto) measures it: a stick reading that
+has not changed at all for a second, under 30% off the centre, is the stick at rest (a thumb on it always moves
+it a little), and the dead zone is the farthest rest plus 3 points, never under the 5% default. A pad that rests
+near the centre gets 5%, as before. GLFW gamepads only; a Sony pad read natively keeps 5% under auto.
+diff --git a/ps2xRuntime/include/runtime/ps2_stick_response.h b/ps2xRuntime/include/runtime/ps2_stick_response.h
+index da11123..399ac97 100644
+--- a/ps2xRuntime/include/runtime/ps2_stick_response.h
++++ b/ps2xRuntime/include/runtime/ps2_stick_response.h
+@@ -24,6 +24,37 @@ namespace ps2_stick_response
+         if (deadzone > kDeadzone + 0.001f && !(std::hypot(x, y) > deadzone))
+             x = y = 0.0f;
+     }
++    // (patch 0169) The dead zone setting's "auto": a worn stick does not come back to the centre - an Xbox 360 pad
++    // rested at 12% off it (left stick, -3723 of 32767 on Y), past the 5% default, so the robot walked and the car
++    // steered with the stick let go. A stick nobody touches reads one value exactly, sample after sample, where a
++    // thumb on it always moves it a little: a reading that has not changed for a second, under 30% off the centre,
++    // is the stick at rest. Auto's dead zone is the farthest rest plus 3 points, never under the 5% default, so a pad
++    // that rests near the centre is handled exactly as before.
++    struct RestDeadzone
++    {
++        float rest = 0.0f;            // the farthest rest seen from the centre (0..0.30)
++        float lastX = 2.0f, lastY = 2.0f;
++        double stillSince = -1.0;     // since when the reading has not changed (s)
++        // A raw reading (-1..1) at `seconds`: true when it measured a rest farther than before.
++        bool sample(float x, float y, double seconds)
++        {
++            if (!std::isfinite(x) || !std::isfinite(y))
++                return false;
++            if (std::fabs(x - lastX) > 0.0005f || std::fabs(y - lastY) > 0.0005f)
++            {
++                lastX = x;
++                lastY = y;
++                stillSince = seconds;
++                return false;
++            }
++            const float radius = std::hypot(x, y);
++            if (stillSince < 0.0 || seconds - stillSince < 1.0 || radius >= 0.30f || radius <= rest + 0.005f)
++                return false;
++            rest = radius;
++            return true;
++        }
++        float deadzone() const { return std::max(kDeadzone, rest > 0.0f ? rest + 0.03f : 0.0f); }
++    };
+     inline uint8_t axisByte(float value)
+     {
+         const float clamped = std::min(1.0f, std::max(-1.0f, value));
+diff --git a/ps2xRuntime/src/lib/ps2_pad.cpp b/ps2xRuntime/src/lib/ps2_pad.cpp
+index 6cf376e..8348d6f 100644
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -883,7 +883,7 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+     const bool live = (unfocusedInput || IsWindowFocused()) && !g_gameInputBlocked.load(std::memory_order_relaxed);
+ 
+     // A DualSense / DualShock 4 read natively (ps2_sony_pad.h) drives the pad in place of the GLFW gamepads.
+-    const auto response = stickConfig();
++    auto response = stickConfig();
+     ps2x::sonypad::InputState sony;
+     const bool sonyPad = live && ps2x::sonypad::readHostPad(sony);
+     // (patch 0156) The controller's buttons as pressed; the game's buttons from them through the layout (padToGame).
+@@ -971,6 +971,27 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+         ly = GetGamepadAxisMovement(gamepad, GAMEPAD_AXIS_LEFT_Y);
+         rx = GetGamepadAxisMovement(gamepad, GAMEPAD_AXIS_RIGHT_X);
+         ry = GetGamepadAxisMovement(gamepad, GAMEPAD_AXIS_RIGHT_Y);
++        // (patch 0169) The sticks' rest measured on this pad (ps2_stick_response::RestDeadzone), the dead zone of a
++        // stick whose setting is "auto" (F1 > Controls, the left / right stick dead zone). Not for Sony pads, read above.
++        static int restPad = -1;
++        static ps2_stick_response::RestDeadzone restLeft, restRight;
++        if (restPad != gamepad)
++        {
++            restPad = gamepad;
++            restLeft = restRight = ps2_stick_response::RestDeadzone{};
++        }
++        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
++        for (auto *side : {&restLeft, &restRight})
++        {
++            const bool left = side == &restLeft;
++            if (side->sample(left ? lx : rx, left ? ly : ry, seconds))
++                std::fprintf(stderr, "[pad] %s stick at rest %.1f%% off the centre: its dead zone %.0f%% when set to Auto\n",
++                             left ? "left" : "right", side->rest * 100.0f, side->deadzone() * 100.0f);
++        }
++        if (ps2_settings::value("PS2X_STICK_LEFT_DEADZONE") == "auto")
++            response.leftDeadzone = restLeft.deadzone();
++        if (ps2_settings::value("PS2X_STICK_RIGHT_DEADZONE") == "auto")
++            response.rightDeadzone = restRight.deadzone();
+     }
+ 
+     // The stick as the pad gives it: "the gamepad was used" (below) is judged on this, so the response's
