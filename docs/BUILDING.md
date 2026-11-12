@@ -46,7 +46,21 @@ for changes to the runtime or the port's code only (under a minute).
 
 This makes every texture of the game again at a higher resolution on your graphics card (with Real-ESRGAN, on
 Vulkan), and redraws the fonts and button prompts sharp. It writes into `hd_textures\`, where the game finds them.
-It takes from tens of minutes to a few hours. `-Quality fast` makes a quicker set: one upscale pass (characters up to 2K, levels up to 1K), about ten times quicker.
+It takes from about ten minutes to an hour or more. `-Quality` picks how much each kind of texture is enlarged
+(`tier_rules.PRESETS`). The sizes were measured per kind of texture: how far each one can be enlarged before a
+larger image stops looking any different at the distance it is usually seen from, on a 1080p, 1440p or 4K screen.
+
+| Preset | For | Player / enemies, Mini-Cons / levels (terrain, foliage, sky) / effects / UI | HD set (renderer's form) | Making time, RTX 3070 |
+|---|---|---|---|---|
+| `fast` | Steam Deck, 1080p | 8x / 4x / 4x / 4x / 2x | about 0.6 GB | about 10 min |
+| `balanced` (default) | 1440p | 8x / 4x / 8x / 4x / 2x | about 1.4 GB | about 25 min |
+| `best` | 4K | 16x / 8x / 8x / 8x / 4x | about 2.3 GB | about 35 min |
+
+8x and 16x take two upscale passes, 2x and 4x one; nothing goes past 4096 px. An average PC takes about 1.5-2 times
+as long. Images made larger by another preset, or before the presets, are shrunk to the chosen one on the CPU (a few
+minutes, the same picture a fresh run makes); only the ones it needs larger are made on the graphics card. To change
+the preset later: F1 > Graphics > HD texture preset in the game, the setup window's update screen, or
+`-Quality` here.
 `-FontsOnly` makes only the fonts and prompts, in a few minutes.
 
 You can play while they are made: the ones seen first (the menus, the HQ, the characters, the first levels) come

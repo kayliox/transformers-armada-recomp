@@ -40,8 +40,9 @@
     .\tools\make_hd_textures.ps1 -Remake         # (TODO 281) the last report's broken images made again
 #>
 param([switch]$SkipUpscale, [switch]$CrispFontsOnly, [switch]$FontsOnly, [string]$Python = "python",
-      [ValidateSet("", "best", "fast")][string]$Quality = "",
-      [switch]$Resume, [int]$GamePid = 0, [switch]$Verify, [switch]$Remake)
+      [ValidateSet("", "fast", "balanced", "best")][string]$Quality = "",
+      [switch]$Resume, [int]$GamePid = 0, [switch]$Verify, [switch]$Remake,
+      [switch]$Gentle)  # (TODO 310) easy on the graphics card (or "gentle": true in hd_options.json): rests, about three times as slow
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path $PSScriptRoot -Parent
@@ -94,13 +95,14 @@ trap {
     break
 }
 
-# (TODO 219) The choices (the setup writes them): Best or Fast, and whether to keep making them while the game runs.
+# (TODO 219, PR #20) The choices (the setup writes them): Fast, Balanced or Best, and whether to keep making them while
+# the game runs. An options file from before Balanced says "best" or "fast": both are still presets.
 $OptionsFile = Join-Path $Out "hd_options.json"
 $StatusFile = Join-Path $Out "upscale_status.json"
 if (-not $Quality) {
-    $Quality = "best"
+    $Quality = "balanced"
     if (Test-Path $OptionsFile) {
-        try { $o = Get-Content $OptionsFile -Raw | ConvertFrom-Json; if ($o.quality -eq "fast") { $Quality = "fast" } } catch {}
+        try { $o = Get-Content $OptionsFile -Raw | ConvertFrom-Json; if ("$($o.quality)" -in @("fast", "balanced", "best")) { $Quality = "$($o.quality)" } } catch {}
     }
 }
 function SetStatus([string]$State) {
@@ -317,7 +319,13 @@ if (-not (Test-Path $exe)) {
 # removed and made again below. Again whenever "Make HD textures" (F1) runs this on a set the card made broken or set aside.
 $checkedMark = Join-Path $Out ".images_checked_3"
 $finished = $false
-if (Test-Path $StatusFile) { try { $finished = ((Get-Content $StatusFile -Raw | ConvertFrom-Json).state -in @("done", "card_broken")) } catch {} }
+# (PR #20: a finished set made for another preset is shrunk or made larger below, and those images are checked then)
+if (Test-Path $StatusFile) {
+    try {
+        $st0 = Get-Content $StatusFile -Raw | ConvertFrom-Json
+        $finished = ($st0.state -in @("done", "card_broken")) -and (-not $st0.quality -or "$($st0.quality)" -eq $Quality)
+    } catch {}
+}
 if ($Remake) {
     Step "Removing the images the last verify found missing or broken (they are made again below)"
     Run $Python @((Join-Path $Py "upscale_textures.py"), $converted, "--out", (Join-Path $Out "upscaled"), "--forget-broken",
@@ -338,10 +346,18 @@ $ErrorActionPreference = "Continue"
 # (TODO 219) In batches, the textures seen first made first, each colour-matched as it is made; it waits while the
 # game runs (unless hd_options.json says to carry on) and says "HD textures: N of M made" after each batch.
 & $Python (Join-Path $Py "upscale_textures.py") $converted --out (Join-Path $Out "upscaled") `
-    --work (Join-Path $Out "work") --exe $exe --quality $Quality --match-colour @withGame 2>&1 | ForEach-Object { "$_" } | Tee-Object -Variable lines | Out-Host
+    --work (Join-Path $Out "work") --exe $exe --quality $Quality --match-colour @withGame @(if ($Gentle) { "--gentle" }) 2>&1 | ForEach-Object { "$_" } | Tee-Object -Variable lines | Out-Host
 $code = $LASTEXITCODE
 # (TODO 267) Exit 4: the game closed and the upscale stopped with it - the rest waits for the next start.
 if ($code -eq 4) { exit 0 }
+# (0.7.0) Exit 5: the graphics driver was reset even with the smallest pieces, so this run stopped with images left.
+# The set stays unfinished (never "done"): the next run - the game's next start, an update, F1 - carries on.
+$stoppedByResets = ($code -eq 5)
+if ($stoppedByResets) {
+    Write-Host "`nwarning: the graphics driver was reset while the HD textures were made, even in the smallest pieces:" -ForegroundColor Yellow
+    Write-Host "this run stopped with some left to make. What is made is kept and used; the rest is made the next time." -ForegroundColor Yellow
+    $code = 0
+}
 $ErrorActionPreference = "Stop"
 $summary = $lines | Where-Object { $_ -match '^upscaled \d+/\d+ uniques' } | Select-Object -Last 1
 # (TODO 242) Exit 3: this graphics card's upscales come out broken in every way the upscaler has (a GTX 1660 SUPER's
@@ -374,5 +390,5 @@ else { Step "Matching the upscaled images' colour to the game's textures" }
 # (--only-new: the images matched as they were made are not measured again)
 Run $Python @((Join-Path $Py "match_colour.py"), "--upscaled", (Join-Path $Out "upscaled"), "--native", $converted, "--only-new")
 CrispFonts
-SetStatus $(if ($cardBroken) { "card_broken" } else { "done" })
+SetStatus $(if ($cardBroken) { "card_broken" } elseif ($stoppedByResets) { "working" } else { "done" })
 Write-Host "`nDone. Start the game from this folder (Play.bat): the log says '[native render] upscaled textures: N images'." -ForegroundColor Green

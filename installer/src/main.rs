@@ -97,8 +97,12 @@ struct App {
     prototype: String,
     folder: String,
     hd: bool,
-    hd_fast: bool,          // (TODO 219) HD textures: Fast (2K characters, one pass) instead of Best
+    hd_quality: HdQuality,  // (TODO 219, PR #20) HD textures preset: Fast / Balanced / Best
+    hd_saved: Option<HdQuality>, // the preset hd_options.json says (None: none saved)
+    hd_set_gb: Option<f32>,      // the install's HD set (hd_textures\upscaled) now, GB (None: no set)
+    hd_note: String,             // the update screen's line after Apply
     hd_while_playing: bool, // keep making them while the game runs
+    hd_gentle: bool,        // (TODO 310) easy on the graphics card: short bursts with rests, about three times as slow
     gpu: Option<(String, u64)>, // the graphics card the suggestion is for (name, video memory)
     low_end: bool,              // built-in or low-end graphics: no HD textures made (detect_gpu)
     hd_playable: bool,      // the HD step has got to the upscale: the game can be played meanwhile
@@ -138,8 +142,12 @@ impl App {
             prototype: String::new(),
             folder: format!("{home}\\Games\\TFA"), // (short: Windows' path limit, see exec)
             hd: true,
-            hd_fast: false,
+            hd_quality: HdQuality::Balanced,
+            hd_saved: None,
+            hd_set_gb: None,
+            hd_note: String::new(),
             hd_while_playing: false,
+            hd_gentle: false,
             gpu: None,
             low_end: false,
             hd_playable: false,
@@ -162,12 +170,12 @@ impl App {
         }
     }
 
-    /// The graphics card found, and Fast suggested for it when Best would take long (suggest_fast).
+    /// The graphics card found, and the preset suggested for it (suggest_quality).
     fn detect_gpu(&mut self) {
         let cards = winapi::graphics_cards();
         let best = cards.into_iter().filter(|(n, _)| !n.to_ascii_lowercase().contains("basic")).max_by_key(|(_, v)| *v);
         if let Some((name, vram)) = best {
-            self.hd_fast = suggest_fast(&name, vram);
+            self.hd_quality = suggest_quality(&name, vram);
             // (User decision 2026-11-11) Built-in or low-end graphics (no card with 3.5 GB of its own video memory; the
             // GTX 1650's 4 GB and up are not): no HD textures are made on it - make_hd_textures.ps1 refuses too.
             self.low_end = vram < 3584 * 1024 * 1024 || std::env::var("TFA_LOW_END").is_ok_and(|v| v == "1"); // (TFA_LOW_END=1: tests)
@@ -180,12 +188,29 @@ impl App {
 
     /// The HD choices an install made before (hd_textures\hd_options.json), shown again in the form.
     fn load_hd_options(&mut self) {
-        let file = game_folder(&self.repo()).join("hd_textures").join("hd_options.json");
-        if let Ok(text) = std::fs::read_to_string(file) {
+        let hd = game_folder(&self.repo()).join("hd_textures");
+        self.hd_saved = None;
+        if let Ok(text) = std::fs::read_to_string(hd.join("hd_options.json")) {
             let t: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-            self.hd_fast = t.contains("\"quality\":\"fast\"");
+            if let Some(q) = HdQuality::ALL.into_iter().find(|q| t.contains(&format!("\"quality\":\"{}\"", q.arg()))) {
+                self.hd_quality = q;
+                self.hd_saved = Some(q);
+            }
             self.hd_while_playing = t.contains("\"while_playing\":true");
+            self.hd_gentle = t.contains("\"gentle\":true");
         }
+        // (the update screen: the set's size now, beside what each preset makes)
+        self.hd_set_gb = dir_size(&hd.join("upscaled")).map(|b| b as f32 / (1u64 << 30) as f32);
+    }
+
+    /// (PR #20) The preset chosen on the update screen, saved for the HD step (hd_options.json, as setup.ps1 writes it).
+    fn save_hd_quality(&mut self) -> Result<(), String> {
+        let hd = game_folder(&self.repo()).join("hd_textures");
+        let text = format!("{{\n    \"quality\":  \"{}\",\n    \"while_playing\":  {},\n    \"gentle\":  {}\n}}",
+                           self.hd_quality.arg(), self.hd_while_playing, self.hd_gentle);
+        std::fs::write(hd.join("hd_options.json"), text).map_err(|e| format!("could not save the HD texture preset: {e}"))?;
+        self.hd_saved = Some(self.hd_quality);
+        Ok(())
     }
 
     fn repo(&self) -> PathBuf {
@@ -258,8 +283,9 @@ impl App {
             prototype: self.prototype.clone(),
             folder: PathBuf::from(&self.folder),
             hd: self.hd,
-            hd_fast: self.hd_fast,
+            hd_quality: self.hd_quality,
             hd_while_playing: self.hd_while_playing,
+            hd_gentle: self.hd_gentle,
             child: self.child.clone(),
             update: self.update,
             play: self.play,
@@ -462,8 +488,9 @@ struct Job {
     prototype: String,
     folder: PathBuf,
     hd: bool,
-    hd_fast: bool,
+    hd_quality: HdQuality,
     hd_while_playing: bool,
+    hd_gentle: bool,
     child: Arc<Mutex<Option<Arc<winapi::ProcessTree>>>>, // the running step's process tree (Cancel ends it)
     update: bool,
     play: bool,
@@ -585,8 +612,9 @@ impl Job {
         if !self.hd {
             args.push("-SkipHdTextures".into());
         } else {
-            args.extend(["-HdQuality".into(), if self.hd_fast { "fast" } else { "best" }.into()]);
+            args.extend(["-HdQuality".into(), self.hd_quality.arg().into()]);
             args.extend(["-HdWhilePlaying".into(), if self.hd_while_playing { "on" } else { "off" }.into()]);
+            args.extend(["-HdGentle".into(), if self.hd_gentle { "on" } else { "off" }.into()]);
         }
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let _ = tx.send(Msg::Step(STEP_TOOLS));
@@ -918,9 +946,137 @@ fn hd_progress(text: &str) -> Option<f32> {
     Some(0.72 + 0.25 * (done / total).clamp(0.0, 1.0))
 }
 
-/// Fast suggested for a graphics card on which Best would take a long time (TODO 219: the times measured are in
-/// docs/TODO.md, item 219). Best for the newer and bigger cards; Fast for the older and smaller ones, and for a
-/// card it does not know.
+/// The HD textures presets (PR #20): tools/hd_textures/tier_rules.py PRESETS and ESTIMATES, measured in the home
+/// repository's docs/HD_UPSCALE_RATIOS.md. Keep the numbers here in step with ESTIMATES.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HdQuality {
+    Fast,
+    Balanced,
+    Best,
+}
+
+impl HdQuality {
+    const ALL: [HdQuality; 3] = [HdQuality::Fast, HdQuality::Balanced, HdQuality::Best];
+
+    /// setup.ps1's -HdQuality and hd_options.json's "quality".
+    fn arg(self) -> &'static str {
+        match self {
+            HdQuality::Fast => "fast",
+            HdQuality::Balanced => "balanced",
+            HdQuality::Best => "best",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            HdQuality::Fast => "Fast",
+            HdQuality::Balanced => "Balanced",
+            HdQuality::Best => "Best",
+        }
+    }
+
+    /// The HD set in the renderer's form (BC7 with mipmaps), GB.
+    fn gigabytes(self) -> f32 {
+        match self {
+            HdQuality::Fast => 0.6,
+            HdQuality::Balanced => 1.4,
+            HdQuality::Best => 2.3,
+        }
+    }
+
+    /// Making time measured on an RTX 3070, minutes.
+    fn minutes_rtx3070(self) -> f32 {
+        match self {
+            HdQuality::Fast => 10.0,
+            HdQuality::Balanced => 25.0,
+            HdQuality::Best => 33.0,
+        }
+    }
+
+    fn hover(self) -> &'static str {
+        match self {
+            HdQuality::Fast => "For the Steam Deck and 1080p: characters 8x, the rest 4x (menus 2x). One upscale pass for all but the characters: the quickest and smallest",
+            HdQuality::Balanced => "For 1440p: your characters and the levels 8x (two upscale passes); enemies, Mini-Cons and effects 4x; menus 2x",
+            HdQuality::Best => "For 4K: your characters 16x; enemies, Mini-Cons, levels and effects 8x; menus 4x",
+        }
+    }
+
+    /// "about 35 min, 1.9 GB" for the card found: one of the stronger cards about as quick as the RTX 3070 it was
+    /// measured on, another (or none found) about 1.5-2 times slower.
+    fn estimate(self, gpu: Option<&(String, u64)>) -> String {
+        let slow = gpu.is_none_or(|(n, v)| suggest_quality(n, *v) == HdQuality::Fast);
+        let m = self.minutes_rtx3070() * if slow { 1.75 } else { 1.0 };
+        let m = ((m / 5.0).round() * 5.0).max(5.0) as u32;
+        format!("about {m} min, {:.1} GB", self.gigabytes())
+    }
+}
+
+/// The bytes of the files in a folder and its subfolders (None: no such folder).
+fn dir_size(dir: &Path) -> Option<u64> {
+    let mut total = 0u64;
+    let mut stack = vec![std::fs::read_dir(dir).ok()?];
+    while let Some(entries) = stack.pop() {
+        for e in entries.flatten() {
+            match e.file_type() {
+                Ok(t) if t.is_dir() => {
+                    if let Ok(sub) = std::fs::read_dir(e.path()) {
+                        stack.push(sub);
+                    }
+                }
+                Ok(_) => total += e.metadata().map(|m| m.len()).unwrap_or(0),
+                Err(_) => {}
+            }
+        }
+    }
+    Some(total)
+}
+
+/// (PR #20) The HD step in its own small window (make_hd_textures.ps1 -Resume, as the game starts it for an unfinished
+/// set): it waits while the game runs and carries on when it closes.
+fn start_hd_maker(repo: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let game = game_folder(repo);
+    let script = game.join("tools").join("make_hd_textures.ps1");
+    if !script.is_file() {
+        return Err(format!("{} is missing", script.display()));
+    }
+    const CREATE_NEW_CONSOLE: u32 = 0x10;
+    Command::new(program("powershell"))
+        .args(["-NoProfile", "-ExecutionPolicy", "RemoteSigned", "-File"])
+        .arg(&script)
+        .arg("-Resume")
+        .current_dir(&game)
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not start the HD textures window: {e}"))
+}
+
+/// The preset suggested for a graphics card: Fast for the older and smaller ones (suggest_fast), the Steam Deck and a
+/// card it does not know; Best for the strongest (RTX 4080 / 5080 and up, Radeon RX 7900, RX 9070 XT, with 16 GB);
+/// Balanced between.
+fn suggest_quality(name: &str, vram: u64) -> HdQuality {
+    if suggest_fast(name, vram) {
+        return HdQuality::Fast;
+    }
+    let n = name.to_ascii_lowercase();
+    let gb = vram as f64 / (1u64 << 30) as f64;
+    let model = |after: &str| -> Option<u32> {
+        let at = n.find(after)? + after.len();
+        let d: String = n[at..].trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+        d.parse().ok()
+    };
+    let strong = match (model("rtx"), model("rx")) {
+        (Some(m), _) => m >= 4000 && m % 1000 >= 80,
+        (None, Some(m)) if m >= 9000 => n.contains(" xt"),
+        (None, Some(m)) => m >= 7000 && m % 1000 >= 900,
+        _ => false,
+    };
+    if strong && (vram == 0 || gb >= 15.5) { HdQuality::Best } else { HdQuality::Balanced }
+}
+
+/// Fast suggested for a graphics card on which the two-pass presets would take a long time (TODO 219: the times
+/// measured are in docs/TODO.md, item 219). Fast for the older and smaller cards, and for a card it does not know.
 fn suggest_fast(name: &str, vram: u64) -> bool {
     let n = name.to_ascii_lowercase();
     let gb = vram as f64 / (1u64 << 30) as f64;
@@ -1623,9 +1779,51 @@ impl App {
         } else if c.done {
             ui.label(RichText::new("Up to date.").size(17.0).color(GOOD));
         }
+        // (PR #20) The HD textures preset, for an install that has a set: saved with the update (whose HD step shrinks
+        // or makes what it needs), or applied at once in the maker's own window when there is no update.
+        let has_set = self.hd_set_gb.is_some();
+        if has_set {
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.label("HD texture preset");
+                let gpu = self.gpu.as_ref();
+                let text = |q: HdQuality| format!("{}  ({})", q.label(), q.estimate(gpu));
+                egui::ComboBox::from_id_salt("hd_quality_update")
+                    .width(240.0)
+                    .selected_text(text(self.hd_quality))
+                    .show_ui(ui, |ui| {
+                        for q in HdQuality::ALL {
+                            ui.selectable_value(&mut self.hd_quality, q, text(q)).on_hover_text(q.hover());
+                        }
+                    })
+                    .response
+                    .on_hover_text(self.hd_quality.hover());
+                if self.hd_saved != Some(self.hd_quality) && !c.available
+                    && ui.button("Apply").on_hover_text("Saved, and made in a small window of its own: larger images are shrunk (no graphics card needed), the ones this preset needs larger are made").clicked()
+                {
+                    self.hd_note = match self.save_hd_quality().and_then(|_| start_hd_maker(&self.repo())) {
+                        Ok(()) => "Being made in a small window of its own. You can play meanwhile; restart the game once it is done.".into(),
+                        Err(e) => e,
+                    };
+                }
+            });
+            let mut line = format!("Your HD set now: {:.1} GB.", self.hd_set_gb.unwrap_or(0.0));
+            if self.hd_saved != Some(self.hd_quality) && c.available {
+                line.push_str(" The new preset is applied with the update.");
+            } else if !self.hd_note.is_empty() {
+                line = self.hd_note.clone();
+            }
+            ui.label(RichText::new(line).color(DIM).small());
+        }
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Max), |ui| {
             ui.horizontal(|ui| {
                 if c.available && self.check_rx.is_none() && ui.add_sized([150.0, 40.0], egui::Button::new(RichText::new("Update").size(16.0)).fill(ACCENT)).clicked() {
+                    // (the update's HD step reads it; an update that does not touch the HD tools runs it for a new preset)
+                    if has_set && self.hd_saved != Some(self.hd_quality) {
+                        if let Err(e) = self.save_hd_quality() {
+                            self.hd_note = e;
+                        }
+                    }
                     self.start_update();
                 }
                 if ui.add_sized([150.0, 40.0], egui::Button::new("Play")).clicked() {
@@ -1705,18 +1903,36 @@ impl App {
         if self.hd {
             ui.horizontal(|ui| {
                 ui.add_space(24.0);
-                ui.radio_value(&mut self.hd_fast, false, "Best").on_hover_text("4K characters, 2K levels: the sharpest, takes longest");
-                ui.radio_value(&mut self.hd_fast, true, "Fast")
-                    .on_hover_text("One upscale pass: characters up to 2K, levels up to 1K. About ten times quicker, still much sharper than the original");
-                if let Some((name, vram)) = &self.gpu {
-                    let pick = if suggest_fast(name, *vram) { "Fast" } else { "Best" };
-                    ui.label(RichText::new(format!("suggested for your {name}: {pick}")).color(DIM).small());
-                }
+                ui.label("Texture preset");
+                let gpu = self.gpu.as_ref();
+                let text = |q: HdQuality| format!("{}  ({})", q.label(), q.estimate(gpu));
+                egui::ComboBox::from_id_salt("hd_quality")
+                    .width(240.0)
+                    .selected_text(text(self.hd_quality))
+                    .show_ui(ui, |ui| {
+                        for q in HdQuality::ALL {
+                            ui.selectable_value(&mut self.hd_quality, q, text(q)).on_hover_text(q.hover());
+                        }
+                    })
+                    .response
+                    .on_hover_text(self.hd_quality.hover());
             });
+            if let Some((name, vram)) = &self.gpu {
+                ui.horizontal(|ui| {
+                    ui.add_space(24.0);
+                    let pick = suggest_quality(name, *vram).label();
+                    ui.label(RichText::new(format!("suggested for your {name}: {pick}")).color(DIM).small());
+                });
+            }
             ui.horizontal(|ui| {
                 ui.add_space(24.0);
                 ui.checkbox(&mut self.hd_while_playing, "Keep making HD textures while I play").on_hover_text(
                     "Off: they wait while the game runs and carry on when you close it. On: they carry on, and the game runs a little slower meanwhile.");
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(24.0);
+                ui.checkbox(&mut self.hd_gentle, "Go easy on my graphics card (slower)").on_hover_text(
+                    "For a PC that restarts, freezes or overheats while the HD textures are made: the graphics card works in short bursts with rests in between, never at full power for minutes. Takes about three times as long.");
             });
         }
         ui.add_space(6.0);
@@ -2007,5 +2223,43 @@ mod path_tests {
         assert!(!git_failure_text("Installer failed with exit code: 21").contains("nobody answered"));
         assert!(git_failure_text("winget could not be started: program not found").contains("App Installer"));
         assert!(git_failure_text("something else").contains("https://git-scm.com/download/win"));
+    }
+}
+
+#[cfg(test)]
+mod hd_quality_tests {
+    use super::*;
+
+    const GB: u64 = 1 << 30;
+
+    #[test]
+    fn suggested_preset_follows_the_card() {
+        assert_eq!(suggest_quality("NVIDIA GeForce GTX 1660 SUPER", 6 * GB), HdQuality::Fast);
+        assert_eq!(suggest_quality("AMD Custom GPU 0405", GB), HdQuality::Fast); // Steam Deck
+        assert_eq!(suggest_quality("NVIDIA GeForce RTX 3070", 8 * GB), HdQuality::Balanced);
+        assert_eq!(suggest_quality("NVIDIA GeForce RTX 4070 Ti", 12 * GB), HdQuality::Balanced);
+        assert_eq!(suggest_quality("NVIDIA GeForce RTX 4090", 24 * GB), HdQuality::Best);
+        assert_eq!(suggest_quality("NVIDIA GeForce RTX 5080", 16 * GB), HdQuality::Best);
+        assert_eq!(suggest_quality("AMD Radeon RX 7900 XTX", 24 * GB), HdQuality::Best);
+        assert_eq!(suggest_quality("AMD Radeon RX 7800 XT", 16 * GB), HdQuality::Balanced);
+        assert_eq!(suggest_quality("AMD Radeon RX 9070 XT", 16 * GB), HdQuality::Best);
+        assert_eq!(suggest_quality("Some Unknown Card", 16 * GB), HdQuality::Fast);
+    }
+
+    #[test]
+    fn presets_match_setup_ps1() {
+        let names: Vec<&str> = HdQuality::ALL.iter().map(|q| q.arg()).collect();
+        assert_eq!(names, ["fast", "balanced", "best"]);
+        let setup = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../setup.ps1")).unwrap();
+        assert!(setup.contains(r#"[ValidateSet("", "fast", "balanced", "best")][string]$HdQuality"#));
+    }
+
+    #[test]
+    fn estimate_is_slower_on_a_small_card() {
+        let strong = ("NVIDIA GeForce RTX 3070".to_string(), 8 * GB);
+        let small = ("NVIDIA GeForce GTX 1060".to_string(), 6 * GB);
+        assert_eq!(HdQuality::Balanced.estimate(Some(&strong)), "about 25 min, 1.4 GB");
+        assert_eq!(HdQuality::Balanced.estimate(Some(&small)), "about 45 min, 1.4 GB");
+        assert_eq!(HdQuality::Fast.estimate(None), "about 20 min, 0.6 GB");
     }
 }

@@ -15,7 +15,8 @@ once; --match-colour matches each image's colour as it is made. Beside the
 game (TODO 219): it waits while <hd-dir>/.game_running says the game runs,
 unless <hd-dir>/hd_options.json says "while_playing": true (then the
 upscaler runs at idle CPU and GPU priority), and keeps
-<hd-dir>/upscale_status.json up to date. --quality fast: tier_rules.FAST_TIERS.
+<hd-dir>/upscale_status.json up to date. --quality fast / balanced / best:
+how much each kind of texture is enlarged (tier_rules.PRESETS).
 
 Backends (--backend, default = the model's own backend, else ncnn):
   ncnn      realesrgan-ncnn-vulkan.exe, batch directory mode (AMD via Vulkan).
@@ -256,7 +257,8 @@ def sample_srcs(srcs, n, seed):
     return keep
 
 
-def plan_jobs(srcs, model_override, alpha_mode, notes, requested_backend=None, quality="best"):
+def plan_jobs(srcs, model_override, alpha_mode, notes, requested_backend=None,
+              quality=tier_rules.DEFAULT_QUALITY):
     by_sha = defaultdict(list)
     for s in srcs:
         by_sha[s.sha1].append(s)
@@ -268,22 +270,24 @@ def plan_jobs(srcs, model_override, alpha_mode, notes, requested_backend=None, q
         if len(tiers) > 1:
             notes.append(f"dup spans tiers {sorted(tiers)} -> {tier}: "
                          f"{group[0].relpath} (+{len(group) - 1})")
-        cfg = tier_rules.tiers_for(quality)[tier]
+        cfg = tier_rules.TIERS[tier]
+        category = min({tier_rules.category_for(s.relpath) for s in group},
+                       key=lambda c: tier_rules.CATEGORY_RANK[c])
         w, h = group[0].w, group[0].h
         long_edge = max(w, h)
+        target, passes_cap = tier_rules.target_for(quality, category, tier, long_edge)
         model = cfg["model"]
         if long_edge <= cfg.get("small_max", 0):
             model = cfg["small_model"]
         model = model_override or model
         backend = resolve_backend(model, requested_backend)
-        target = cfg["target_long"]
         if backend == "pil":
             passes = 0
-            final_long = min(target, long_edge * 4 ** cfg["passes_cap"])
+            final_long = min(target, long_edge * 4 ** passes_cap)
         else:
             needed = target / long_edge
             passes = 1 if needed <= 1 else min(
-                cfg["passes_cap"], max(1, math.ceil(math.log(needed, 4))))
+                passes_cap, max(1, math.ceil(math.log(needed, 4))))
             final_long = min(target, long_edge * 4 ** passes)
         final_long = max(final_long, long_edge)  # never below source size
         f = final_long / long_edge
@@ -328,8 +332,11 @@ def job_done(job, recs, out_root, settings, also_good=()):
     # (TODO 241: a texture this card could not make well is left to the game's own image, not tried each run)
     if r.get("fallback") == "none" and r.get("settings") == settings:
         return True
-    # (A Fast run keeps the images a Best run made already: better ones, not made again.)
-    if (r.get("settings") in also_good and sorted(r.get("relpaths", [])) == job.relpaths
+    # (An image another preset, or a set from before the presets, made at this size already is kept as it is.
+    # Larger ones are shrunk first: shrink_larger.)
+    if (r.get("settings") in also_good and r.get("fallback") != "none"
+            and r.get("out") == [job.out_w, job.out_h]
+            and sorted(r.get("relpaths", [])) == job.relpaths
             and all((out_root / rp).is_file() for rp in r["relpaths"])):
         return True
     if (r.get("settings") != settings or r.get("model") != job.model
@@ -344,6 +351,108 @@ def job_done(job, recs, out_root, settings, also_good=()):
     if "backend" in r and r["backend"] != job.backend:
         return False
     return all((out_root / rp).is_file() for rp in r["relpaths"])
+
+
+def shrink_candidates(jobs, recs, out_root, also_good):
+    """(PR #20) The jobs whose image another preset, or a set from before the presets, made larger than this preset's:
+    shrunk instead of kept (the space) or made again (the time)."""
+    out = []
+    for job in jobs:
+        r = recs.get(job.sha1)
+        if not r or r.get("settings") not in also_good or r.get("fallback") == "none" or job.alpha_mode == "pil":
+            continue
+        ow, oh = (r.get("out") or [0, 0])[:2]
+        if (ow * oh > job.out_w * job.out_h and ow >= job.out_w and oh >= job.out_h
+                and sorted(r.get("relpaths", [])) == job.relpaths
+                and all((out_root / rp).is_file() for rp in r["relpaths"])):
+            out.append(job)
+    return out
+
+
+def shrink_one(job, rec, out_root, backup_root, settings):
+    """One larger image down to the job's size, the way a fresh run makes it (Lanczos from the larger image, which is
+    how 8x comes from 16x), from the colour match's original when there is one. Checked like a new image; written to
+    every duplicate. Returns the manifest record, or raises BadColours (broken: its record is dropped, made again)."""
+    first = job.relpaths[0]
+    orig = backup_root / first
+    with Image.open(orig if orig.is_file() else out_root / first) as im:
+        out = im.convert("RGBA").resize((job.out_w, job.out_h), Image.LANCZOS)
+    if job.alpha == "binary":
+        out.putalpha(out.getchannel("A").point(lambda v: 255 if v >= 128 else 0))
+    if alpha_class(out) != job.alpha:
+        with Image.open(job.srcs[0].path) as src:
+            out.putalpha(src.convert("RGBA").getchannel("A").resize(out.size, Image.LANCZOS))
+    _d, _ds, why = judge_output(out, job.srcs[0].path)
+    if why:
+        raise BadColours(f"broken: {why}")
+    buf = io.BytesIO()
+    out.save(buf, "PNG")
+    data = buf.getvalue()
+    for rp in job.relpaths:
+        dest = out_root / rp
+        tmp = dest.with_name(dest.name + ".tmp")
+        tmp.write_bytes(data)
+        for attempt in range(20):  # (the game reading the old file a moment: Windows refuses the swap meanwhile)
+            try:
+                os.replace(tmp, dest)
+                break
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.1)
+        (backup_root / rp).unlink(missing_ok=True)  # (the larger original: matched again below, from this one)
+    new = {k: v for k, v in rec.items() if k not in ("colour", "ts", "out", "out_sha1", "settings", "shrunk_from")}
+    new.update({"model": job.model, "passes": job.passes, "out": [job.out_w, job.out_h],
+                "out_sha1": hashlib.sha1(data).hexdigest(), "settings": settings, "shrunk_from": rec.get("out"),
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    return new
+
+
+def shrink_larger(jobs, recs, out_root, backup_root, native_root, settings, also_good, mc=None, status=None):
+    """(PR #20) Every image made larger than the chosen preset's, shrunk to it on the CPU (a few minutes; no GPU), so a
+    smaller preset, or an update from the larger sets made before the presets, gives the space back. Colour matched
+    again (match_colour, from the shrunk image). A broken one loses its record and is made again. Returns (shrunk,
+    broken) and updates recs."""
+    cands = shrink_candidates(jobs, recs, out_root, also_good)
+    if not cands:
+        return 0, 0
+    from concurrent.futures import ThreadPoolExecutor
+    import match_colour
+    ledger = match_colour.load_ledger(str(backup_root))
+    before = sum((out_root / rp).stat().st_size for j in cands for rp in j.relpaths)
+    print(f"HD textures: adjusting {len(cands)} images to the preset: shrinking them on the processor (no graphics "
+          f"card needed, a few minutes)", flush=True)
+    shrunk = broken = 0
+    t0 = time.time()
+    with open(out_root / MANIFEST_NAME, "a", encoding="utf-8") as mf, \
+            ThreadPoolExecutor(max_workers=max(1, min(8, (os.cpu_count() or 2) - 1))) as pool:
+        futs = [(j, pool.submit(shrink_one, j, recs[j.sha1], out_root, backup_root, settings)) for j in cands]
+        for i, (job, fut) in enumerate(futs, 1):
+            try:
+                rec = fut.result()
+            except BadColours as e:
+                print(f"  {job.srcs[0].relpath}: {e}: made again", flush=True)
+                recs.pop(job.sha1, None)
+                broken += 1
+                continue
+            for rp in job.relpaths:
+                ledger.pop(rp, None)
+                if mc is not None:
+                    mc.match_file(rp, str(out_root / rp), str(native_root), str(backup_root), ledger, note_checked=True)
+            mf.write(json.dumps(rec) + "\n")
+            recs[job.sha1] = rec
+            shrunk += 1
+            if i % 50 == 0 or i == len(futs):
+                mf.flush()
+                match_colour.save_ledger(str(backup_root), ledger)
+                if status:
+                    el = time.time() - t0
+                    status(i, len(futs), "" if i == len(futs) else
+                           f", about {max(1, round(el / i * (len(futs) - i) / 60))} min left")
+    after = sum((out_root / rp).stat().st_size for j in cands if j.sha1 in recs for rp in j.relpaths)
+    print(f"HD textures: {shrunk} images shrunk ({before / 2**30:.2f} GB -> {after / 2**30:.2f} GB)"
+          + (f", {broken} broken ones to make again" if broken else ""), flush=True)
+    return shrunk, broken
 
 
 def expected_stems(job):
@@ -658,6 +767,10 @@ COLOUR_BAD = 20.0
 SWAP_CLEAR = 8.0
 COLOUR_STATS = {"swapped": 0, "ok": 0, "broken": 0, "good": 0}
 CARD_BROKEN_EXIT = 3
+# (0.7.0) The graphics driver was reset even with the smallest pieces: this run stopped with images left to make. The
+# set is NOT finished (make_hd_textures.ps1 leaves it unfinished, so the next run - the game's start, an update, F1 -
+# carries on); 0.6.9 marked such a set done with two thirds of it missing.
+STOPPED_BY_RESETS_EXIT = 5
 PROBE_N = 4
 
 
@@ -1520,9 +1633,9 @@ def main():
     ap.add_argument("--force", action="store_true",
                     help="redo jobs even if manifest says done")
     ap.add_argument("--keep-work", action="store_true")
-    ap.add_argument("--quality", choices=tier_rules.QUALITIES, default="best",
-                    help="best: characters 4K, two passes where they help; fast: characters 2K, one pass, "
-                         "a lighter network for the levels")
+    ap.add_argument("--quality", choices=tier_rules.QUALITIES, default=tier_rules.DEFAULT_QUALITY,
+                    help="how much each kind of texture is enlarged (tier_rules.PRESETS): fast (Steam Deck, "
+                         "1080p: one pass except the player), balanced (1440p), best (4K)")
     ap.add_argument("--batch-files", type=int, default=64,
                     help="images per upscaler run (the order and the pause work batch by batch)")
     ap.add_argument("--batch-mp", type=float, default=160.0,
@@ -1530,6 +1643,10 @@ def main():
     ap.add_argument("--hd-dir", type=Path, default=None,
                     help="the HD set's folder (default: --out's parent): .game_running, hd_options.json, "
                          "upscale_status.json")
+    ap.add_argument("--gentle", action="store_true",
+                    help="easy on the graphics card (TODO 310): small batches in small pieces, each followed by a rest "
+                         "as long as it took, so the card is never at full power for minutes; about three times as slow. "
+                         "Also on when hd_options.json says \"gentle\": true")
     ap.add_argument("--no-wait-for-game", action="store_true",
                     help="never wait while the game runs")
     ap.add_argument("--game-pid", type=int, default=0,
@@ -1592,8 +1709,15 @@ def main():
         sys.exit(1 if errors else 0)
 
     settings = tier_rules.settings_hash(args.quality)
-    also_good = {tier_rules.settings_hash("best")} if args.quality == "fast" else set()
+    also_good = tier_rules.known_settings() - {settings}
     recs = load_manifest(args.out)
+    if not args.force:
+        mc0 = None
+        if args.match_colour:
+            import match_colour as mc0
+        shrink_larger(jobs, recs, args.out, args.out.parent / "upscaled_precolour", args.src, settings, also_good,
+                      mc=mc0, status=lambda i, n, left="": print(f"HD textures: adjusting to the preset, {i} of {n} shrunk{left}",
+                                                                 flush=True))
     todo = [j for j in jobs
             if args.force or not job_done(j, recs, args.out, settings, also_good)]
     print(f"to do: {len(todo)} uniques ({len(jobs) - len(todo)} already done)")
@@ -1607,6 +1731,19 @@ def main():
 
     def status(state, made):
         write_status(status_path, state=state, done=made, total=total, quality=args.quality)
+
+    # (TODO 310) Easy on the graphics card: a player's PC restarted under the upscaler's full load for minutes. Small
+    # batches (a few seconds of work each), small pieces, the card's lowest priority, and after each pass a rest as
+    # long as the pass took: the card works about half of the time, in short bursts. About three times as slow (a Fast set: 38 min
+    # instead of 12 on an RX 7900 XTX).
+    gentle_card = bool(args.gentle or read_options(options_path).get("gentle"))
+    if gentle_card:
+        args.batch_files = min(args.batch_files, 8)
+        args.batch_mp = min(args.batch_mp, 16.0)
+        if not args.tile or args.tile > TILE_STEPS[0]:
+            args.tile = TILE_STEPS[0]
+        print(f"note: easy on the graphics card (TODO 310): small batches in pieces of {args.tile} pixels, each "
+              f"followed by a rest as long as it took", flush=True)
 
     # (TODO 289) Graphics driver resets: the upscaler works in pieces (tiles) of the image, each one long job for the
     # graphics card; one that runs over Windows' 2 seconds is taken as a hung card and the driver is reset (the screen
@@ -1692,6 +1829,7 @@ def main():
     tried = set()     # (the safer ways tried so far)
     probed = [False]
     card_broken = [False]
+    stopped_by_resets = [False]
     batch_bad = [False]
     had_images = set_has_images(args.out)
 
@@ -1912,7 +2050,7 @@ def main():
                         tile = args.tile  # (TODO 289: pieces made smaller after a driver reset)
                     rc, err, stopped = run_binary(args.exe, cur, nxt, model, tile, gpu,
                                                   stop=game_gone if args.game_pid else (None if gentle else should_stop),
-                                                  gentle=gentle)
+                                                  gentle=gentle or gentle_card)
                     if not gpu_name[0]:
                         gpus = parse_gpus(err)
                         if gpus:
@@ -1933,8 +2071,11 @@ def main():
                 if stopped:
                     break
                 n_out = sum(1 for _ in nxt.glob("*.png"))
+                took = time.time() - t0
                 print(f"  {backend}:{model} p{passes} pass {i}: {n_out} files "
-                      f"in {time.time() - t0:.0f}s (rc={rc})", flush=True)
+                      f"in {took:.0f}s (rc={rc})", flush=True)
+                if gentle_card and backend == "ncnn":
+                    time.sleep(min(60.0, max(1.0, took)))  # (TODO 310: the card rests as long as it worked)
                 cur = nxt
             if stopped:  # (the game started: this batch again, once it may)
                 shutil.rmtree(gdir, ignore_errors=True)
@@ -1947,6 +2088,7 @@ def main():
                     print("note: the graphics driver was reset even with the smallest pieces: no more HD textures are "
                           "made on this card in this run (what is made is kept; the next run carries on)", flush=True)
                     status("working", done_before + done)
+                    stopped_by_resets[0] = True
                     break
                 args.tile = smaller
                 if setup[0]:
@@ -1966,7 +2108,7 @@ def main():
         # The broken images: again with a small tile (another path through the upscaler on the card), then with the
         # lighter network; failing both, no HD image (the game's own texture is drawn).
         # (A card that gives nothing good: they stay to be made by a later run.)
-        for job in [] if card_broken[0] else redo:
+        for job in [] if (card_broken[0] or stopped_by_resets[0]) else redo:  # (after resets: left for the next run)
             rec = None
             gpu = setup[0]["gpu"] if setup[0] else args.gpu
             tries = [(job.model, 32, "tile 32")]
@@ -2023,6 +2165,12 @@ def main():
         print(f"upscaled {done}/{len(todo)} uniques: this graphics card gives broken images "
               f"({gpu_name[0] or 'unknown'})")
         sys.exit(CARD_BROKEN_EXIT)
+    if stopped_by_resets[0]:
+        # (the images left are made by the next run: the set stays "working", never "upscaled" / "done")
+        status("working", done_before + done)
+        print(f"upscaled {done}/{len(todo)} uniques: stopped after graphics driver resets; the next run carries on "
+              f"({done_before + done} of {total} made)", flush=True)
+        sys.exit(STOPPED_BY_RESETS_EXIT)
     status("upscaled" if not errors else "upscaled_with_errors", done_before + done)
     total_outputs = sum(len(j.relpaths) for j in todo) - len(errors)
     print(f"upscaled {done}/{len(todo)} uniques -> ~{total_outputs} files, "

@@ -281,6 +281,13 @@ $needBuild = @($changed | Where-Object {
     $path.StartsWith($pre) -and -not ($noBuild | Where-Object { $path.Substring($pre.Length) -like $_ })
 })
 $needTextures = @($changed | Where-Object { $_ -like "${pre}tools/hd_textures/*" -or $_ -like "${pre}tools/make_hd_textures.ps1" })
+# (PR #20) The HD textures preset chosen (hd_options.json: the setup's update screen, F1 > Graphics) is not the one the
+# set was made for: the HD step runs too, and shrinks or makes what the chosen one needs.
+try {
+    $hdOpt = Get-Content (Join-Path $Port "hd_textures\hd_options.json") -Raw -ErrorAction Stop | ConvertFrom-Json
+    $hdSt = Get-Content (Join-Path $Port "hd_textures\upscale_status.json") -Raw -ErrorAction Stop | ConvertFrom-Json
+    if ($hdOpt.quality -and $hdSt.quality -and "$($hdOpt.quality)" -ne "$($hdSt.quality)") { $needTextures += "hd_options.json" }
+} catch {}
 
 if ($needBuild -and $Binaries) {
     # Prebuilt binaries (a test, or binaries made elsewhere for this very commit): copied instead of a
@@ -314,7 +321,9 @@ if ($needBuild -and $Binaries) {
     if (-not $?) { Fail "the build failed (see above)" }
 }
 if ($needTextures -and (Test-Path (Join-Path $Port "hd_textures"))) {
-    Step "Updating the HD textures" "HD textures"
+    # (0.7.0, PR #20: a set made before the presets, or for another preset, is adjusted here - most images shrunk on the
+    # processor, a few made on the graphics card; the lines below count them, with the time left)
+    Step "Updating the HD textures (adjusting them to your preset; this can take some minutes)" "HD textures"
     # (TODO 124: the first time the colour match is there - its record, colour_gains.json, not made yet - it goes
     # through every level's HD image once, and the renderer compresses the changed ones again on their first use.
     # make_hd_textures.ps1 says the same itself: this update.ps1 runs as it was before the pull.)

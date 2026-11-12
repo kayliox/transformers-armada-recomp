@@ -2016,12 +2016,24 @@ namespace mod_menu
                             ImGui::TextDisabled("%s", l.c_str());
                         ImGui::PopTextWrapPos();
                     }
+                    // (PR #20) The preset: saved to hd_options.json, and the small window shrinks or makes what it needs.
+                    const int preset = hd_progress::presetIndex();
+                    const int picked = menu_style::choiceRow(
+                        "hd_preset", "HD texture preset", {"Fast", "Balanced", "Best"}, preset, true, nullptr,
+                        "How much the HD textures are enlarged. Fast: Steam Deck and 1080p, about 0.6 GB. Balanced: 1440p, "
+                        "about 1.4 GB. Best: 4K, about 2.3 GB. A smaller one shrinks the set in a few minutes (no graphics "
+                        "card needed); a larger one makes what it needs on the graphics card.");
+                    if (picked >= 0 && picked != preset)
+                    {
+                        note = hd_progress::setPreset(picked);
+                        noteAt = ImGui::GetTime();
+                    }
                     if (!note.empty() && ImGui::GetTime() - noteAt < 10.0)
                         ImGui::TextDisabled("%s", note.c_str());
                     }
                 }
                 else
-                    listItem("Open texture folder, Make / Verify HD textures, Remake broken images (buttons)");
+                    listItem("Open texture folder, Make / Verify HD textures, Remake broken images (buttons), HD texture preset");
             }
             keyRow("TF_SMOOTH_TEXTURES");
             keyRow("TF_NATIVE_BLOOM"); // (Glow)

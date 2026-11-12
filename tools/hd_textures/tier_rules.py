@@ -94,21 +94,99 @@ def tier_for(relpath):
     raise ValueError(f"no tier rule matches: {relpath}")
 
 
-def settings_hash(quality="best"):
+# ---- The presets ("HD textures: Fast / Balanced / Best" in the setup, PR #20) ----
+# How much each kind of texture is enlarged, from the game's own size, measured in
+# docs/HD_UPSCALE_RATIOS.md (measure_upscale_ratios.py): the smallest ratio after which the next
+# 2x step is invisible for 90% of a category at its closest typical view, with the second pass
+# kept only where the screen has room for it. Fast is aimed at the Steam Deck and 1080p,
+# Balanced at 1440p, Best at 4K.
+#   2x and 4x: one 4x pass of the tier's model (2x scaled down from it).
+#   8x and 16x: two chained passes (8x scaled down from 16x).
+# Every result is capped at MAX_LONG on the long edge (as before), and never below the source.
+# The categories are finer than the tiers: the tiers still choose the model (TIERS above).
+CATEGORY_RULES = [
+    ("font",    "prefix",   "TFA2/FONTS/"),
+    ("ui",      "contains", "/USERINTERFACE/"),
+    ("ui",      "prefix",   "TFA2/HUD/"),
+    ("ui",      "prefix",   "TA_XTRAS/"),
+    ("minicon", "contains", "/MINICONS/"),
+    ("player",  "prefix",   "TFA/ANIMATION/TRANSFORMERS/"),   # Hot Shot, Optimus, Red Alert (+ select screen)
+    ("enemy",   "prefix",   "TFA/ANIMATION/"),                # Decepticons, drones, bosses, ships
+    ("enemy",   "prefix",   "TFA2/ANIMATION/MISCELLANEOUS/"),
+    ("fx",      "prefix",   "TFA2/ANIMATION/EXPLOSIONS/"),
+    ("fx",      "prefix",   "TFA2/FXTXTR/"),
+    ("fx",      "prefix",   "TFA/PICKUPS/"),
+    ("foliage", "contains", "/ECOSYSTEM/"),
+    ("foliage", "prefix",   "TFA2/ECOTEXTURES/"),
+    ("sky",     "prefix",   "TFA2/SKY/"),
+    ("sky",     "prefix",   "TFA2/REFLECTIONS/"),
+    ("terrain", "prefix",   "TFA/LEVELS/"),                   # level geometry and detail maps
+]
+# A texture no category rule names takes its tier's category.
+TIER_CATEGORY = {"hero": "enemy", "env": "terrain", "props": "fx", "ui": "ui", "ui_font": "font"}
+# When byte-identical copies sit in folders of different categories, the first of these wins.
+CATEGORY_ORDER = ["player", "enemy", "minicon", "terrain", "foliage", "sky", "fx", "ui", "font"]
+CATEGORY_RANK = {c: i for i, c in enumerate(CATEGORY_ORDER)}
+
+MAX_LONG = 4096
+PRESETS = {
+    #            player enemy minicon terrain foliage sky fx  ui  font
+    "fast":     {"player": 8,  "enemy": 4, "minicon": 4, "terrain": 4, "foliage": 4, "sky": 4,
+                 "fx": 4, "ui": 2, "font": 2},
+    # (Balanced: the characters fought and collected one pass, 4x; the levels around them 8x)
+    "balanced": {"player": 8,  "enemy": 4, "minicon": 4, "terrain": 8, "foliage": 8, "sky": 8,
+                 "fx": 4, "ui": 2, "font": 2},
+    "best":     {"player": 16, "enemy": 8, "minicon": 8, "terrain": 8, "foliage": 8, "sky": 8,
+                 "fx": 8, "ui": 4, "font": 4},
+}
+QUALITIES = ("fast", "balanced", "best")
+DEFAULT_QUALITY = "balanced"
+
+# What the setup shows beside each choice (docs/HD_UPSCALE_RATIOS.md, RTX 3070): the HD set in the
+# renderer's form (BC7 with mipmaps), and the making time on that card (one pass over everything
+# about 9 min, most of it start-up and remaking broken images; plus the second pass). An average
+# PC takes about 1.5-2 times as long.
+ESTIMATES = {
+    "fast":     {"gb": 0.57, "minutes_rtx3070": 10},
+    "balanced": {"gb": 1.44, "minutes_rtx3070": 25},
+    "best":     {"gb": 2.3,  "minutes_rtx3070": 33},
+}
+
+
+def category_for(relpath):
+    """The measured category of a texture (finer than tier_for)."""
+    r = relpath.replace("\\", "/").upper()
+    probe = "/" + r
+    for cat, kind, pat in CATEGORY_RULES:
+        if (kind == "prefix" and r.startswith(pat)) or (kind == "contains" and pat in probe):
+            return cat
+    return TIER_CATEGORY[tier_for(relpath)]
+
+
+def preset_for(quality):
+    if quality not in PRESETS:
+        raise ValueError(f"unknown quality: {quality}")
+    return PRESETS[quality]
+
+
+def target_for(quality, category, tier, long_edge):
+    """(target long edge, max chained 4x passes) for one texture under a preset."""
+    ratio = preset_for(quality)[category]
+    passes_cap = min(TIERS[tier]["passes_cap"], 1 if ratio <= 4 else 2)
+    return min(MAX_LONG, max(long_edge, long_edge * ratio)), passes_cap
+
+
+def settings_hash(quality=DEFAULT_QUALITY):
     """Short hash of the effective config; stamped into every manifest
-    record so config changes invalidate previously-upscaled files.
-    (The "best" hash is computed exactly as before the Fast choice existed,
-    so a set made before it is not made again.)"""
-    blob = repr((RULES, sorted(tiers_for(quality).items()), ALPHA_MODE)).encode()
+    record so config changes invalidate previously-upscaled files."""
+    blob = repr(("presets-1", RULES, sorted(TIERS.items()), CATEGORY_RULES, MAX_LONG,
+                 sorted(preset_for(quality).items()), ALPHA_MODE)).encode()
     return hashlib.sha1(blob).hexdigest()[:12]
 
 
-# ---- The quality choice ("HD textures: Best / Fast" in the setup) ----
-# Fast: one 4x pass everywhere, never a second (the second pass runs on an
-# image 16 times the size: 85% of Best's time on a GTX 1080). The same network
-# as Best: the lighter realesr-animevideov3 saved nothing measurable (the first
-# pass is seconds) and smeared the level textures (TODO 219).
-FAST_TIERS = {
+# ---- Before the presets: "Best / Fast" by tier (kept to recognise the sets they made) ----
+# Fast was one 4x pass everywhere: characters up to 2K, levels up to 1K.
+LEGACY_FAST_TIERS = {
     "hero":    {"target_long": 2048, "model": "realesrgan-x4plus", "passes_cap": 1,
                 "small_max": 32, "small_model": "realesr-animevideov3"},
     "env":     {"target_long": 1024, "model": "realesrgan-x4plus", "passes_cap": 1,
@@ -119,15 +197,18 @@ FAST_TIERS = {
                 "small_max": 32, "small_model": "pil-lanczos"},
     "ui_font": {"target_long": 1024, "model": "realesrgan-x4plus", "passes_cap": 1},
 }
-QUALITIES = ("best", "fast")
 
 
-def tiers_for(quality="best"):
-    if quality == "fast":
-        return FAST_TIERS
-    if quality != "best":
-        raise ValueError(f"unknown quality: {quality}")
-    return TIERS
+def legacy_settings_hash(quality):
+    """The hash a Best / Fast set made before the presets carries (computed exactly as then)."""
+    tiers = {"best": TIERS, "fast": LEGACY_FAST_TIERS}[quality]
+    blob = repr((RULES, sorted(tiers.items()), ALPHA_MODE)).encode()
+    return hashlib.sha1(blob).hexdigest()[:12]
+
+
+def known_settings():
+    """Every settings hash whose images can stand in for another preset's when they are at least as large."""
+    return {settings_hash(q) for q in QUALITIES} | {legacy_settings_hash(q) for q in ("best", "fast")}
 
 
 # ---- The order the textures are made in ----

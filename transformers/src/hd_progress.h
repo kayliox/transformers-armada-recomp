@@ -84,6 +84,12 @@ namespace hd_progress
     VerifyState verifyState();
     std::string verifyHdTextures();
     std::string remakeBroken();
+    // (PR #20) F1 > Graphics, "HD texture preset": 0 Fast, 1 Balanced, 2 Best, as hd_textures\hd_options.json says
+    // (Balanced when it says none). setPreset saves another one and starts the small window, which shrinks the images
+    // larger than the new preset needs and makes the ones it needs larger (a finished set for another preset counts
+    // as unfinished, so the next start carries on too). Returns a line for the menu ("" when nothing changed).
+    int presetIndex();
+    std::string setPreset(int index);
     // F1 > Display, "Sharp text": whether its fonts were made (hd_textures\crisp_fonts). Checked at most every 2 s.
     bool crispFontsFound();
 }

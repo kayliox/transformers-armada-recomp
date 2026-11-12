@@ -67,8 +67,8 @@ fn prepare(opts: &Options, revision: Option<String>) -> Result<(), String> {
     if !opts.iso.is_file() { return Err("The selected disc image is missing. Choose your USA ISO again.".into()); }
     let job = Job {
         repo_url: REPO_URL.into(), mods: false, retail: opts.iso.to_string_lossy().into_owned(),
-        prototype: String::new(), folder: opts.folder.clone(), hd: false, hd_fast: false,
-        hd_while_playing: false, child: Arc::new(Mutex::new(None)), update: false,
+        prototype: String::new(), folder: opts.folder.clone(), hd: false, hd_quality: HdQuality::Fast,
+        hd_while_playing: false, hd_gentle: false, child: Arc::new(Mutex::new(None)), update: false,
         play: false, wait_pid: 0, source_ref: revision, managed: true,
     };
     let (tx, rx) = channel();

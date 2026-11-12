@@ -1,5 +1,24 @@
 # What's new
 
+## 0.7.0
+
+**New**
+- HD texture presets: Fast, Balanced and Best. Choose one in the setup window (it suggests one for your graphics
+  card), on its update screen, or later in F1 > Graphics > HD texture preset. Fast is about 0.6 GB and the quickest
+  to make, Balanced (the default) about 1.4 GB, Best about 2.3 GB. Each kind of texture is now enlarged only as far
+  as it visibly needs, so the sets are smaller and quicker to make. Thanks to galaxyisme.
+- Setup: "Go easy on my graphics card", for a PC that restarts or freezes while the HD textures are made. The
+  graphics card then works in short bursts with rests in between; making them takes about three times as long.
+
+**Changed**
+- Best now uses a size for each kind of texture instead of the largest size for all of them, so an existing HD set
+  becomes smaller. The update adjusts it once: most images are shrunk on the processor in a few minutes and a few
+  are made again on the graphics card. Changing the preset later only shrinks or makes what changes.
+
+**Fixed**
+- HD textures: when the graphics driver kept resetting while they were made, the set was marked finished with many
+  of them missing. It now stays unfinished, and the next start of the game (or an update) makes the rest.
+
 ## 0.6.9
 
 **Fixed**

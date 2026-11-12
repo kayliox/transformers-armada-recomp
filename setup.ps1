@@ -12,10 +12,12 @@
        exe. The first build takes 15-25 minutes.
     3. Makes the HD textures (tools\make_hd_textures.ps1): every texture upscaled on your GPU, tens of
        minutes to a few hours. -SkipHdTextures leaves the upscale out and makes only the sharp fonts
-       and button prompts (the game then shows its original textures). -HdQuality fast: 2K characters
-       and one pass, several times quicker. The game can be played meanwhile: the upscale waits while
-       it runs (-HdWhilePlaying on: it carries on, gently) and an unfinished set is carried on by the
-       game itself, in a small window (tools\make_hd_textures.ps1 -Resume).
+       and button prompts (the game then shows its original textures). -HdQuality fast / balanced /
+       best: how much the textures are enlarged (fast: for the Steam Deck and 1080p, about 0.6 GB and
+       one pass for most; balanced, the default: 1440p, about 1.4 GB; best: 4K, about 2.3 GB). The
+       game can be played meanwhile: the upscale waits while it runs (-HdWhilePlaying on: it carries on,
+       gently) and an unfinished set is carried on by the game itself, in a small window
+       (tools\make_hd_textures.ps1 -Resume).
     4. Remembers your disc path in .setup.json (git-ignored) for update.ps1.
 
     Everything made from your disc stays on your PC: the folders it writes are git-ignored. Never
@@ -32,8 +34,9 @@
 param(
     [string]$Iso,
     [switch]$SkipHdTextures,
-    [ValidateSet("", "best", "fast")][string]$HdQuality = "",   # HD textures: best (4K characters) or fast
+    [ValidateSet("", "fast", "balanced", "best")][string]$HdQuality = "",   # HD textures preset (PR #20)
     [ValidateSet("", "on", "off")][string]$HdWhilePlaying = "", # keep making them while the game runs
+    [ValidateSet("", "on", "off")][string]$HdGentle = "",       # (TODO 310) easy on the graphics card: rests, about three times as slow
     [switch]$InstallPrerequisites,
     [string]$Root,                 # the git repository's top (default: this folder)
     [string]$Hooks,                # a script with extra steps (Invoke-SetupHook), dot-sourced
@@ -162,16 +165,17 @@ if ($SkipHdTextures) {
 } else {
     # (TODO 219) The choices, kept in hd_textures\hd_options.json: the upscale reads them (the "while playing" one
     # at every batch), and the game's own window that carries on with an unfinished set.
-    if ($HdQuality -or $HdWhilePlaying) {
+    if ($HdQuality -or $HdWhilePlaying -or $HdGentle) {
         $hdDir = Join-Path $Port "hd_textures"
         New-Item -ItemType Directory -Force $hdDir | Out-Null
         $optFile = Join-Path $hdDir "hd_options.json"
-        $opt = [ordered]@{ quality = "best"; while_playing = $false }
+        $opt = [ordered]@{ quality = "balanced"; while_playing = $false; gentle = $false }
         if (Test-Path $optFile) {
-            try { $o = Get-Content $optFile -Raw | ConvertFrom-Json; $opt.quality = "$($o.quality)"; $opt.while_playing = [bool]$o.while_playing } catch {}
+            try { $o = Get-Content $optFile -Raw | ConvertFrom-Json; $opt.quality = "$($o.quality)"; $opt.while_playing = [bool]$o.while_playing; $opt.gentle = [bool]$o.gentle } catch {}
         }
         if ($HdQuality) { $opt.quality = $HdQuality }
         if ($HdWhilePlaying) { $opt.while_playing = ($HdWhilePlaying -eq "on") }
+        if ($HdGentle) { $opt.gentle = ($HdGentle -eq "on") }
         [System.IO.File]::WriteAllText($optFile, ($opt | ConvertTo-Json))
     }
     Step "Making the HD textures (tools\make_hd_textures.ps1)"
@@ -188,4 +192,4 @@ if (Get-Command Invoke-SetupHook -ErrorAction SilentlyContinue) {
 $state | Add-Member -Force SetUpAt (& git -C $Root rev-parse HEAD)
 Add-DesktopShortcutOnce -Repo $Root -Port $Port
 $state | ConvertTo-Json | Set-Content $StateFile -Encoding UTF8
-Write-Host "`nReady. Play with Play.bat in $Root. Settings: F5 in the game." -ForegroundColor Green
+Write-Host "`nReady. Play with Play.bat in $Root. Settings: F1 in the game." -ForegroundColor Green

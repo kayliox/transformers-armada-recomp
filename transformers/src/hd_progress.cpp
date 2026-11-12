@@ -79,6 +79,7 @@ namespace hd_progress
             bool ok = false;
             std::string state;
             long long done = 0, total = 0;
+            std::string quality; // (PR #20) the preset the set was made for ("" in sets from before)
         };
 
         // A field of the status file (a flat JSON object the tools write): its text, quotes taken off.
@@ -117,8 +118,39 @@ namespace hd_progress
             s.state = field(text, "state");
             s.done = std::atoll(field(text, "done").c_str());
             s.total = std::atoll(field(text, "total").c_str());
+            s.quality = field(text, "quality");
             s.ok = !s.state.empty();
             return s;
+        }
+
+        // (PR #20) The presets, as tools/hd_textures/tier_rules.py QUALITIES names them, and the one hd_options.json
+        // chooses (Balanced when it says none or one this build does not know).
+        const char *const kPresets[] = {"fast", "balanced", "best"};
+
+        std::string optionsText(const fs::path &dir)
+        {
+            std::ifstream o(dir / "hd_options.json", std::ios::binary);
+            std::stringstream ss;
+            ss << o.rdbuf();
+            return ss.str();
+        }
+
+        int chosenPreset(const fs::path &dir)
+        {
+            const std::string q = field(optionsText(dir), "quality");
+            for (int i = 0; i < 3; ++i)
+                if (q == kPresets[i])
+                    return i;
+            return 1;
+        }
+
+        // (PR #20) A finished set made for another preset than the one chosen (F1 > Graphics, the setup): not finished
+        // for the game - the maker shrinks or makes what the new preset needs.
+        bool upToDate(const Status &s, const fs::path &dir)
+        {
+            if (s.ok && s.state == "done" && !s.quality.empty() && s.quality != kPresets[chosenPreset(dir)])
+                return false;
+            return s.ok && (s.state == "done" || s.state == "card_broken");
         }
 
         // (card_broken, TODO 242: this graphics card's upscales come out broken in every way the upscaler has, so
@@ -403,8 +435,8 @@ namespace hd_progress
         std::error_code ec;
         const bool unchecked = s.state == "done" && fs::exists(g_dir / "upscaled" / "upscale_manifest.jsonl", ec) &&
                                !fs::exists(g_dir / ".images_checked_3", ec);
-        if (finished(s) && !unchecked)
-            return; // (a finished set: nothing to do)
+        if (upToDate(s, g_dir) && !unchecked)
+            return; // (a finished set, for the preset chosen: nothing to do)
         std::fprintf(stderr, unchecked ? "[hd textures] checking the set's images once (%lld of %lld, %s)\n"
                                        : "[hd textures] being made: %lld of %lld (%s)\n",
                      s.done, s.total, s.state.c_str());
@@ -430,8 +462,9 @@ namespace hd_progress
         const fs::path dir = g_dir.empty() ? fs::absolute(fs::path("hd_textures"), ec) : g_dir;
         const Status s = readStatus(dir / "upscale_status.json");
         // (TODO 281) A finished set: Verify (it reports, nothing changed). A set this card made broken, or set aside
-        // (TODO 242 / 259): Make tries the card again (after a driver update). None, or unfinished: Make.
-        const bool made = s.ok ? (finished(s) && s.state == "done") : fs::is_directory(dir / "upscaled", ec);
+        // (TODO 242 / 259): Make tries the card again (after a driver update). None, or unfinished: Make. (PR #20) A set
+        // finished for another preset than the one chosen counts as unfinished: Make shrinks or enlarges it.
+        const bool made = s.ok ? (upToDate(s, dir) && s.state == "done") : fs::is_directory(dir / "upscaled", ec);
         return made && nr::hdSetAside().empty() ? "Verify HD textures" : "Make HD textures";
     }
 
@@ -672,6 +705,59 @@ namespace hd_progress
         }
         startWatch(true, true);
         return "Making them again in a small window while the game is open.";
+    }
+
+    int presetIndex()
+    {
+        std::error_code ec;
+        return chosenPreset(g_dir.empty() ? fs::absolute(fs::path("hd_textures"), ec) : g_dir);
+    }
+
+    std::string setPreset(int index)
+    {
+        if (index < 0 || index > 2 || index == presetIndex())
+            return {};
+        std::error_code ec;
+        if (g_dir.empty())
+        {
+            fs::create_directories(fs::path("hd_textures"), ec);
+            g_dir = fs::absolute(fs::path("hd_textures"), ec);
+        }
+        // (hd_options.json as the setup writes it: the preset, and "Keep making HD textures while I play" kept)
+        std::string t = optionsText(g_dir);
+        t.erase(std::remove_if(t.begin(), t.end(), [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }), t.end());
+        const bool whilePlaying = t.find("\"while_playing\":true") != std::string::npos;
+        const bool gentle = t.find("\"gentle\":true") != std::string::npos; // (TODO 310: kept as the setup chose it)
+        {
+            const fs::path file = g_dir / "hd_options.json", tmp = g_dir / "hd_options.json.tmp";
+            std::ofstream o(tmp, std::ios::binary | std::ios::trunc);
+            o << "{\n    \"quality\":  \"" << kPresets[index] << "\",\n    \"while_playing\":  " << (whilePlaying ? "true" : "false")
+              << ",\n    \"gentle\":  " << (gentle ? "true" : "false") << "\n}";
+            o.close();
+            fs::rename(tmp, file, ec);
+            if (ec)
+                return "Could not save the choice (hd_textures\\hd_options.json): " + ec.message();
+        }
+        std::fprintf(stderr, "[hd textures] preset: %s (F1)\n", kPresets[index]);
+#if defined(_WIN32)
+        // (the game's own window reads the preset when it starts: started again with the new one)
+        if (g_ourMaker && pidAlive(g_ourMaker) && g_makerJob)
+        {
+            TerminateJobObject(g_makerJob, 0);
+            CloseHandle(g_makerJob);
+            g_makerJob = nullptr;
+            g_ourMaker = 0;
+            g_makerAlive = false;
+        }
+        else if (makerRunning(g_dir))
+            return "Saved. The window making them now carries on with the old preset; the next one uses the new.";
+        g_stopped = false;
+        const std::string started = makeHdTextures();
+        return index < 2 ? "Saved. Larger images are shrunk in a small window (no graphics card needed); restart once it is done. " + started
+                         : "Saved. " + started;
+#else
+        return "Saved. Run tools/make_hd_textures.ps1";
+#endif
     }
 
     uint64_t generation() { return g_generation.load(std::memory_order_relaxed); }
