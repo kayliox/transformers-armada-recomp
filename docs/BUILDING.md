@@ -67,6 +67,12 @@ cd transformers-armada-recomp
 `./build.sh --skip-recompile` rebuilds only the executable. Start the game with
 `out/build/transformers/TransformersRecomp`.
 
+The build copies the FFmpeg shared libraries it found beside the executable
+(`tools/bundle_libraries.cmake`) and the executable looks in its own folder first (`$ORIGIN`), so the build carries
+its movie decoding with it: a build made in a distribution's container runs on SteamOS, which has no FFmpeg or
+another ABI. glibc, libstdc++ and libgcc stay the host's. FFmpeg linked statically (no `libav*` in `ldd`) copies
+nothing.
+
 The emulated renderer's GPU path needs an OpenGL feature (`GL_ARB_fragment_shader_interlock`) that some drivers lack,
 AMD's among them (the Steam Deck too). The game then runs OpenGL through Mesa's Zink driver on Vulkan, which has it.
 `TF_ZINK=0` keeps the usual driver (the GS then draws on the CPU, slower); `TF_ZINK=1` always uses Zink.

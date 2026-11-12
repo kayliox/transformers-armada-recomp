@@ -137,6 +137,11 @@ Change any key in **F1 > Controls**: click **Change** and press the new key, or 
 Save states are kept in `saves\states` in the folder you installed into (`states` in the checkout on native
 Linux). They are a copy of the game's memory, so keep them private, like your disc image.
 
+A save state holds the game's memory as that build lays it out, so it loads only into a build with the same layout.
+The Windows and Linux builds can differ there: a state made by the Windows build has been refused by the Linux build
+with "made by a build with a different memory layout". Do not count on moving states between them. Memory cards are
+the game's own PS2 saves and work in both builds: move progress with **F1 > Saves**, or by copying `mc0` and `mc1`.
+
 ## Settings (F1)
 
 Press **F1** to open the menu over the game. Use the mouse, the arrow keys or a controller. Most settings change

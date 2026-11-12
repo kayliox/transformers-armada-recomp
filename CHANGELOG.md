@@ -32,6 +32,9 @@
 - Linux: the Discord status works too (the Discord app's socket, including the Flatpak and Snap versions).
 - Linux: the F1 menu's "Restart now" (for settings that need a restart) works: the game starts again where you were.
 - Linux: the VSync setting (F1 > Graphics) works there too (Off: the pictures go to the screen at once).
+- Linux: a build carries the movie decoding it was made with (FFmpeg's libraries) in the game's own folder, so a
+  folder built on another Linux PC or in a container plays on SteamOS, which has no FFmpeg of its own or another
+  version. glibc and libstdc++ stay the system's.
 
 **Fixed**
 - Windows: the port's Linux-only choices (the 45 limit, the picture lock for 31-59 limits, the paced four-picture

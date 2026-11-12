@@ -199,8 +199,8 @@ If you move or copy the game's folder, point the entry at `Transformers Armada.e
 **Steam Deck (the Windows build, under Proton)**
 
 These steps play the Windows build through Proton. The game also runs natively on Linux and SteamOS, without
-Proton: build it as in [Linux and Steam Deck (native)](#linux-and-steam-deck-native) below, then add `play.sh` to
-Steam. For this Proton route, build the Windows version on a Windows PC first: its setup compiles the game from your
+Proton: build it in a container and play it there, as in [Linux and Steam Deck (native)](#linux-and-steam-deck-native)
+below. For this Proton route, build the Windows version on a Windows PC first: its setup compiles the game from your
 disc.
 
 1. On your Windows PC, install the game with the setup as described above, and play it once.
@@ -236,11 +236,21 @@ Vulkan) and "Emulated (PS2)". HD textures and sharp fonts work too: make them wi
    15 to 25 minutes.
 3. Play with `./play.sh`. Update with `./update.sh`, or in the game with **F1 > About > Update now**.
 
-**On a Steam Deck:** SteamOS cannot install the build tools directly. Either build on a Linux PC and copy the whole
-folder to the Deck, or build on the Deck inside a container (Desktop Mode, Konsole):
-`distrobox create -n tfa-build -i ubuntu:24.04`, then `distrobox enter tfa-build`, install the tools `setup.sh` asks
-for, and run `./setup.sh` there. Then add `play.sh` to Steam as a non-Steam game (**Games > Add a Non-Steam Game to
-My Library > Browse**, file type **All Files**) and start it from Gaming Mode.
+**On a Steam Deck:** SteamOS cannot install the build tools: its system is read-only and has no compiler. Build it on
+another Linux PC, or on the Deck inside a container (Desktop Mode, Konsole):
+
+```sh
+distrobox create -n tfa-build -i ubuntu:24.04
+distrobox enter tfa-build        # from here on, in the container: install the tools setup.sh lists, then
+./setup.sh --iso "/path/to/Transformers (USA).iso"
+```
+
+The container builds the game and nothing else: the build puts the FFmpeg libraries it found beside the executable,
+so the folder plays on SteamOS whichever machine or container built it. Add `play.sh` to Steam as a non-Steam game
+(**Games > Add a Non-Steam Game to My Library > Browse**, file type **All Files**) and start it from Gaming Mode.
+
+A save state is tied to the memory layout of the build that made it, so do not count on moving one between the
+Windows and Linux builds; the memory cards move freely (see [docs/PLAYING.md](docs/PLAYING.md#function-keys)).
 
 ## Controls
 

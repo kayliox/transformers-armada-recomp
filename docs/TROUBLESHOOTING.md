@@ -31,6 +31,12 @@ false alarm. Don't turn the antivirus off. Instead:
 - If it still fails, open an [issue](https://github.com/kayliox/transformers-armada-recomp/issues) with the end
   of the output.
 
+### On Linux the game stops with "cannot open shared object file"
+
+The build copies the FFmpeg libraries it found beside the executable, so a folder normally plays on a machine without
+them. If one is missing, it is a folder copied without those files or a build from before they were copied: run
+`./setup.sh` (or `./build.sh`) again where you are, or copy the whole folder, not part of it.
+
 ### The game shows the original, blurry textures
 
 The HD textures were skipped or are not finished. Run `setup.ps1` again without `-SkipHdTextures`. Making them

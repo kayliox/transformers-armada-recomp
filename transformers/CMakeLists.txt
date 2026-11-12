@@ -187,6 +187,23 @@ elseif(TF_NATIVE_VKD3D)
     target_link_libraries(TransformersRecomp PRIVATE ${TF_VKD3D_LIBS})
 endif()
 
+# Linux: the movie decoding comes from the FFmpeg the build found (pkg-config), so the executable asks the loader for
+# that build's libavcodec ABI. The libraries travel beside the executable and it looks there first, so a build made in
+# a distribution container (a Steam Deck's tfa-build: Ubuntu 24.04, libavcodec.so.60) runs on SteamOS, which has no
+# FFmpeg or another ABI. Nothing is copied when FFmpeg is linked statically.
+if(NOT WIN32)
+    set_target_properties(TransformersRecomp PROPERTIES BUILD_RPATH "\$ORIGIN")
+    # DT_RPATH, not DT_RUNPATH: the loader then searches the game's own folder for the dependencies of the bundled
+    # libraries too - libavcodec asks for libswresample and the like, and a RUNPATH is used only for the executable's
+    # own entries.
+    target_link_options(TransformersRecomp PRIVATE "LINKER:--disable-new-dtags")
+    add_custom_command(TARGET TransformersRecomp POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -DEXECUTABLE="$<TARGET_FILE:TransformersRecomp>"
+                -DCOPY_DESTINATION="$<TARGET_FILE_DIR:TransformersRecomp>"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/../tools/bundle_libraries.cmake"
+        COMMENT "Copying the shared libraries the game needs beside it")
+endif()
+
 # The Vulkan backend (native_render/vulkan/, chosen at start with TF_GFX_API=vulkan; Direct3D 12 stays the default)
 # and its SDL3 window. The Vulkan headers, the volk loader (it loads the system's Vulkan at run time: no Vulkan SDK
 # needed to build) and SDL3 (static) are fetched like raylib. Off by default while it is in development (on, every build
