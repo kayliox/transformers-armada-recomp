@@ -183,7 +183,7 @@ function Get-VsInstances {
     $json = "$(Invoke-Probe { & $vswhere -all -products * -format json } | Out-String)"
     $cpp = @(Invoke-Probe { & $vswhere -all -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath } | Where-Object { $_ })
     $list = @()
-    try { $list = @($json | ConvertFrom-Json) } catch { }
+    try { $list = @($json | ConvertFrom-Json | ForEach-Object { $_ }) } catch { }
     return @($list | Where-Object { $_.installationPath } | ForEach-Object {
         [pscustomobject]@{ Path = $_.installationPath; Complete = ($_.isComplete -ne $false); Cpp = ($cpp -contains $_.installationPath) } })
 }
@@ -229,7 +229,7 @@ function Write-PrerequisiteEvidence([string]$When) {
     if (Test-Path $vswhere) {
         $json = "$(Invoke-Probe { & $vswhere -all -prerelease -products * -format json } | Out-String)"
         $cpp = @(Invoke-Probe { & $vswhere -all -prerelease -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath } | Where-Object { $_ })
-        $list = @(); try { $list = @($json | ConvertFrom-Json) } catch { }
+        $list = @(); try { $list = @($json | ConvertFrom-Json | ForEach-Object { $_ }) } catch { }
         if ($list.Count -eq 0) { Write-Host "  no install listed" }
         foreach ($i in $list) {
             Write-Host ("  {0} {1} at {2}: complete {3}, launchable {4}, C++ tools {5}" -f $i.displayName, $i.installationVersion, $i.installationPath, $i.isComplete, $i.isLaunchable, ($cpp -contains $i.installationPath))

@@ -278,7 +278,10 @@ function Get-VsCppInstances {
     if (-not (Test-Path -LiteralPath $vswhere)) { return @() }
     $ErrorActionPreference = "Continue"
     $json = (& $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json 2>$null | Out-String)
-    try { $list = @($json | ConvertFrom-Json) } catch { return @() }
+    # (Windows PowerShell 5.1 passes a JSON array down the pipe as ONE object; ForEach-Object unrolls it. Without
+    # that, with two Visual Studio installs every field below is an array: "Cannot convert System.Object[] to
+    # System.Version", public issue #25.)
+    try { $list = @($json | ConvertFrom-Json | ForEach-Object { $_ }) } catch { return @() }
     $help = (& cmake --help 2>$null | Out-String)
     $names = @{ 15 = "Visual Studio 15 2017"; 16 = "Visual Studio 16 2019"; 17 = "Visual Studio 17 2022"; 18 = "Visual Studio 18 2026" }
     @($list | Where-Object { $_.installationPath -and $_.installationVersion } | ForEach-Object {

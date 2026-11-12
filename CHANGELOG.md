@@ -70,6 +70,12 @@
   sets made before this fix, and "HD textures ready" no longer comes back at every start once the set is finished.
   `make_hd_textures.sh` checks the set's images once, as the Windows maker does (0.4.7's checks too).
 
+## 0.6.7
+
+**Fixed**
+- The setup could stop at "Disc and game" with "Cannot convert ... to type System.Version" on a PC with more than one
+  Visual Studio installed. Installing and updating work again.
+
 ## 0.6.6
 
 **New**
