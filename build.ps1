@@ -43,7 +43,9 @@ if (-not $env:GIT_CONFIG_COUNT) {
     $env:GIT_CONFIG_KEY_1 = "safe.directory"; $env:GIT_CONFIG_VALUE_1 = "*"
 }
 $Root = $PSScriptRoot
-$Game = Join-Path $Root "game"
+# (TODO 279) The disc's files: game\ here, or the install's data\game once its folders were moved (tools\install_layout.ps1)
+. (Join-Path $Root "tools\install_layout.ps1")
+$Game = Get-GameDataDir $Root
 $Work = Join-Path $Root "work"
 $Build = Join-Path $Root $(if ($Public) { "out\build-public" } else { "out\build" })
 $ToolsBuild = Join-Path $Root "out\tools"
@@ -308,6 +310,7 @@ $genArgs = Get-GeneratorArgs $ToolsBuild
 $cmakeArgs = @("-S", $Root, "-B", $Build, "-DTF_GAME_VERSION=$GameVersion") + (Get-GeneratorArgs $Build)
 if ($Public) { $cmakeArgs += "-DTF_OVERLAY_DIR=" } # (the overlay left out: transformers\CMakeLists.txt)
 if ($Vulkan) { $cmakeArgs += "-DTF_VULKAN=ON" }     # (the Vulkan backend: transformers\CMakeLists.txt; -DTF_VULKAN=OFF turns it off again)
+$cmakeArgs += "-DTF_GAME_DIR=$Game"                 # (the disc's files where they are: game\ or the install's data\game)
 
 # What the translation (steps 3-4) depends on, one line per input: "<name> <SHA-256>". The
 # recompiler and analyzer are the programs themselves - MSBuild relinks them only when a source
@@ -582,7 +585,7 @@ $lastCompileAt = $null
 $lastShown = -100.0
 $buildStart = $Clock.Elapsed.TotalSeconds
 $ErrorActionPreference = "Continue"
-& cmake @("--build", $Build, "--config", $Config, "--target", "TransformersRecomp", "--", "/m", "/v:m", "/p:UseMultiToolTask=true") 2>&1 | ForEach-Object {
+& cmake @("--build", $Build, "--config", $Config, "--target", "TransformersRecomp", "tfa_launcher", "--", "/m", "/v:m", "/p:UseMultiToolTask=true") 2>&1 | ForEach-Object {
     $line = "$_"
     if ($line -match '^\s+([\w.+-]+)\.(c|cc|cpp|cxx)\s*$') {
         $compiled++
@@ -647,6 +650,29 @@ if ((Test-Path -LiteralPath $builtExe) -and $bakeDone) {
         Write-Host "  warning: the shaders could not be built in; the game compiles them at its first start instead" -ForegroundColor Yellow
     }
     Close-Stage
+}
+
+# --- The install's folders (TODO 279, docs/INSTALL_LAYOUT_PLAN.md) ---------------------------------
+# In a player's install (tfa-setup.exe in the folder above): the launcher "Transformers Armada.exe" put beside the setup
+# program, and the player's things moved out of the checkout once (tools\move_layout.ps1: the backup first, saves
+# copied and checked, nothing deleted). Never in a developer's checkout (no tfa-setup.exe above it). Every install
+# moves, RecompLauncher's too (recomplauncher.json names the new places) and one built without the mods (a European
+# disc on the mods' repository builds as -Public): the new layout is the standard, with no way back. A failure here
+# leaves the game as it was built: it never fails the build.
+$installRoot = Get-InstallRoot $Root
+if ($installRoot) {
+    $launcher = Join-Path $Build "transformers\$Config\Transformers Armada.exe"
+    if (Test-Path -LiteralPath $launcher) {
+        $dest = Join-Path $installRoot "Transformers Armada.exe"
+        try {
+            if (-not (Test-Path -LiteralPath $dest) -or (Get-FileHash -LiteralPath $dest).Hash -ne (Get-FileHash -LiteralPath $launcher).Hash) {
+                Copy-Item -LiteralPath $launcher -Destination $dest -Force
+                Write-Host "  The launcher: $dest"
+            }
+        } catch { Write-Host "  warning: the launcher was not copied to $dest ($($_.Exception.Message)); Play.bat and tfa-setup.exe start the game as before" -ForegroundColor Yellow }
+    }
+    # (it decides itself: once, or an interrupted move carried on)
+    & (Join-Path $Root "tools\move_layout.ps1") -GameFolder $Root -Root $installRoot
 }
 
 # --- The record for the next estimates, and the summary ---------------------------------------

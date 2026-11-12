@@ -82,8 +82,6 @@ namespace install_layout
         g_new = false;
         g_root.clear();
         g_used.clear();
-        if (const char *off = std::getenv("TF_LAYOUT"); off && off[0] == '0' && !off[1])
-            return;
         std::error_code ec;
         const fs::path here = fs::current_path(ec);
         if (ec || here.empty())
@@ -118,8 +116,15 @@ namespace install_layout
             set("TF_MC_ROOT", place("saves", "mc0"), "memory cards");
         if (fs::is_directory(place("saves", "states"), ec))
             set("PS2X_STATE_FILE", place("saves", "states", "quick.ps2state"), "save states");
-        if (fs::is_regular_file(place("data", "game", "SLUS_206.68"), ec))
+        // (the USA disc's executable or the European one's: an install of either moves the same way)
+        if (fs::is_regular_file(place("data", "game", "SLUS_206.68"), ec) || fs::is_regular_file(place("data", "game", "SLES_523.88"), ec))
+        {
             set("TRANSFORMERS_GAME_DIR", place("data", "game"), "the disc's files");
+            // (release B) The mods stay in the game folder for now, beside the tools that make them: found there by name,
+            // since the loader's own default is the folder above the disc's files (data\ once the disc moved).
+            if (fs::is_directory(fs::current_path(ec) / "Mods", ec))
+                set("TF_MODS_DIR", fs::current_path(ec) / "Mods", "mods (in the game folder)");
+        }
         if (fs::is_directory(place("data", "movies_hd"), ec))
             set("TF_HD_MOVIES", place("data", "movies_hd"), "HD movies");
         // (only a cache: made again when it is missing - but never the first thing made in a folder that is not there)

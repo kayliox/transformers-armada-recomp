@@ -2028,6 +2028,40 @@ namespace nr
             uint64_t drawn = 0, behind = 0, capped = 0, tested = 0, keptDraws = 0;
         } g_drops;
         std::atomic<uint64_t> g_behindTotal{0}; // (nr::framesLeftOutBehind)
+        // (TODO 290 fps) The drawing's time for each frame it drew - the slower of its two stages, the reading (its own
+        // thread) and the drawing (this one, its waits for the GPU included): what one frame holds the renderer for. The
+        // rate governor's way up asks whether a higher rate fits it (nr::drawnFrameMs); before, it judged the EE's work
+        // alone and climbed into rates the renderer could not draw, fell, and climbed again.
+        struct DrawnTimes
+        {
+            std::mutex mutex;
+            std::array<float, 1024> ms{};
+            size_t next = 0, count = 0;
+        } g_drawnTimes, g_gpuTimes; // (and the GPU's time for each frame: nr::noteGpuFrame, from the backends' timestamps)
+        void noteTime(DrawnTimes &t, double ms)
+        {
+            std::lock_guard<std::mutex> lock(t.mutex);
+            t.ms[t.next] = static_cast<float>(ms);
+            t.next = (t.next + 1u) % t.ms.size();
+            t.count = std::min(t.count + 1u, t.ms.size());
+        }
+        void noteDrawnFrame(double readMs, double drawMs) { noteTime(g_drawnTimes, std::max(readMs, drawMs)); }
+        double timeAt(DrawnTimes &t, double share, unsigned frames)
+        {
+            std::vector<float> v;
+            {
+                std::lock_guard<std::mutex> lock(t.mutex);
+                const size_t n = std::min<size_t>(frames, t.count);
+                v.reserve(n);
+                for (size_t i = 0; i < n; ++i)
+                    v.push_back(t.ms[(t.next + t.ms.size() - 1u - i) % t.ms.size()]);
+            }
+            if (v.size() < 8u)
+                return 0.0;
+            const size_t k = std::min(v.size() - 1u, static_cast<size_t>(std::clamp(share, 0.0, 1.0) * static_cast<double>(v.size() - 1u)));
+            std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(k), v.end());
+            return v[k];
+        }
 
         uint32_t keyOf(uint32_t target) { return (target & 0x1FFu) | ((target >> 16) & 0x3Fu) << 9; } // (nr_d3d.cpp targetKey)
         bool depthTarget(uint32_t target) { return ((target >> 24) & 0x30u) == 0x30u; }
@@ -2254,7 +2288,9 @@ namespace nr
                 poses::render(job.frame, job.shot);
             if (latLogSeconds())
                 latNote(job, drawStartNs, nowNs());
-            const double ms = job.readMs + std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            const double drawMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            const double ms = job.readMs + drawMs;
+            noteDrawnFrame(job.readMs, drawMs); // (TODO 290 fps: nr::drawnFrameMs)
             // (A slow frame told, its parts: the list read and the GPU side - TODO 59's hunt.)
             static const double slowMs = std::getenv("TF_NATIVE_SLOWMS") ? std::atof(std::getenv("TF_NATIVE_SLOWMS")) : 50.0;
             if (ms > slowMs)
@@ -2527,4 +2563,12 @@ namespace nr
 namespace nr
 {
     unsigned long long framesLeftOutBehind() { return g_behindTotal.load(std::memory_order_relaxed); }
+
+    double drawnFrameMs(double share, unsigned frames) { return timeAt(g_drawnTimes, share, frames); }
+    double gpuFrameMs(double share, unsigned frames) { return timeAt(g_gpuTimes, share, frames); }
+    void noteGpuFrame(double ms)
+    {
+        if (ms > 0.0 && ms < 1000.0)
+            noteTime(g_gpuTimes, ms);
+    }
 }

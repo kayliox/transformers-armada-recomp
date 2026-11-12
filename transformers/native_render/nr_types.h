@@ -22,6 +22,10 @@ namespace view_turn
 
 namespace nr
 {
+    // (TODO 290 fps) A frame's own time on the GPU, from the backend's timestamps once they are read (nr_thread.cpp keeps
+    // the last ones: nr::gpuFrameMs in nr_install.h, the rate governor's way up).
+    void noteGpuFrame(double ms);
+
     // A vertex in the model's space, as a geometry set holds it (decoded once per set).
     struct Vertex
     {

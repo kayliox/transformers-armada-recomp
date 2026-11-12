@@ -138,14 +138,18 @@ if(TF_GAME_VERSION STREQUAL "SLES-52388")
 endif()
 message(STATUS "Transformers: release ${TF_GAME_VERSION} (${TF_ELF_NAME})")
 
+# The disc's extracted files: game\ in the checkout, or the install's data\game once its folders were moved (TODO 279,
+# docs/INSTALL_LAYOUT_PLAN.md): build.ps1 passes the one it uses. The grass's VU1 program and the exe's icon read it.
+set(TF_GAME_DIR "${CMAKE_SOURCE_DIR}/game" CACHE PATH "The disc's extracted files (build.ps1 passes where they are)")
+
 # The grass's VU1 program as straight C++ (vu1_native.cpp includes it): a translation of the game's own microcode,
 # so it is made from the game's executable at build time (tools/make_vu1_grass.py), never kept in the repository.
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(TF_VU1_GRASS_INC "${TF_GENERATED_DIR}/vu1_grass47dd.inc")
 add_custom_command(OUTPUT "${TF_VU1_GRASS_INC}"
     COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/make_vu1_grass.py"
-            "${CMAKE_SOURCE_DIR}/game/${TF_ELF_NAME}" "${TF_VU1_GRASS_INC}"
-    DEPENDS "${CMAKE_SOURCE_DIR}/game/${TF_ELF_NAME}" "${CMAKE_SOURCE_DIR}/tools/make_vu1_grass.py"
+            "${TF_GAME_DIR}/${TF_ELF_NAME}" "${TF_VU1_GRASS_INC}"
+    DEPENDS "${TF_GAME_DIR}/${TF_ELF_NAME}" "${CMAKE_SOURCE_DIR}/tools/make_vu1_grass.py"
             "${CMAKE_SOURCE_DIR}/tools/vu1_grass47dd_lags.json" "${CMAKE_SOURCE_DIR}/tools/vu1_recompile.py"
             "${CMAKE_SOURCE_DIR}/tools/vu1_trace.py" "${CMAKE_SOURCE_DIR}/tools/vu1_batch.py"
     COMMENT "The grass's VU1 program, from the game's executable"
@@ -165,6 +169,18 @@ endif()
 add_dependencies(TransformersRecomp tf_version)
 # The exe's icon, made from the player's disc into the build folder (icon.cmake, TODO 198).
 include("${CMAKE_CURRENT_SOURCE_DIR}/icon.cmake")
+
+# The launcher (TODO 279, release B: launcher/launcher.cpp): "Transformers Armada.exe", put beside tfa-setup.exe in a
+# player's install folder by build.ps1. A small program of its own (no window, the game's icon when there is one),
+# built into the same folder as the game.
+if(WIN32)
+    add_executable(tfa_launcher WIN32 "${CMAKE_CURRENT_SOURCE_DIR}/launcher/launcher.cpp")
+    set_target_properties(tfa_launcher PROPERTIES OUTPUT_NAME "Transformers Armada")
+    target_compile_features(tfa_launcher PRIVATE cxx_std_20)
+    if(EXISTS "${CMAKE_CURRENT_BINARY_DIR}/tf_icon/transformers.rc")
+        target_sources(tfa_launcher PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/tf_icon/transformers.rc")
+    endif()
+endif()
 if(WIN32)
     target_link_libraries(TransformersRecomp PRIVATE d3d12 dxgi d3dcompiler)
 elseif(TF_NATIVE_VKD3D)

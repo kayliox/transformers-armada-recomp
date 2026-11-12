@@ -23,6 +23,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <functional>
+#include <mutex>
 #include <vector>
 
 namespace tf::port
@@ -58,6 +61,16 @@ namespace nr
             std::chrono::steady_clock::time_point since{};
         };
         Pacing g_pacing;
+
+        // (TODO 291) The shown pictures' intervals of the last 30 s, for the fps line's 1% low (nr::pictureLowRate): what
+        // the player sees. Before, the line's 1% low came from the game's frames, which the game's own wait for a VBlank
+        // inside a frame pairs into a late one and a short one while the pictures stay even - at a pinned 80 on the RX 5700
+        // XT 216 of 535 frames took 18-23 ms, the pictures' 1% low 71: the user's "1% low sinking 66 -> 44" at a flat 78.
+        struct ShownIntervals
+        {
+            std::mutex mutex;
+            std::deque<std::pair<int64_t, float>> v; // (when shown, ns; the interval before it, ms)
+        } g_shownIntervals;
 
         int64_t nowNs()
         {
@@ -145,7 +158,14 @@ namespace nr
             if (p.since == std::chrono::steady_clock::time_point{})
                 p.since = now;
             if (p.lastShownNs != 0 && ns - p.lastShownNs < 1000000000ll) // (not across a pause of a second: a movie, a load)
+            {
                 p.between.push_back(static_cast<double>(ns - p.lastShownNs) / 1.0e6);
+                std::lock_guard<std::mutex> lock(g_shownIntervals.mutex); // (TODO 291: nr::pictureLowRate)
+                auto &v = g_shownIntervals.v;
+                v.emplace_back(ns, static_cast<float>(ns - p.lastShownNs) / 1.0e6f);
+                while (!v.empty() && (ns - v.front().first > 30000000000ll || v.size() > 32768u))
+                    v.pop_front();
+            }
             p.lastShownNs = ns;
             {
                 std::chrono::steady_clock::time_point vb{};
@@ -625,6 +645,25 @@ namespace nr
             height = shown.height;
             return true;
         }
+    }
+
+    double pictureLowRate(double seconds)
+    {
+        std::vector<float> v;
+        {
+            std::lock_guard<std::mutex> lock(g_shownIntervals.mutex);
+            const int64_t now = nowNs(), window = static_cast<int64_t>(seconds * 1.0e9);
+            for (auto it = g_shownIntervals.v.rbegin(); it != g_shownIntervals.v.rend() && now - it->first <= window; ++it)
+                v.push_back(it->second);
+        }
+        if (v.size() < 100u)
+            return 0.0;
+        const size_t count = v.size() / 100u;
+        std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(count - 1u), v.end(), std::greater<float>());
+        double sum = 0.0;
+        for (size_t i = 0; i < count; ++i)
+            sum += v[i];
+        return sum > 0.0 ? 1000.0 * static_cast<double>(count) / sum : 0.0;
     }
 
     void startLivePicture()

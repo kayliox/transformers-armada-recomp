@@ -15,12 +15,14 @@
 //   <root>\data\movies_hd\          HD movies
 //   <root>\data\shader cache\
 //
-// This release only READS that layout: nothing is moved and nothing new is made. A new place is used when the mark
+// The game only READS that layout (the move itself is tools\move_layout.ps1, run by build.ps1 in a player's install;
+// release B). A new place is used when the mark
 // is there AND that place is there already; every other item stays where it is today. Without the mark (every
 // install and every checkout today) nothing changes at all. The HD textures and the mods stay where they are in
 // both layouts for now: the tools that make them write beside the checkout.
 //
-// TF_LAYOUT=0: the old places whatever is found.
+// There is no switch for the old places: once an install is moved the new layout is the one in use (the user's
+// decision, 2026-11-11: no way back).
 
 #include <filesystem>
 #include <string>

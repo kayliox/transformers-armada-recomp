@@ -189,7 +189,7 @@ impl App {
     }
 
     fn repo(&self) -> PathBuf {
-        PathBuf::from(&self.folder).join(repo_name(&self.repo_url))
+        checkout_in(Path::new(&self.folder), &self.repo_url)
     }
 
     /// --repo / --mods after new(): the steps follow.
@@ -414,6 +414,22 @@ fn make_steps(mods: bool) -> Vec<Step> {
 }
 
 /// The install's folder name: the repository's ("https://github.com/x/name(.git)" -> "name").
+/// (TODO 279) The checkout in an install folder: source\ (the name planned for new installs) when it is a clone, else the
+/// repository's own name (every install so far). Either way the rest is the same.
+fn checkout_in(folder: &Path, url: &str) -> PathBuf {
+    let source = folder.join("source");
+    if source.join(".git").exists() { source } else { folder.join(repo_name(url)) }
+}
+
+/// (TODO 279) The install folder's layout number (layout.json: {"layout": 2}), 1 without it.
+fn layout_of(folder: &Path) -> u32 {
+    let Ok(text) = std::fs::read_to_string(folder.join("layout.json")) else { return 1 };
+    let Some(at) = text.find("\"layout\"") else { return 1 };
+    let rest = &text[at + 8..];
+    let Some(colon) = rest.find(':') else { return 1 };
+    rest[colon + 1..].trim_start().chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(1)
+}
+
 fn repo_name(url: &str) -> String {
     let last = url.trim_end_matches('/').rsplit(['/', '\\', ':']).next().unwrap_or("transformers");
     let name = last.strip_suffix(".git").unwrap_or(last);
@@ -458,7 +474,10 @@ struct Job {
 
 impl Job {
     fn log_path(&self) -> PathBuf {
-        self.folder.join(if self.update { "update-setup.log" } else { "setup.log" })
+        let name = if self.update { "update-setup.log" } else { "setup.log" };
+        // (TODO 279: the install's logs\ once its folders were moved; beside this program before that)
+        let logs = self.folder.join("logs");
+        if layout_of(&self.folder) == 2 && logs.is_dir() { logs.join(name) } else { self.folder.join(name) }
     }
 
     fn run(&self, tx: &Sender<Msg>) -> Result<(), String> {
@@ -477,7 +496,7 @@ impl Job {
 
         if self.update {
             // update.ps1 does it all (and, for the game's own update, starts it again: -Play).
-            let repo = self.folder.join(repo_name(&self.repo_url));
+            let repo = checkout_in(&self.folder, &self.repo_url);
             let _ = tx.send(Msg::Step(STEP_DOWNLOAD));
             // (the game that asked for the update closes first: its folder is about to change)
             if self.wait_pid != 0 {
@@ -527,7 +546,7 @@ impl Job {
         let _ = tx.send(Msg::Progress(0.03));
 
         let _ = tx.send(Msg::Step(STEP_DOWNLOAD));
-        let repo = self.folder.join(repo_name(&self.repo_url));
+        let repo = checkout_in(&self.folder, &self.repo_url);
         if self.managed {
             // Settings may already exist here: initialize around them rather than requiring an
             // empty clone destination. Checkout refuses conflicting files instead of deleting them.
@@ -1408,7 +1427,9 @@ fn start_game(repo: &Path) -> Option<std::process::Child> {
     let game = game_folder(repo);
     let settings = game.join("settings.ini");
     let example = game.join("settings.example.ini");
-    if !settings.exists() && example.exists() {
+    // (TODO 279: with the install's folders moved its settings.ini is the one in use - none made in the checkout)
+    let moved = repo.parent().is_some_and(|f| layout_of(f) == 2 && f.join("settings.ini").exists());
+    if !moved && !settings.exists() && example.exists() {
         let _ = std::fs::copy(&example, &settings);
     }
     Command::new(game_exe(repo)).current_dir(&game).spawn().ok()
@@ -1813,14 +1834,14 @@ fn main() -> eframe::Result {
     // own, Quiver - on the folder the last install finished in)
     let mut found = false;
     if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
-        if dir.join(repo_name(&app.repo_url)).join(".git").exists() {
+        if checkout_in(&dir, &app.repo_url).join(".git").exists() {
             app.folder = dir.to_string_lossy().to_string();
             found = true;
         }
     }
     if !found {
         if let Some(dir) = remembered_folder() {
-            if Path::new(&dir).join(repo_name(&app.repo_url)).join(".git").exists() {
+            if checkout_in(Path::new(&dir), &app.repo_url).join(".git").exists() {
                 app.folder = dir;
             }
         }
@@ -1932,6 +1953,20 @@ mod path_tests {
             .output()
             .expect("powershell starts without PATH");
         assert!(String::from_utf8_lossy(&out.stdout).to_lowercase().contains("cmd.exe"));
+    }
+
+    #[test]
+    fn layout_read_from_layout_json() {
+        let dir = std::env::temp_dir().join(format!("tfa_layout_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        assert_eq!(layout_of(&dir), 1);
+        std::fs::write(dir.join("layout.json"), "{\"layout\": 2}
+").unwrap();
+        assert_eq!(layout_of(&dir), 2);
+        assert_eq!(checkout_in(&dir, "https://github.com/kayliox/transformers-armada-recomp"), dir.join("transformers-armada-recomp"));
+        std::fs::create_dir_all(dir.join("source").join(".git")).unwrap();
+        assert_eq!(checkout_in(&dir, "https://github.com/kayliox/transformers-armada-recomp"), dir.join("source"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

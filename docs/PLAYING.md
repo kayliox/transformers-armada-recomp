@@ -27,6 +27,10 @@ Something not working? See [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 The setup installs the rest: Git, Python and the Visual Studio C++ build tools. Windows may ask for permission.
 
+On Linux or a Steam Deck, the game also builds natively, without Windows or Proton: see
+[README.md's "Linux and Steam Deck (native)"](../README.md#linux-and-steam-deck-native). [Your files](#your-files)
+below shows where each layout keeps its files.
+
 ## Install
 
 ### With the setup program (recommended)
@@ -58,7 +62,9 @@ For a manual build, see [BUILDING.md](BUILDING.md).
 
 ## Starting the game
 
-Start **`Play.bat`** in the install folder. The setup program also has a Play button.
+Start the game with the desktop shortcut, or with **`Transformers Armada.exe`** in the folder you installed into.
+The setup program also has a Play button. To add the game to Steam or another launcher, give it
+`Transformers Armada.exe`.
 
 On the first start the game uses good default settings for most PCs. Press **F1** to change them.
 
@@ -128,8 +134,8 @@ Change any key in **F1 > Controls**: click **Change** and press the new key, or 
 | F8 | Photo mode |
 | F11 | Switches between a window and full screen |
 
-Save states are kept in the `states` folder. They are a copy of the game's memory, so keep them private, like
-your disc image.
+Save states are kept in `saves\states` in the folder you installed into (`states` in the checkout on native
+Linux). They are a copy of the game's memory, so keep them private, like your disc image.
 
 ## Settings (F1)
 
@@ -137,7 +143,7 @@ Press **F1** to open the menu over the game. Use the mouse, the arrow keys or a 
 at once. A few (marked **RESTART**) need the game to start again: the menu offers **Restart now**, which brings
 you back to the same moment.
 
-Your choices are saved in `settings.ini` in the install folder.
+Your choices are saved in `settings.ini` in the folder you installed into.
 
 ### Display
 
@@ -170,9 +176,11 @@ Your choices are saved in `settings.ini` in the install folder.
 | HD textures | The HD textures made from your disc, on or off (native renderer; takes a restart). Its buttons open their folder, **Make HD textures** (says the disk space and time first), **Verify HD textures** (checks images without changing them) and **Remake N broken images** (after a verify that found some). On Linux, the maker buttons show [commands to run in a terminal](BUILDING.md#hd-textures-and-sharp-fonts). |
 | Texture pack | Emulated renderer only: PCSX2 texture packs from a replacements folder. Not the HD textures. |
 
-The **Ultra** preset sets everything to its highest: the longest distances, every tree in full 3D, full enemy
-detail, 8x multisampling with 1.5x supersampling and Ultra textures. It needs a strong graphics card. If the
-frame rate drops, try **High**.
+The **Ultra** preset sets everything to its highest but the forest: the longest distances, full enemy detail,
+8x multisampling with 1.5x supersampling and Ultra textures, with the forest at 2x. It needs a strong graphics
+card. If the frame rate drops, try **High**. A longer forest (3x, 4x) and every tree in full 3D are under
+Graphics > Advanced (Forest distance, Trees): very heavy, they can drop the frame rate a lot, even on strong
+graphics cards.
 
 If a graphics card makes the HD textures black (some GTX 16-series cards do), the maker notices, tries safer
 ways, and if none works it makes none: F1 says so and the game shows its own textures. After a graphics driver
@@ -202,7 +210,8 @@ Volume, from Off to full.
 
 ### Saves
 
-Your memory card saves, and import or export of PS2 saves (from the `Saves` folder). Save states by name.
+Your memory card saves, and import or export of PS2 saves (through `saves\backups` and `saves\exports` in the
+folder you installed into; `Saves/backups` and `Saves/exports` in the checkout on native Linux). Save states by name.
 
 ### About
 
@@ -235,17 +244,43 @@ To turn the automatic check off: **F1 > About > Check for updates automatically*
 
 ## Your files
 
-Everything the setup makes from your disc stays on your PC, in folders that Git ignores:
+Everything the setup makes from your disc stays on your PC.
+
+**Windows: the install folder.** The setup keeps your things in folders of their own, so the whole folder can be
+copied or moved as one:
 
 | Folder or file | What it is |
 |---|---|
-| `game\` | Your extracted disc, and your memory cards (`game\mc0`, `game\mc1`) |
-| `work\`, `out\` | The game built from your disc |
-| `hd_textures\` | The HD textures made from your disc |
-| `states\` | Your save states |
+| `Transformers Armada.exe` | Starts the game (give this one to Steam or another launcher) |
 | `settings.ini` | Your settings |
+| `saves\` | Your memory cards (`mc0`, `mc1`), save states (`states`) and F1 > Saves' `backups` and `exports` |
+| `logs\` | The game's, the setup's and the updates' logs |
+| `data\` | Your extracted disc (`game`), the HD movies and the shader cache |
+| `transformers-armada-recomp\` | The game built from your disc (`work\`, `out\`), and the HD textures (`hd_textures\`) |
 
-Never share or upload these: they contain game data.
+**Linux (native): the checkout.** There is no separate install folder: the game and your files stay in the folder
+you cloned the repository into:
+
+| Folder or file | What it is |
+|---|---|
+| `settings.ini` | Your settings |
+| `game/` | Your extracted disc, and your memory cards (`mc0`, `mc1`) |
+| `states/` | Save states |
+| `Saves/` | F1 > Saves' `backups` and `exports` |
+| `runs/` | The game's logs |
+| `hd_textures/` | The HD textures, made by `./tools/make_hd_textures.sh` |
+| `out/` | The game built from your disc |
+
+To back up your saves on Windows, copy `saves`; on Linux, copy `game/mc0`, `game/mc1`, `states` and `Saves`. To move
+the game to another drive, another PC or a Steam Deck, copy the whole install folder on Windows, or the whole
+checkout on Linux: the game finds everything from where it is.
+
+Never share or upload `saves`, `data` or the built game on Windows, or `game`, `states` or `Saves` on Linux: they
+contain game data.
+
+A Windows install from before this layout is moved by its next update, after a backup of your saves and settings in
+`saves\backups`. The old files stay where they were. The native Linux checkout already keeps its files this way, so
+nothing moves there.
 
 ## The European disc
 

@@ -70,7 +70,8 @@ output device.
 ### The update says "Could not check"
 
 The game checks for updates with Git in the background. Check your internet connection. You can always update by
-hand with `.\update.ps1` in the install folder.
+hand: start `tfa-setup.exe` in the folder you installed into while holding **Shift**, then **Update**, or run
+`.\update.ps1` in its `transformers-armada-recomp` folder.
 
 ### The game crashes
 
@@ -87,7 +88,7 @@ Never attach disc images, save states, memory cards or play recordings: they con
 
 ### Is this an emulator?
 
-No. The game's own program is translated to C++ and built into a Windows program on your PC. A small runtime
+No. The game's own program is translated to C++ and built into a program for your PC. A small runtime
 stands in for the PS2 hardware, and the graphics and sound are replaced by native PC code.
 
 ### Why do I need my own disc?
@@ -101,11 +102,14 @@ No. This repository and the setup contain no game files. Please do not ask for t
 
 ### Do my PS2 saves work?
 
-Yes. **F1 > Saves** imports and exports PS2 memory card saves through the `Saves` folder in the install folder.
+Yes. **F1 > Saves** imports and exports PS2 memory card saves through `saves\backups` and `saves\exports` in the
+folder you installed into.
 
 ### Does it run on Linux, macOS or the Steam Deck?
 
-Not yet. The port is a Windows program, and the renderer uses Direct3D 12. Other systems are not tested.
+Linux and the Steam Deck run it natively: build and play it with `./setup.sh` and `./play.sh` (see
+[the native Linux section](../README.md#linux-and-steam-deck-native)). A Steam Deck can also run the Windows build
+through Proton. macOS is not supported.
 
 ### How much faster than the PS2 is it?
 
@@ -114,15 +118,21 @@ your PC and screen allow, so motion is much smoother.
 
 ### Can I use a PCSX2 texture pack?
 
-Yes. Put the pack's files in a `replacements` folder in the install folder and turn on **F1 > Graphics > Texture
-pack** (under Advanced). Texture packs are other people's work and are not included.
+Yes. Put the pack's files in a `replacements` folder inside `transformers-armada-recomp` (in the folder you installed
+into) and turn on **F1 > Graphics > Texture pack** (under Advanced). Texture packs are other people's work and are not included.
 
 ### Where are my settings and saves?
 
-In the install folder: `settings.ini`, the memory cards in `game\mc0` and `game\mc1`, and save states in `states`.
-Updates never touch them.
+In the folder you installed into: `settings.ini`, and everything you would back up in `saves`: the memory cards in
+`saves\mc0` and `saves\mc1`, save states in `saves\states`. Updates never touch them. To back up your saves, copy
+the `saves` folder.
+
+An install from before these folders is moved by its next update, after a backup of your saves and settings in
+`saves\backups`. Nothing is deleted: the old memory cards are kept as `data\game\mc0.moved` (and `mc1.moved`), and
+the old `settings.ini` stays in `transformers-armada-recomp`.
 
 ### How do I uninstall it?
 
-Delete the install folder. The tools the setup installed (Git, Python, the Visual Studio build tools) stay
+Copy the `saves` folder somewhere first if you want to keep your saves, then delete the folder you installed into.
+The tools the setup installed (Git, Python, the Visual Studio build tools) stay
 installed; remove them from Windows Settings if you do not need them.

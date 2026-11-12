@@ -42,25 +42,25 @@
       "format": "ini",
       "file": [
         {
-          "path": "{install}/transformers-armada-recomp/settings.ini"
+          "path": "{install}/settings.ini"
         }
       ]
     }
   ],
   "saves": [
-    "{install}/transformers-armada-recomp/game/mc0",
-    "{install}/transformers-armada-recomp/game/mc1",
-    "{install}/transformers-armada-recomp/settings.ini"
+    "{install}/saves/mc0",
+    "{install}/saves/mc1",
+    "{install}/settings.ini"
   ],
   "folders": {
     "saves": [
       {
-        "path": "{install}/transformers-armada-recomp/game/mc0"
+        "path": "{install}/saves"
       }
     ],
     "settings": [
       {
-        "path": "{install}/transformers-armada-recomp"
+        "path": "{install}"
       }
     ]
   },

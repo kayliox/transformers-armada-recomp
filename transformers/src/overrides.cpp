@@ -69,6 +69,8 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <mutex>
 #include <string>
@@ -372,11 +374,13 @@ namespace
             float tv = width != 0u ? pixelAspect * (640.0f / static_cast<float>(width)) * 0.93f : 1.0f;
             // The PAL release in its 50 Hz mode (tvStandard 1 at 0x6CDD38, pal60 0 at 0x6CF658) draws its taller PAL
             // pixels: a 4:3 picture's pixel aspect is 0.727934 at width 512, 0.846 by the measure above - under the
-            // 16:9 threshold. Measured against its own 4:3 instead.
+            // 16:9 threshold. Measured against its own 4:3 instead. (European disc only: the USA one has no 50 Hz mode.)
+#if defined(TF_GAME_PAL)
             uint32_t standard = 0u;
             std::memcpy(&standard, rdram + 0x006CDD38u, sizeof(standard));
             if (standard == 1u && rdram[0x006CF658u] == 0u)
                 tv /= 0.727934f * 1.25f * 0.93f;
+#endif
             // (TODO 282: narrower than 16:9 the widescreen mode's value goes up to the 4:3 TV's own - 0.75 / k, 1 at
             // 4:3 - so there it is told by the shape's own value, with the widescreen picture on)
             const float k = ultrawide::wideFactor();
@@ -386,6 +390,9 @@ namespace
             // pixel aspect apart, and a frame read between them took the PAL release's 640x480 width with its
             // 512x448 aspect for 16:9 - the 4:3 picture flipped to 16:9 and back for a frame, again and again, at the
             // 50 / 60 Hz menu and its 60 Hz test (seen on the screen, 2026-11-10). (A movie's 4:3 at once, above.)
+            // European disc only: the USA disc has no such menu, and there it delayed every change of shape by three
+            // frames (kayliox on PR #15).
+#if defined(TF_GAME_PAL)
             static float measured = 0.0f, settled = 0.0f;
             static int same = 0;
             same = aspect == measured ? same + 1 : 1;
@@ -393,6 +400,7 @@ namespace
             if (same >= 3 || settled == 0.0f)
                 settled = aspect;
             aspect = settled;
+#endif
         }
         static float shown = 0.0f;
         if (aspect != shown)
@@ -3394,6 +3402,14 @@ namespace
     int g_ceilingRate = 0;              // (follow: the rate the last miss came at, and until when nothing at or above it)
     std::chrono::steady_clock::time_point g_ceilingUntil{};
     int g_ceilingFails = 0;             // (follow: misses in a row - the wall's 10 s doubles with each, to 120 s; forgotten 30 s on)
+    // (TODO 290 fps) The drawing's wall: a fall the renderer made (frames left out, or its frames slower than the rate's
+    // period) - nothing at or above that rate for a minute, doubling with each such fall within 5 minutes, to 5 minutes;
+    // not forgotten by the 30 s without a miss (that is for the EE's misses, which come and go). The user's RX 5700 XT
+    // in Amazon (2026-11-11): 240 -> 152 -> 103 -> 119 -> 101 -> 125 -> 106 -> 118 -> 128 -> 108 -> 78 in two minutes,
+    // each step a change of pace - the way up judged the EE's work alone, which had room, and the bars ran out in 10-40 s.
+    int g_drawWallRate = 0;
+    std::chrono::steady_clock::time_point g_drawWallUntil{}, g_drawWallSetAt{};
+    int g_drawWallSeconds = 0;
     std::chrono::steady_clock::time_point g_lastFallAt{};
     // (TODO 272) The last step down: when, from which rate (its place among the rates), and whether it was held against it.
     std::chrono::steady_clock::time_point g_lastDownAt{};
@@ -3550,6 +3566,9 @@ namespace
         g_switchMsSum = g_switchMsMax = 0.0;
         g_ceilingRate = 0;
         g_ceilingFails = 0;
+        g_drawWallRate = 0; // (TODO 290 fps: a new level, another scene - its wall is its own)
+        g_drawWallSeconds = 0;
+        g_drawWallUntil = g_drawWallSetAt = {};
         g_rateTimeSaid = now;
         g_rates.clear();
         // On a screen with a clock of its own the rates divide its refresh (each picture shown for
@@ -4045,6 +4064,30 @@ namespace
                 values.clear();
             return values;
         };
+        // (TODO 290 fps) The drawing's own time a frame against a rate's period (the native renderer, one picture a frame):
+        // the slower of its two stages - the render thread (its reading and drawing) and the GPU (its timestamps) - at the
+        // 90th percentile of the frames judged. The way up needs it under 92% of the higher rate's period; a fall the
+        // drawing made lands where it is under 95%, so the rate it lands on is not one the way up leaves at once. The EE's
+        // work alone said "room" on the user's RX 5700 XT at every rung its GPU could not draw (9-10 ms a frame there).
+        // TF_RATE_DRAW=0: the EE's work alone, as before.
+        static const bool drawCheck = !(std::getenv("TF_RATE_DRAW") && *std::getenv("TF_RATE_DRAW") == '0');
+        const bool nativeDraw = drawCheck && g_fastGameFallback && nativeOnePicture();
+        const auto drawnP90 = [&](double ms)
+        {
+            const double frames = ms / std::max(1.0, periodMs(g_levelRate));
+            const unsigned n = static_cast<unsigned>(std::clamp(frames, 8.0, 1024.0));
+            return std::max(nr::drawnFrameMs(0.90, n), nr::gpuFrameMs(0.90, n));
+        };
+        double drawMargin = 0.92; // (0.85 after a fall the drawing made: the way up below)
+        const auto drawFits = [&](double p, double judgeMs)
+        {
+            if (!nativeDraw)
+                return true;
+            const double d = drawnP90(judgeMs);
+            return d <= 0.0 || d < drawMargin * p;
+        };
+        const auto drawWalled = [&](int rate)
+        { return g_drawWallRate > 0 && now < g_drawWallUntil && rate >= 0.97 * g_drawWallRate; };
         size_t index = g_rateIndex;
         int inBetweenChange = 0; // (+1 on, -1 off)
         const std::vector<float> recent = lastOf(500.0, &RateSample::interval);
@@ -4105,7 +4148,13 @@ namespace
                 // The work is the EE's; a host held back by the GS or the GPU shows it only in the
                 // frames' intervals - what it managed, with 5% to spare.
                 double needed = std::max(1.1 * percentile(lastOf(500.0, &RateSample::work), 0.5), 1.05 * percentile(recent, 0.5));
-                if (drawnShare < 1.0) // (TODO 165: the drawing's rate, with 5% to spare)
+                // (TODO 290 fps: the drawing's own measured time where it is known - a rate whose period holds its 90th
+                // percentile with 5% to spare, between the way up's 92% and the period itself, so the rate it lands on is not
+                // one the way up leaves at once. The share drawn overshot: 108 -> 78 on the user's RX 5700 XT.)
+                const double drawn = nativeDraw ? drawnP90(1500.0) : 0.0;
+                if (drawn > 0.0)
+                    needed = std::max(needed, drawn / 0.95);
+                else if (drawnShare < 1.0) // (TODO 165: the drawing's rate, with 5% to spare)
                     needed = std::max(needed, 1.05 * periodMs(g_levelRate) / std::max(0.05, drawnShare));
                 index = g_rateIndex + 1;
                 while (index + 1 < g_rates.size() && periodMs(g_rates[index]) < needed)
@@ -4137,7 +4186,18 @@ namespace
                 // well inside the higher rate's period: the median under 80% of it, the 98th percentile under 95%.
                 // Before: 2 s, 85% and the 95th percentile under 105% - it went up where it could not stay.)
                 // (TODO 168: on the last 2 s in a load's or a level's first seconds)
-                const double judgeMs = now < g_rateRecoverUntil ? 2000.0 : 6000.0;
+                // (TODO 290 fps: after a fall the drawing made, within the last 2 minutes, the way up is judged on 15 s and
+                // needs the drawing under 85% of the higher period, not 92% - a view's GPU time comes and goes as the camera
+                // turns, and on the 6 s the RX 5700 XT climbed into each heavier view and fell again. TF_RATE_UP_S=<s>.)
+                static const double upAfterDrawFallMs = []()
+                {
+                    const char *e = std::getenv("TF_RATE_UP_S");
+                    return e && *e ? std::max(2.0, std::atof(e)) * 1000.0 : 15000.0;
+                }();
+                const bool drawFellLately = nativeDraw && g_drawWallSetAt != std::chrono::steady_clock::time_point{} &&
+                                            now - g_drawWallSetAt < std::chrono::minutes(2);
+                drawMargin = drawFellLately ? 0.85 : 0.92;
+                const double judgeMs = now < g_rateRecoverUntil ? 2000.0 : drawFellLately ? upAfterDrawFallMs : 6000.0;
                 const std::vector<float> work = lastOf(judgeMs, &RateSample::work);
                 const std::vector<float> intervals = lastOf(judgeMs, &RateSample::interval);
                 const double higher = periodMs(g_rates[g_rateIndex - 1]);
@@ -4163,7 +4223,8 @@ namespace
                     mean /= static_cast<double>(std::max<size_t>(1u, intervals.size()));
                     const double p95 = recover ? mean : percentile(intervals, 0.95), w50 = percentile(work, 0.5), w98 = percentile(work, 0.98);
                     // (TODO 165: and the drawing kept every frame - under 1% left out in the last 6 s)
-                    if (p95 < onTime && w50 < 0.80 * higher && w98 < 0.95 * higher && leftOutShare(judgeMs) < 0.01)
+                    const bool drawRoom = drawFits(higher, judgeMs) && !drawWalled(g_rates[g_rateIndex - 1]);
+                    if (p95 < onTime && w50 < 0.80 * higher && w98 < 0.95 * higher && leftOutShare(judgeMs) < 0.01 && drawRoom)
                     {
                         index = g_rateIndex - 1;
                         // (TODO 160: following, straight to the highest rate the work fits as well - under the last miss's
@@ -4187,7 +4248,11 @@ namespace
                                 // forgotten, straight to what the work fits - an outside stall took this PC to 30 and the 12%
                                 // steps took two minutes back to 240)
                                 const bool nearMiss = g_ceilingFails > 0 && g_rates[i] >= 0.85 * g_ceilingRate;
-                                const bool tooFar = nearMiss && g_rates[i] > std::max(static_cast<double>(g_levelRate) * 1.12, g_levelRate + 3.0) &&
+                                // (TODO 290 fps: not with the native renderer's own time judged as well - drawFits sees the
+                                // graphics card, so the climb goes straight to the rate both fit, one change, not 58 -> 64 ->
+                                // 72 -> 78 a change every 6 s)
+                                const bool tooFar = !nativeDraw && nearMiss &&
+                                                    g_rates[i] > std::max(static_cast<double>(g_levelRate) * 1.12, g_levelRate + 3.0) &&
                                                     g_rates[i] != g_rates[0];
                                 const bool capNear = g_rates[i] == g_rates[0] && g_rates[0] <= g_levelRate * 1.12;
                                 // (and at least 8% up, the cap excepted: each change is a conversion and a little hitch, and the
@@ -4196,7 +4261,8 @@ namespace
                                                      g_rates[i] != g_rates[0];
                                 if (tooNear)
                                     break;
-                                if (!walled && (!tooFar || capNear) && w50 < 0.80 * p && w98 < 0.95 * p)
+                                if (!walled && !drawWalled(g_rates[i]) && (!tooFar || capNear) && w50 < 0.80 * p && w98 < 0.95 * p &&
+                                    drawFits(p, judgeMs))
                                 {
                                     index = i;
                                     break;
@@ -4211,8 +4277,12 @@ namespace
                         {
                             lastSaid = now;
                             std::fprintf(stderr, "[tf] rate %d held (not up to %d): intervals %s %.2f ms (up when < %.2f), work p50 %.2f (< %.2f), "
-                                                 "p98 %.2f (< %.2f)\n", g_levelRate, g_rates[g_rateIndex - 1], recover ? "mean" : "p95", p95, onTime, w50, 0.80 * higher,
-                                         w98, 0.95 * higher);
+                                                 "p98 %.2f (< %.2f); the drawing p90 %.2f (< %.2f: render thread %.2f, GPU %.2f)%s\n", g_levelRate,
+                                         g_rates[g_rateIndex - 1], recover ? "mean" : "p95", p95, onTime, w50, 0.80 * higher, w98, 0.95 * higher,
+                                         nativeDraw ? drawnP90(judgeMs) : 0.0, drawMargin * higher,
+                                         nr::drawnFrameMs(0.90, static_cast<unsigned>(std::clamp(judgeMs / period, 8.0, 1024.0))),
+                                         nr::gpuFrameMs(0.90, static_cast<unsigned>(std::clamp(judgeMs / period, 8.0, 1024.0))),
+                                         drawWalled(g_rates[g_rateIndex - 1]) ? "; the drawing's wall" : "");
                         }
                     }
                 }
@@ -4285,6 +4355,24 @@ namespace
                 g_barredUntil[g_rateIndex] = now + std::chrono::seconds(barredSeconds);
                 g_ceilingRate = from;
                 g_ceilingUntil = g_barredUntil[g_rateIndex];
+                // (TODO 290 fps: the drawing's wall - the renderer's frames left out, or its 90th percentile over the period)
+                const double d95 = nativeDraw ? drawnP90(1500.0) : 0.0;
+                if (nativeDraw && (drawnShare < 1.0 || d95 > 0.97 * periodMs(from)))
+                {
+                    static const int wallS = []()
+                    {
+                        const char *e = std::getenv("TF_RATE_DRAW_WALL_S");
+                        return e && *e ? std::max(1, std::atoi(e)) : 60;
+                    }();
+                    const bool again = g_drawWallSetAt != std::chrono::steady_clock::time_point{} && now - g_drawWallSetAt < std::chrono::minutes(5);
+                    g_drawWallSeconds = again ? std::min(300, std::max(wallS, g_drawWallSeconds * 2)) : wallS;
+                    // (the lowest rate the drawing fell from while its wall stands: a fall from under it lowers it)
+                    g_drawWallRate = again && now < g_drawWallUntil && g_drawWallRate > 0 ? std::min(g_drawWallRate, from) : from;
+                    g_drawWallSetAt = now;
+                    g_drawWallUntil = now + std::chrono::seconds(g_drawWallSeconds);
+                    std::fprintf(stderr, "[tf] the drawing could not hold %d frames a second (its frames' 90%% %.2f ms, %.0f%% drawn): "
+                                         "nothing from %d up for %d s\n", from, d95, 100.0 * drawnShare, g_drawWallRate, g_drawWallSeconds);
+                }
                 if (followRates())
                 {
                     // (TODO 160: every whole rate has its own count, so a count per rate never grew - the test PC changed
@@ -5159,6 +5247,12 @@ namespace
     // The preset's values for the settings left on Auto.
     float presetScenery(float preset) { return preset == 1.0f ? 1.0f : std::max(preset, 4.0f); }
     float presetSprites(float preset) { return preset == 1.0f ? 0.0f : 1.0f; }
+    // (2026-11-11, the user's decision) The forest's reach on Auto at most 2x, whatever the Draw distance: 3x and 4x (and
+    // "Trees: full 3D at any distance") are very heavy - the user's RX 5700 XT in Amazon at 3440x1440: forest 4x 87 frames
+    // a second, 2x 103 (its GPU's time a frame 10.0 -> 8.4 ms) - so they come only from the Forest distance row itself, and
+    // the Ultra preset leaves the forest on Auto. A settings file the old Ultra wrote is moved to the new one at start
+    // (migrateUltraForest).
+    constexpr float kForestAutoMax = 2.0f;
     // (TODO 137: the grass's reach the preset's factor - 1 = the console's; measured cheap: 4x about +0.2 ms of GPU time)
     float presetGrass(float preset) { return preset <= 1.0f ? 1.0f : std::min(preset, 16.0f); }
     // The four from the preset and the settings' values ("" or "auto": the preset's).
@@ -5176,8 +5270,8 @@ namespace
         d.grass = distanceChoice(grass, 1.0f, 16.0f);
         if (d.scenery < 0.0f)
             d.scenery = presetScenery(preset);
-        if (d.forest < 0.0f)
-            d.forest = std::max(1.0f, preset);
+        if (d.forest < 0.0f) // (2026-11-11, the user: on Auto the forest goes no further than 2x - 3x and 4x only from its own row)
+            d.forest = std::clamp(preset, 1.0f, kForestAutoMax);
         if (d.sprites < 0.0f)
             d.sprites = presetSprites(preset);
         if (d.grass < 0.0f)
@@ -7590,8 +7684,74 @@ namespace
         std::fprintf(stderr, "[tf:chardetail] %zu steps, %zu types only\n", g_charDetailSteps.size(), g_charDetailOnly.size());
     }
 
+    // (2026-11-11, the user's decision) The old Ultra preset into the new one: a settings file holding everything the old Ultra
+    // wrote for the distances - Draw distance, scenery, forest, grass and ground at 4x, far trees 3D to the edge, 8x smooth
+    // edges (with "Trees: full 3D" on, as the last Ultra wrote it, or not, as the one before) - has its forest set back to
+    // Auto (2x at most, kForestAutoMax), its far trees to Auto and full 3D off, at start, before anything reads them; the file
+    // is written once the settings are known (addSettings). Only the file's values count, not a launch's environment (test
+    // runs), and a forest set apart by hand - any of the other rows not at their Ultra value - stays. TF_ULTRA_MIGRATE=0: off.
+    std::vector<std::pair<std::string, std::string>> g_ultraMigrated;
+    void migrateUltraForest()
+    {
+        if (const char *e = std::getenv("TF_ULTRA_MIGRATE"); e && *e == '0')
+            return;
+        std::filesystem::path file = "settings.ini";
+        if (const char *env = std::getenv("PS2X_SETTINGS_FILE"))
+        {
+            const std::string name = env;
+            if (name.empty() || name == "0" || name == "none" || name == "NONE")
+                return;
+            file = name;
+        }
+        std::ifstream in(file);
+        if (!in)
+            return;
+        std::map<std::string, std::string> fromFile;
+        for (std::string line; std::getline(in, line);)
+        {
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
+                line.pop_back();
+            const size_t eq = line.find('=');
+            if (line.empty() || line[0] == '#' || line[0] == ';' || eq == std::string::npos)
+                continue;
+            std::string key = line.substr(0, eq), value = line.substr(eq + 1);
+            while (!key.empty() && (key.back() == ' ' || key.back() == '\t'))
+                key.pop_back();
+            while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
+                value.erase(value.begin());
+            if (!fromFile.count(key))
+                fromFile[key] = value;
+        }
+        const auto is = [&](const char *key, const char *value)
+        {
+            const auto it = fromFile.find(key);
+            const char *env = std::getenv(key);
+            return it != fromFile.end() && it->second == value && env && it->second == env;
+        };
+        if (!is("TF_DRAW_DISTANCE", "4") || !is("TF_SCENERY_DISTANCE", "4") || !is("TF_FOREST_DISTANCE", "4") || !is("TF_GRASS_DISTANCE", "4") ||
+            !is("TF_TERRAIN_DETAIL", "4") || !is("TF_FOREST_SPRITES", "1") || !is("PS2X_GPU_MSAA", "8"))
+            return;
+        if (const auto it = fromFile.find("TF_FOREST_FULL_DETAIL"); it != fromFile.end() && it->second != "0" && it->second != "1" && !it->second.empty())
+            return;
+        g_ultraMigrated = {{"TF_FOREST_DISTANCE", ""}, {"TF_FOREST_SPRITES", ""}, {"TF_FOREST_FULL_DETAIL", "0"}};
+        for (const auto &[key, value] : g_ultraMigrated)
+        {
+#if defined(_WIN32)
+            _putenv_s(key.c_str(), value.c_str());
+#else
+            if (value.empty())
+                unsetenv(key.c_str());
+            else
+                setenv(key.c_str(), value.c_str(), 1);
+#endif
+        }
+        std::fprintf(stderr, "[tf] the settings are the old Ultra preset's: the forest set to the new Ultra's - Auto (2x), far trees "
+                             "Auto, full 3D off (Forest distance and Trees in Graphics > Advanced set them apart)\n");
+    }
+
     void installDrawDistance(PS2Runtime &runtime)
     {
+        migrateUltraForest();
         installCharDetail(runtime);
         installForest(runtime);
         if (g_poolCensusOn)
@@ -7857,7 +8017,7 @@ namespace
             s.label = "Draw distance";
             s.order = 40;
             s.help = "How far the detail reaches: 1x is the console's, everywhere. Above it the scenery's detail goes to 4x "
-                     "(it costs almost nothing), the forest's trees to this factor (they are the cost: game time and graphics "
+                     "(it costs almost nothing), the forest's trees to this factor but at most 2x (they are the cost: game time and graphics "
                      "card), drawn 3D to the edge, and the grass and the ground's close-up texture reach this factor too "
                      "(the ground at most 4x). Enemies, your Autobot and the pickups are drawn whole at any distance (Enemy "
                      "detail). The settings below set each one apart (Auto: from this).";
@@ -7927,7 +8087,8 @@ namespace
                 s.label = "Forest distance";
                 s.order = 42;
                 s.help = "How far the forest's 3D trees reach: 1x is the console's. This is what more draw distance costs "
-                         "(game time above all); when the PC falls behind, the far trees go first.";
+                         "(game time above all); when the PC falls behind, the far trees go first. Auto: from Draw distance, 2x "
+                         "at most. 3x and 4x: very heavy, can drop the frame rate a lot, even on strong graphics cards.";
                 s.choices.push_back(autoChoice());
                 for (const char *value : {"1", "1.5", "2", "3", "4"})
                     s.choices.push_back(Choice{value, std::string(value) + times});
@@ -7966,7 +8127,8 @@ namespace
                 s.order = 43;
                 s.help = "Full 3D at any distance: every tree in view is its 3D model with all its leaves, however far - no "
                          "flat far-away pictures and no trees changing as you walk. It costs game time and graphics card time "
-                         "where a lot of forest is in view (from a big hilltop view it can cut the frame rate to a quarter). Off: as Forest "
+                         "where a lot of forest is in view (from a big hilltop view it can cut the frame rate to a quarter): very heavy, even on "
+                         "strong graphics cards. No preset turns it on. Off: as Forest "
                          "distance says - flat pictures beyond it, the leaves only on the nearest trees.";
                 s.choices.push_back(Choice{"0", "Off"});
                 s.choices.push_back(Choice{"1", "Full 3D at any distance"});
@@ -8452,6 +8614,11 @@ namespace
                     break;
                 slowest.push_back(f.ms);
             }
+            // (TODO 291: the 1% low of the pictures shown, as the pacing line counts them - what the player sees - with the game's
+            // frames' own beside it: the game's wait for a VBlank inside a frame pairs a late frame with a short one while the
+            // pictures stay even, and their 1% low read as a stutter the screen never showed. Without a native picture live:
+            // the game's frames', as before.)
+            const double pictureLow = nr::pictureLowRate(30.0);
             if (slowest.size() >= 100u)
             {
                 const size_t count = slowest.size() / 100u;
@@ -8459,8 +8626,14 @@ namespace
                 double sum = 0.0;
                 for (size_t i = 0; i < count; ++i)
                     sum += slowest[i];
-                std::cerr << " 1% low " << (sum > 0.0 ? 1000.0 * static_cast<double>(count) / sum : 0.0);
+                const double frameLow = sum > 0.0 ? 1000.0 * static_cast<double>(count) / sum : 0.0;
+                if (pictureLow > 0.0)
+                    std::cerr << " 1% low " << pictureLow << " (the pictures; the game's frames' slowest 1%: " << frameLow << " a second)";
+                else
+                    std::cerr << " 1% low " << frameLow;
             }
+            else if (pictureLow > 0.0)
+                std::cerr << " 1% low " << pictureLow << " (the pictures)";
             std::cerr << std::endl;
             reportedOnce = true;
             frames = 0;
@@ -9494,6 +9667,8 @@ namespace
         installCoverage(runtime);
         installCallMap(runtime);
         addSettings();
+        for (const auto &[key, value] : g_ultraMigrated) // (the old Ultra's forest moved to the new: into the settings file)
+            ps2_settings::noteChanged(key, value);
         if (!ext::install(ext::Phase::AfterSettings, runtime)) runtime.requestStop(); // (the Decepticon HQ's first part)
         // The HQ's selected Autobot sits back down at the PC rate (TODO 107; Jenvery, PR #6): a
         // high-rate fade-in's first weight rounds to 0 and the game disabled the incoming idle.

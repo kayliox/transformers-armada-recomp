@@ -66,7 +66,9 @@ if ($Iso) {
 # (written now: the build reads it - an install's version knows it was set up, transformers\version.cmake)
 $state | ConvertTo-Json | Set-Content $StateFile -Encoding UTF8
 
-$gameDir = Join-Path $Port "game"
+# (TODO 279: the disc's files may be in the install's data\game - tools\install_layout.ps1)
+. (Join-Path $Port "tools\install_layout.ps1")
+$gameDir = Get-GameDataDir $Port
 $haveGame = (Test-Path (Join-Path $gameDir "SLUS_206.68")) -or (Test-Path (Join-Path $gameDir "SLES_523.88"))
 if (-not $haveGame -and -not $state.Iso) {
     Fail "first setup: give your disc image, e.g.  .\setup.ps1 -Iso `"D:\Games\Transformers (USA).iso`""

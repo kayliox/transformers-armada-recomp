@@ -1942,6 +1942,7 @@ namespace nr::vulkan
                         {
                             frame::g_frameGpu += gpuMs;
                             ++frame::g_frameGpuFrames;
+                            nr::noteGpuFrame(gpuMs); // (TODO 290 fps: the rate governor's way up)
                             const double was = g_gpuPictureMs.load(std::memory_order_relaxed);
                             g_gpuPictureMs.store(was <= 0.0 ? gpuMs : (gpuMs > was ? 0.8 * was + 0.2 * gpuMs : 0.97 * was + 0.03 * gpuMs),
                                                  std::memory_order_relaxed);

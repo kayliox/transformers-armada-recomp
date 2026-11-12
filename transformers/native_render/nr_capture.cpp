@@ -3328,6 +3328,27 @@ namespace nr
                     d.texture = textureFor(rdram, d.tex0, 0u);
                 if (!d.texture)
                     d.texture = textureFor(rdram, d.tex0, bound);
+                {
+                    // (Debug, TODO 270: TF_NATIVE_TEX0SWAP=<tex0 hex>:<tex0 hex>: draws with the first TEX0 drawn with the second - Deep
+                    // Amazon's torch cards with the flame sheet's, 200610859930ae90:2005fb8621312a00, to test a pairing)
+                    static uint64_t from = 0, to = 0;
+                    static const bool parsed = [] {
+                        if (const char *e = std::getenv("TF_NATIVE_TEX0SWAP"))
+                        {
+                            char *end = nullptr;
+                            from = std::strtoull(e, &end, 16);
+                            if (end && *end == ':')
+                                to = std::strtoull(end + 1, nullptr, 16);
+                        }
+                        return true;
+                    }();
+                    (void)parsed;
+                    if (from && d.tex0 == from)
+                    {
+                        d.tex0 = to;
+                        d.texture = textureFor(rdram, to, 0u);
+                    }
+                }
                 d.topPalette = topPaletteFor(rdram, d.tex0, bound);
             }
         }
@@ -5525,6 +5546,8 @@ namespace nr
         static thread_local std::vector<std::pair<uint32_t, uint32_t>> positions;
         uint32_t readingBefore = 0;
         auto applyNative = [&](uint32_t upToAt, uint32_t beforeDraw) {
+            gif::t_offList = true; // (TF_NATIVE_TEX0LOG)
+            struct OffList { ~OffList() { gif::t_offList = false; } } offList;
             while (nw < frame.nativeRegs.size() && frame.nativeRegs[nw].before <= beforeDraw && frame.nativeRegs[nw].at <= upToAt)
             {
                 const Frame::NativeWrite &w = frame.nativeRegs[nw++];
@@ -5687,6 +5710,12 @@ namespace nr
             words.clear();
             positions.clear();
             readingBefore = r.before;
+            // (Debug, TODO 270: TF_NATIVE_ORDLOG=<tick>: for three frames from that tick, each stretch read and the state's write
+            // count then - with TF_NATIVE_TEX0LOG and TF_NATIVE_DRAWTBP, where each write and draw falls)
+            static const uint64_t ordTick = std::getenv("TF_NATIVE_ORDLOG") ? std::strtoull(std::getenv("TF_NATIVE_ORDLOG"), nullptr, 10) : 0u;
+            if (ordTick && frame.tick >= ordTick && frame.tick < ordTick + 3u)
+                std::fprintf(stderr, "[native render] order: stretch %08x..%08x before draw %u (writes %llu)\n", r.from, r.to, r.before,
+                             static_cast<unsigned long long>(g_gif.writes));
             const bool ok = gatherList(g_rdram, r.from, r.to, words, frame.nativeRegs.empty() && chunks.empty() ? nullptr : &positions);
             if (logRanges)
             {
@@ -5776,6 +5805,8 @@ namespace nr
                     // (N5.3: the native functions' registers before them too - the state the pipelines' packets draw with)
                     if (nw < frame.nativeRegs.size() && t_kickWord)
                         applyNative(listAt(t_kickWord), readingBefore);
+                    gif::t_offList = true; // (TF_NATIVE_TEX0LOG: the particle pipelines' own packets)
+                    struct OffList { ~OffList() { gif::t_offList = false; } } offList;
                     gif::run(g_gif, w, qwords, [&](const gif::Primitives &p) {
                         if (particleDrawLog > 0 && !p.vertices.empty() && frame.tick >= particleDrawFrom)
                         {
@@ -5955,6 +5986,14 @@ namespace nr
                 d.tex12 = regs.tex1[1];
                 if (d.fromList)
                     applyListState(g_rdram, d, regs);
+                {
+                    // (Debug, TODO 270: TF_NATIVE_DRAWTBP=<tbp hex>, with TF_NATIVE_ORDLOG: the draws whose TEX0 has that TBP)
+                    static const uint64_t ordTick = std::getenv("TF_NATIVE_ORDLOG") ? std::strtoull(std::getenv("TF_NATIVE_ORDLOG"), nullptr, 10) : 0u;
+                    static const uint32_t drawTbp = std::getenv("TF_NATIVE_DRAWTBP") ? static_cast<uint32_t>(std::strtoul(std::getenv("TF_NATIVE_DRAWTBP"), nullptr, 16)) : 0xFFFFFFFFu;
+                    if (ordTick && frame.tick >= ordTick && frame.tick < ordTick + 3u && (static_cast<uint32_t>(d.tex0) & 0x3FFFu) == drawTbp)
+                        std::fprintf(stderr, "[native render] order: draw %zu tick %llu tex0 %016llx (writes %llu)\n", k, static_cast<unsigned long long>(frame.tick),
+                                     static_cast<unsigned long long>(d.tex0), static_cast<unsigned long long>(regs.writes));
+                }
                 // The dash's after-image (0x2220, TODO 69): the game writes TEX0_1, ALPHA_1 (0x44, the
                 // usual blend) and TEST_1 (0x7001b) into the list itself (VIF DIRECT, after the set's state
                 // block) - TEX0_1 becoming the lit material's context-2 texture, the character's own, where

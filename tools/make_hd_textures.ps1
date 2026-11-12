@@ -45,7 +45,9 @@ param([switch]$SkipUpscale, [switch]$CrispFontsOnly, [switch]$FontsOnly, [string
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path $PSScriptRoot -Parent
-$Game = Join-Path $Root "game"
+# (TODO 279: the disc's files may be in the install's data\game - install_layout.ps1)
+. (Join-Path $PSScriptRoot "install_layout.ps1")
+$Game = Get-GameDataDir $Root
 $Out = Join-Path $Root "hd_textures"
 $Py = Join-Path $PSScriptRoot "hd_textures"
 

@@ -1477,9 +1477,9 @@ namespace mod_menu
             {"PS2X_GPU_SCALE", "Resolution", "The resolution the game renders at. With the native renderer the game is drawn at the screen's size, and this sets only the menus and movies."},
             {"TF_DRAW_DISTANCE", "Draw distance", "How far you can see detail: scenery, trees, grass and the ground."},
             {"TF_SCENERY_DISTANCE", "Scenery distance", "How far buildings and ruins keep their detail."},
-            {"TF_FOREST_DISTANCE", "Forest distance", "How far the trees are full 3D models."},
+            {"TF_FOREST_DISTANCE", "Forest distance", "How far the trees are full 3D models. Auto: 2x at most. 3x and 4x are very heavy: can drop the frame rate a lot, even on strong graphics cards."},
             {"TF_FOREST_SPRITES", "Far trees", "The farthest trees: 3D models or flat pictures."},
-            {"TF_FOREST_FULL_DETAIL", "Trees", "Every tree as a full 3D model at any distance. Costs a lot of frame rate."},
+            {"TF_FOREST_FULL_DETAIL", "Trees", "Every tree as a full 3D model at any distance. Very heavy: can drop the frame rate a lot, even on strong graphics cards."},
             {"TF_GRASS_DISTANCE", "Grass distance", "How far the grass reaches."},
             {"TF_TERRAIN_DETAIL", "Ground detail distance", "How far the ground keeps its close-up texture."},
             {"TF_FOREST_ADAPTIVE", "Forest on slower PCs", "Adaptive shortens the forest when the frame rate drops."},
@@ -1718,10 +1718,10 @@ namespace mod_menu
                 apply(options[static_cast<size_t>(chosen)]);
         }
 
-        // Graphics presets. Ultra is everything at its highest (the sub-distances at their last choice, the Trees row's
-        // "Full 3D at any distance" - TODO 194; the other presets leave Trees off).
-        const char *const kUltraMax[] = {"TF_DRAW_DISTANCE", "TF_SCENERY_DISTANCE", "TF_FOREST_DISTANCE", "TF_GRASS_DISTANCE",
-                                         "TF_TERRAIN_DETAIL", "TF_FOREST_FULL_DETAIL"};
+        // Graphics presets. Ultra is everything at its highest (the sub-distances at their last choice) but the forest: on Auto,
+        // 2x at most, and the Trees row's "Full 3D at any distance" off (2026-11-11, the user: very heavy even on strong
+        // graphics cards - only from their own rows under Advanced; before, Ultra set the forest to 4x, 3D to the edge, full 3D).
+        const char *const kUltraMax[] = {"TF_DRAW_DISTANCE", "TF_SCENERY_DISTANCE", "TF_GRASS_DISTANCE", "TF_TERRAIN_DETAIL"};
         std::vector<Option> presets()
         {
             const auto preset = [](const char *name, const char *draw, const char *enemy, const char *edge, const char *msaa,
@@ -1732,7 +1732,7 @@ namespace mod_menu
                 for (const char *k : {"TF_SCENERY_DISTANCE", "TF_FOREST_DISTANCE", "TF_GRASS_DISTANCE", "TF_TERRAIN_DETAIL", "TF_FOREST_SPRITES"})
                     o.pairs.push_back({k, "", {}}); // (Auto: from Draw distance)
                 o.pairs.push_back({"TF_FOREST_ADAPTIVE", "0", {}});
-                o.pairs.push_back({"TF_FOREST_FULL_DETAIL", "0", {}}); // (Ultra: kUltraMax)
+                o.pairs.push_back({"TF_FOREST_FULL_DETAIL", "0", {}}); // (every preset: only its own row turns it on)
                 o.pairs.push_back({"TF_ENEMY_DETAIL", enemy, {}});
                 o.pairs.push_back({"TF_NATIVE_AA", edge, {}});
                 o.pairs.push_back({"PS2X_GPU_MSAA", msaa, {}});
@@ -1751,8 +1751,6 @@ namespace mod_menu
                 if (std::find_if(std::begin(kUltraMax), std::end(kUltraMax), [&](const char *k) { return std::strcmp(k, p.key) == 0; }) !=
                     std::end(kUltraMax))
                     p.value = kMax;
-                if (std::strcmp(p.key, "TF_FOREST_SPRITES") == 0)
-                    p.value = "1"; // (3D to the edge)
             }
             return list;
         }
@@ -1893,7 +1891,7 @@ namespace mod_menu
                 keyRow("TF_SCENERY_DISTANCE");
                 keyRow("TF_FOREST_DISTANCE");
                 keyRow("TF_FOREST_SPRITES");
-                keyRow("TF_FOREST_FULL_DETAIL"); // (TODO 194: a big cost, so under Advanced; Ultra turns it on)
+                keyRow("TF_FOREST_FULL_DETAIL"); // (TODO 194: a big cost, so under Advanced - and only here: no preset turns it on)
                 keyRow("TF_GRASS_DISTANCE");
                 keyRow("TF_TERRAIN_DETAIL");
                 keyRow("TF_FOREST_ADAPTIVE");

@@ -70,12 +70,46 @@
   sets made before this fix, and "HD textures ready" no longer comes back at every start once the set is finished.
   `make_hd_textures.sh` checks the set's images once, as the Windows maker does (0.4.7's checks too).
 
+## 0.6.6
+
+**New**
+- Your things now have their own folders in the folder you installed into: `saves` (memory cards, save states,
+  backups and exports), `logs`, `settings.ini` and `data` (the game's files from your disc and the HD movies). The
+  game itself stays in `transformers-armada-recomp`. The README's "Where things are" shows what is where.
+- `Transformers Armada.exe` in the folder you installed into starts the game. Give it to Steam or any other
+  launcher: it stays open until the game closes.
+- The whole folder can be copied to another drive, another PC or a Steam Deck and plays from there.
+
+**Changed**
+- This update moves your saves, settings and the disc's files into the new folders, once, by itself. It first makes
+  a backup of your saves and settings in `saves\backups`. If the backup cannot be made (for example a full disk),
+  nothing moves and the game plays on as before; the next update tries again. Your desktop shortcut keeps working.
+- Playing on a Steam Deck or another PC with a copied folder? After this update copy the whole game folder again
+  (not only the folder inside it), back up the Deck's saves first, and point Steam at `Transformers Armada.exe` in
+  the main folder.
+- RecompLauncher: its manifest names the new folders, so its save backups keep working after the move.
+
+**Fixed**
+- On the USA disc a change of picture shape (4:3 and 16:9) shows at once again, as in 0.5.0; the European disc
+  keeps its 50 Hz fixes. Thanks to TheBrousse.
+
+## 0.6.5
+
+**Fixed**
+- On PCs held back by the graphics card, the frame rate no longer keeps stepping up and down (felt as stutter); it
+  settles on a rate the card can draw. On an RX 5700 XT at 3440x1440 the dropped frames fell by about 80%.
+
+**Changed**
+- The Ultra preset keeps the forest at 2x. A longer forest and "every tree in full 3D" are now only under
+  Graphics > Advanced, with a warning: they are very heavy, even on strong graphics cards. If you chose Ultra
+  before, the new Ultra applies at your next start (forest settings you set by hand are kept).
+- The 1% low in the frame-rate log now counts the pictures you see, not the game's internal frames.
+
 ## 0.6.4
 
 **Changed**
 - Sounds now fade out with the PS2 sound chip's own curves instead of straight lines, so menu clicks, impacts,
   engines and the dropship end as they do on the console.
-- More of the game runs from the decompiled code (built on the decomp's latest version).
 
 **Fixed**
 - On ultrawide screens the sun's glare is round again instead of a tall oval.

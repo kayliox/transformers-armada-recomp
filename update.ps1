@@ -213,7 +213,14 @@ if ($Hooks) { . $Hooks }
 $pre = Get-PortPrefix $Repo $Port   # ("" in a clone of the game's repository; "port/" when one holds this folder)
 # (git never asks for anything in a window without anyone to answer: the game's update is unattended)
 if ($Play) { $env:GIT_TERMINAL_PROMPT = "0"; $env:GCM_INTERACTIVE = "never" }
-try { Start-Transcript -Path (Join-Path $Repo "update.log") -Force | Out-Null } catch {}
+# (TODO 279: the install's logs\ when its folders were moved; update.log in the checkout before that)
+$UpdateLog = Join-Path $Repo "update.log"
+if (Test-Path -LiteralPath (Join-Path $Port "tools\install_layout.ps1")) {
+    . (Join-Path $Port "tools\install_layout.ps1")
+    $logs = Get-LayoutLogsDir $Port
+    if ($logs) { $UpdateLog = Join-Path $logs "update.log" }
+}
+try { Start-Transcript -Path $UpdateLog -Force | Out-Null } catch {}
 
 if ($WaitForPid -gt 0) {
     $game = Get-Process -Id $WaitForPid -ErrorAction SilentlyContinue
