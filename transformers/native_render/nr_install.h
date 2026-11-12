@@ -9,6 +9,9 @@ class PS2Runtime;
 namespace nr
 {
     void install(PS2Runtime &runtime);
+    // (Milestone 3) Before the window is made, on the main thread: with TF_GFX_API=vulkan under SDL3's window
+    // (PS2X_PLATFORM=sdl3) the Vulkan backend presents the game's window itself (nr_backend.cpp).
+    void beforeWindow();
     // Registered before capture starts. Sampled on the EE thread for each new
     // frame; queued frames retain their own choice. Null/failed proofs use normal policy.
     void setFrameTexturePolicy(bool (*policy)(const uint8_t *, size_t));
@@ -45,6 +48,9 @@ double pictureLowRate(double seconds);
     // ready the GS draws (the emulated drawing on), and the game's render device runs its own code where the native
     // one stands in later - a play recording's start and its replay wait for it (playrec.cpp).
     bool rendererStarting();
+    // (TODO 298) The HD set's index (nr_hires.cpp: a walk of thousands of files, ~0.2 s) made on a thread of its own at
+    // the start (main, once the settings are read), while the window opens - not on the game's first frames.
+    void prepareHires();
     // `TransformersRecomp --bake-shaders <file>` (build.ps1, after linking): the renderer's shaders compiled and written
     // as the table built into the next link (nr_d3d.cpp). 0: unchanged, 2: written anew, 1: failed.
     int bakeShaders(const char *path);

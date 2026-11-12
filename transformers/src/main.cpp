@@ -29,6 +29,7 @@
 #include "updates.h"
 #include "self_log.h"
 #include "install_layout.h"
+#include "iop_tripwire.h"
 #if defined(PS2X_ENABLE_DEBUG_UI)
 #include "ps2_debug_panel.h"
 #endif
@@ -319,8 +320,13 @@ int main(int argc, char *argv[])
     // separate write to the console or file, which cost most of the frame time;
     // buffer both streams and flush them from a background thread instead, so
     // the logs are still (nearly) complete if the game is killed.
-    std::setvbuf(stdout, nullptr, _IOFBF, 1 << 16);
-    std::setvbuf(stderr, nullptr, _IOFBF, 1 << 16);
+    // (TODO 298) TF_LOG_UNBUFFERED=1 (timings): every line written as it comes, so a reader timing them (the start's
+    // steps) sees each at its moment - slower, a test aid only.
+    if (const char *unbuffered = std::getenv("TF_LOG_UNBUFFERED"); !(unbuffered && *unbuffered == '1'))
+    {
+        std::setvbuf(stdout, nullptr, _IOFBF, 1 << 16);
+        std::setvbuf(stderr, nullptr, _IOFBF, 1 << 16);
+    }
     std::thread([]()
                 {
                     ThreadNaming::SetCurrentThreadName("StdioFlush");
@@ -337,6 +343,23 @@ int main(int argc, char *argv[])
                            std::cerr << "[terminate] unhandled exception" << std::endl;
                            std::abort(); });
 
+    // (TODO 294) The native renderer's variables the settings derive (nr_capture.cpp: TF_RENDERER=native sets
+    // TF_NATIVE_RENDER, _LIVE and _ONLY in the environment) came along into a process this one's game started (the
+    // settings panel's Restart now, a recovery after a lost graphics device, an update's resume) and counted there as
+    // variables set on purpose: the menus' emulated GS kept the full Resolution (8 x 8, 4 samples - the TODO 117 cut to the
+    // screen's size skipped), and a Renderer changed to Emulated before the restart stayed native. Made anew here from
+    // the settings instead.
+    if (const char *derived = std::getenv("TF_NATIVE_FROM_SETTINGS"); derived && *derived == '1')
+    {
+        for (const char *name : {"TF_NATIVE_RENDER", "TF_NATIVE_LIVE", "TF_NATIVE_ONLY", "TF_NATIVE_FROM_SETTINGS"})
+        {
+#if defined(_WIN32)
+            _putenv_s(name, "");
+#else
+            unsetenv(name);
+#endif
+        }
+    }
     // The environment the game was started with (before settings.ini fills it): what the updater and
     // a start again get (updates.h, TODO 104).
     updates::noteLaunchEnvironment();
@@ -394,6 +417,8 @@ int main(int argc, char *argv[])
     }
     // A scripted test run's start screens said in the environment, so a play recording keeps them (start_screens.h).
     start_screens::noteScriptedRun();
+    // (TODO 298) The HD set's index on a thread of its own, while the window opens (nr_install.h).
+    nr::prepareHires();
     // Play recording on (TF_PLAY_RECORDING / TF_PLAY_RECORD): VIF1 on the game's thread for the session (playrec.h).
     playrec::prepareRecord();
 
@@ -559,6 +584,7 @@ int main(int argc, char *argv[])
             setenv("PS2X_MONITOR", index.c_str(), 1);
 #endif
         }
+        nr::beforeWindow(); // (Vulkan's own present of SDL3's window: nr_install.h)
         if (!runtime.initialize("Transformers"))
         {
             std::cerr << "Failed to initialize PS2 runtime" << std::endl;
@@ -629,6 +655,7 @@ int main(int argc, char *argv[])
         ps2x::sonypad::shutdown();    // a DualSense's motors off, its LEDs back to the pad (ps2_sony_pad.h)
         discord_presence::shutdown(); // the Discord status cleared (discord_presence.h)
         ps2_audio_stream::shutdown(); // completes a PS2X_AUDIO_DUMP file
+        iop_tripwire::summary();      // the session's calls to the IOP (iop_tripwire.h: emulation-out S1)
         std::cout.flush();
         std::cerr.flush();
         std::fflush(stdout);

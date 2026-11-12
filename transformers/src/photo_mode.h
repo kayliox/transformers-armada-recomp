@@ -33,6 +33,11 @@ namespace photo_mode
     // The game's crosshair model kept out of the picture (small_crosshair draws its own).
     void setHideCrosshair(bool hide);
     bool crosshair(float point[3]);
+    // (TODO 292 B) Where the game's camera stood when it last placed the view (world): false before it has.
+    bool viewPosition(float point[3]);
+    // (TODO 292 B) The view's axes as the camera last placed it (world: ahead, left, up) and the tangent of half its
+    // vertical angle (the TV picture's; wider windows add width): false before it has.
+    bool viewFrame(float ahead[3], float left[3], float up[3], float &tanUp);
     bool project(const float point[3], float windowW, float windowH, float pictureAspect, float &x, float &y);
     void toggle();
 }

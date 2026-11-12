@@ -33,8 +33,19 @@
 // so walking follows the view, and the robot turning under it no longer swings it. Its position stays the eye's. R3 /
 // Circle still aim: in the aiming state the game's own view is left alone. TF_FIRST_PERSON_FREE=0: the head's view.
 //
+// Steady eye (TODO 300 a, on by default): measured, the first-person eye is the robot's root + ~4.9 units up (Optimus), but
+// the animations still move it against the root by up to ~0.15 units (a landing, the skid, shooting) - small jolts. While
+// first person is the view on foot, the eye is placed instead at its AVERAGE place over the body: its offset from the robot's root
+// node (the player's actor +0x0C; its world transform at +0x14: the matrix, the place at +0x30, the facing its first row),
+// in the root's own turn, learnt slowly (TF_FP_EYE_TAU, 0.6 s) while the robot stands, walks or runs (states 0..2) and held
+// as it is in every other state - melee, jump, fall, hit, landing. The robot's own moves (a lunge, a jump) still move the
+// eye with the root; only the sway against it is gone (the eye's offset 0.15 -> 0.004 units a frame). The melee's own shake
+// is not yet reproduced (TODO 300 a). Fading out of first person, the correction fades out with it.
+// TF_FP_STEADY_EYE=0: the head's view as before. TF_FP_EYE_LOG=1: the head's and the eye's offsets each frame.
+//
 // Decomp equivalent: in the camera manager's switch (0x2C4990), the same substitution while the
-// option is on.
+// option is on; the steady eye in taFirstPersonCameraScript's update, the target's head replaced by its root plus a learnt
+// offset.
 
 #include "camera_mode.h"
 
@@ -42,13 +53,16 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_host_input.h"
+#include "runtime/ps2_settings.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace camera_mode
@@ -296,6 +310,125 @@ namespace camera_mode
         }
     }
 
+    namespace
+    {
+        std::atomic<bool> g_steadyEye{true};
+        std::atomic<float> g_eyeDrop{0.0f}; // (TODO 300 h: the Apex mod's crouch)
+        struct Eye
+        {
+            bool have = false;    // an offset learnt
+            float offset[3] = {}; // the eye from the root, in the root's turn
+            float last[3] = {};   // the last correction (faded out with the view)
+            int64_t at = 0;       // its time (ms)
+            uint32_t root = 0u;
+        } g_eye;
+    }
+
+    void steadyEye(uint8_t *rdram, float position[3])
+    {
+        const int64_t now = nowMs();
+        const float dt = g_eye.at ? std::clamp(static_cast<float>(now - g_eye.at) / 1000.0f, 0.0f, 0.1f) : 0.0f;
+        g_eye.at = now;
+        static const bool log = std::getenv("TF_FP_EYE_LOG") && *std::getenv("TF_FP_EYE_LOG") == '1';
+        const auto fadeOut = [&](int why)
+        {
+            static int told = 0;
+            if (log && told++ % 120 == 0)
+                std::fprintf(stderr, "[eye] not placed (check %d)\n", why); // (1 the view, 2 the fade, 3 the root, 4 its facing, 5 too far)
+            // (no steady eye this frame: the last correction fades in 0.08 s, so leaving first person does not jump)
+            const float keep = std::exp(-dt / 0.08f);
+            for (int i = 0; i < 3; ++i)
+            {
+                g_eye.last[i] *= keep;
+                position[i] += g_eye.last[i];
+            }
+            g_eye.have = false;
+        };
+        const uint32_t manager = g_manager;
+        const float drop = g_eyeDrop.load(std::memory_order_relaxed);
+        if ((!g_steadyEye.load(std::memory_order_relaxed) && !log && drop == 0.0f) || !g_firstPerson.load(std::memory_order_relaxed) || !manager ||
+            g_wanted < 0 || vtableAt(rdram, manager, static_cast<uint32_t>(g_wanted)) != kThirdPersonVtable)
+            return fadeOut(1); // (off, third person, the car's view, a cutscene's)
+        const uint32_t script = scriptAt(rdram, manager, word(rdram, manager + kCurrent));
+        if (!script || word(rdram, script) != kFirstPersonVtable || readFloat(rdram, script + kWeight) < 0.999f)
+            return fadeOut(2); // (still fading between the views)
+        // The player's actor (the player manager 0x6CF498 -> +8 node -> +8 player -> +8 creature -> +0x54) and its root's
+        // world transform (the actor's scene node at +0x0C -> its transform +0x14; measured on Optimus).
+        const auto valid = [](uint32_t a, uint32_t room) { return a >= 0x00100000u && a < PS2_RAM_SIZE - room; };
+        const uint32_t manager2 = word(rdram, 0x006CF498u), list = valid(manager2, 0x20u) ? word(rdram, manager2 + 8u) : 0u;
+        const uint32_t player = valid(list, 0x20u) && list != manager2 + 4u ? word(rdram, list + 8u) : 0u;
+        const uint32_t creature = valid(player, 0x20u) ? word(rdram, player + 8u) : 0u;
+        const uint32_t actor = valid(creature, 0x60u) ? word(rdram, creature + 0x54u) : 0u;
+        const uint32_t node = valid(actor, 0x100u) ? word(rdram, actor + 0x0Cu) : 0u;
+        const uint32_t transform = valid(node, 0x20u) ? word(rdram, node + 0x14u) : 0u;
+        if (!valid(transform, 0x40u))
+        {
+            static int dumped = 0;
+            if (log && dumped++ < 3)
+            {
+                std::fprintf(stderr, "[eye] root chain: manager %08x list %08x player %08x creature %08x actor %08x node %08x transform %08x;",
+                             manager2, list, player, creature, actor, node, transform);
+                for (uint32_t o = 0; valid(actor, 0x100u) && o < 0x40u; o += 4u)
+                    std::fprintf(stderr, " %02x:%08x", o, word(rdram, actor + o));
+                std::fprintf(stderr, "\n");
+            }
+            return fadeOut(3);
+        }
+        float root[3], ax = readFloat(rdram, transform), ay = readFloat(rdram, transform + 4u);
+        for (int i = 0; i < 3; ++i)
+            root[i] = readFloat(rdram, transform + 0x30u + 4u * i);
+        const float len = std::sqrt(ax * ax + ay * ay);
+        if (len < 1e-3f || !std::isfinite(root[0] + root[1] + root[2] + position[0] + position[1] + position[2]))
+            return fadeOut(4);
+        const float c = ax / len, s = ay / len; // (the root's facing: its turn about z)
+        const float dx = position[0] - root[0], dy = position[1] - root[1], dz = position[2] - root[2];
+        const float local[3] = {c * dx + s * dy, -s * dx + c * dy, dz};
+        if (std::fabs(local[0]) + std::fabs(local[1]) + std::fabs(local[2]) > 30.0f)
+            return fadeOut(5); // (the eye nowhere near the root: something else holds the camera)
+        const uint32_t id = word(rdram, actor + 0xF8u);
+        const bool learn = id <= 2u; // (stand, walk, run)
+        static const float tau = []
+        {
+            const char *env = std::getenv("TF_FP_EYE_TAU");
+            const float v = env && *env ? static_cast<float>(std::atof(env)) : 0.6f;
+            return v > 0.01f ? v : 0.6f;
+        }();
+        if (!g_eye.have || g_eye.root != node)
+        {
+            std::memcpy(g_eye.offset, local, sizeof(local));
+            g_eye.have = true;
+            g_eye.root = node;
+        }
+        else if (learn)
+        {
+            const float k = 1.0f - std::exp(-dt / tau);
+            for (int i = 0; i < 3; ++i)
+                g_eye.offset[i] += (local[i] - g_eye.offset[i]) * k;
+        }
+        const float steady[3] = {root[0] + c * g_eye.offset[0] - s * g_eye.offset[1], root[1] + s * g_eye.offset[0] + c * g_eye.offset[1],
+                                 root[2] + g_eye.offset[2] - drop};
+        if (log)
+            std::fprintf(stderr, "[eye] t %lld state %u head %.3f %.3f %.3f eye %.3f %.3f %.3f root %.3f %.3f %.3f facing %.2f view %.2f %.2f%s\n", static_cast<long long>(now), id,
+                         local[0], local[1], local[2], g_eye.offset[0], g_eye.offset[1], g_eye.offset[2], root[0], root[1], root[2],
+                         std::atan2(s, c) * 57.29578f, readFloat(rdram, word(rdram, actor + kActorContext) + kControlYaw) * 57.29578f,
+                         readFloat(rdram, word(rdram, actor + kActorContext) + kControlPitch) * 57.29578f, learn ? " (learning)" : "");
+        if (!g_steadyEye.load(std::memory_order_relaxed))
+        {
+            for (float &v : g_eye.last)
+                v = 0.0f; // (the setting off: the head's view kept, only a crouch's drop)
+            g_eye.last[2] = -drop;
+            position[2] -= drop;
+            return;
+        }
+        for (int i = 0; i < 3; ++i)
+        {
+            g_eye.last[i] = steady[i] - position[i];
+            position[i] = steady[i];
+        }
+    }
+
+    void setEyeDrop(float units) { g_eyeDrop.store(std::isfinite(units) ? std::clamp(units, 0.0f, 10.0f) : 0.0f, std::memory_order_relaxed); }
+
     void install(PS2Runtime &runtime)
     {
         if (const char *env = std::getenv("TF_FIRST_PERSON"); env && *env)
@@ -357,6 +490,18 @@ namespace camera_mode
         int g_reconWatch = 0;      // frames left to see what an R3 click did
         uint32_t g_reconIndex = 0u; // the zoom index before it
         bool g_reconTrace = false;
+        constexpr int kEnterWatchFrames = 120; // (TF_RECON_TRACE: frames to see a click reach recon mode)
+        int g_reconEnterWait = 0;
+        bool g_reconPending = false; // (TODO 292 G: a click while the one before is being done, kept for after it)
+
+        // (TODO 292 H) Right-click aim: 0 = Click (the game's recon mode, a click each for in, zoom, zoom, out), 1 = Hold (the
+        // aiming view while the button is held, out when it is let go; the wheel steps the zoom while held, unless a
+        // binding has the wheel). TF_RIGHT_AIM / F1 Controls "Right-click aim".
+        std::atomic<int> g_rightAim{0};
+        bool g_holdEntered = false; // (the hold took the player into the aiming view)
+        int g_holdWait = 0;         // frames before the hold's next press (the press, then the button seen up)
+        int g_zoomWant = -1;        // the zoom level the wheel asks for (-1: none)
+        constexpr int kMaxZoom = 2; // (the levels 0, 1, 2: the state's +0x20 is 1, 0.57, 0.33)
 
         uint32_t playerActor(const uint8_t *rdram)
         {
@@ -420,6 +565,26 @@ namespace camera_mode
         const uint32_t actor = inLevel && rdram ? playerActor(rdram) : 0u;
         const uint32_t state = actor ? word(rdram, actor + kCurrentState) : ~0u;
         const uint32_t look = actor ? word(rdram, actor + kStates + 4u * kLookState) : 0u;
+        if (g_reconTrace && actor)
+        {
+            // (TODO 292 G, a measuring aid: the player's state changes, and whether an "into recon mode" click got there)
+            static uint32_t lastState = ~0u;
+            if (state != lastState)
+            {
+                std::fprintf(stderr, "[recon] state %u -> %u\n", lastState, state);
+                lastState = state;
+            }
+            if (g_reconEnterWait > 0)
+            {
+                if (state == kLookState)
+                {
+                    std::fprintf(stderr, "[recon] into recon mode after %d frames\n", kEnterWatchFrames - g_reconEnterWait + 1);
+                    g_reconEnterWait = 0;
+                }
+                else if (--g_reconEnterWait == 0)
+                    std::fprintf(stderr, "[recon] the click did NOT reach recon mode (state %u)\n", state);
+            }
+        }
         if (g_reconWatch > 0 && g_reconFrames.load(std::memory_order_relaxed) <= 0)
         {
             const uint32_t index = look ? word(rdram, look + kLookZoomIndex) : 0u;
@@ -435,10 +600,136 @@ namespace camera_mode
             else if (--g_reconWatch == 0 && g_reconIndex != 0u)
                 reconPress(kL3, "no zoom level further: leave recon mode (L3)");
         }
+        // (TODO 292 H) Hold to aim: in while the right button is held (walking and running too, as the click), out when it is
+        // let go; the wheel's notches step the zoom while held (up: closer, down: back), unless the layout binds that wheel
+        // way to a button - a binding always wins. TF_HOLD_TEST=<frame>:<frames>,... and TF_WHEEL_TEST=<frame>:<notches>,...
+        // (tests: the button held for that many level frames, wheel notches injected at a frame - TF_RECON_CLICKS' count).
+        if (g_rightAim.load(std::memory_order_relaxed) == 1 && !ps2_host_input::mouseButtonBound(1))
+        {
+            static long levelFrames = 0;
+            static std::vector<std::pair<long, long>> holds;
+            static std::vector<std::pair<long, int>> wheels;
+            static size_t nextWheel = 0;
+            static const bool parsed = [] {
+                for (const char *name : {"TF_HOLD_TEST", "TF_WHEEL_TEST"})
+                    if (const char *e = std::getenv(name))
+                        for (const char *p = e; *p;)
+                        {
+                            char *end = nullptr;
+                            const long a = std::strtol(p, &end, 10);
+                            if (end == p || *end != ':')
+                                break;
+                            const long b = std::strtol(end + 1, &end, 10);
+                            if (name[3] == 'H')
+                                holds.emplace_back(a, b);
+                            else
+                                wheels.emplace_back(a, static_cast<int>(b));
+                            p = *end == ',' ? end + 1 : end;
+                        }
+                return true;
+            }();
+            (void)parsed;
+            bool testHeld = false;
+            if (inLevel)
+            {
+                ++levelFrames;
+                for (const auto &h : holds)
+                    testHeld = testHeld || (levelFrames >= h.first && levelFrames < h.first + h.second);
+                while (nextWheel < wheels.size() && levelFrames >= wheels[nextWheel].first)
+                    ps2_host_input::injectMouseWheel(wheels[nextWheel++].second);
+            }
+            const bool held = ps2_host_input::mouseButtonHeld(1) || testHeld;
+            // (the wheel's notches for the zoom: taken every frame, used only unbound, while aiming)
+            const int up = ps2_host_input::takeMouseButtonPresses(ps2_host_input::kMouseWheelUpButton);
+            const int down = ps2_host_input::takeMouseButtonPresses(ps2_host_input::kMouseWheelDownButton);
+            if (g_holdWait > 0)
+                --g_holdWait;
+            if (!actor)
+            {
+                g_holdEntered = false;
+                g_zoomWant = -1;
+                return;
+            }
+            const bool pressing = g_reconFrames.load(std::memory_order_relaxed) > 0;
+            const uint32_t phase = state == kLookState && look ? word(rdram, look + kLookPhase) : 0u;
+            const uint32_t index = state == kLookState && look ? word(rdram, look + kLookZoomIndex) : 0u;
+            if (g_reconTrace)
+            {
+                static uint32_t lastIndex = 0u;
+                if (state == kLookState && index != lastIndex)
+                    std::fprintf(stderr, "[recon] hold: zoom level now %u\n", index);
+                lastIndex = state == kLookState ? index : 0u;
+            }
+            if (held && state == kLookState)
+            {
+                g_holdEntered = true;
+                const int steps = (ps2_host_input::mouseButtonBound(ps2_host_input::kMouseWheelUpButton) ? 0 : up) -
+                                  (ps2_host_input::mouseButtonBound(ps2_host_input::kMouseWheelDownButton) ? 0 : down);
+                if (steps != 0)
+                {
+                    const int from = g_zoomWant >= 0 ? g_zoomWant : static_cast<int>(index);
+                    g_zoomWant = std::clamp(from + steps, 0, kMaxZoom);
+                    if (g_reconTrace)
+                        std::fprintf(stderr, "[recon] hold: wheel %+d, the zoom to level %d\n", steps, g_zoomWant);
+                }
+            }
+            if (pressing || g_holdWait > 0)
+                return;
+            if (held && state <= 2u)
+            {
+                const uint32_t options = word(rdram, kOptionsPointer);
+                const uint8_t *opt = options ? getConstMemPtr(rdram, options + kOptionR3Look) : nullptr;
+                if (opt && *opt && state == 0u)
+                    reconPress(kR3, "hold: into recon mode (R3)");
+                else
+                    reconPress(kCircle, "hold: into recon mode (Circle)");
+                g_holdWait = kPressFrames + 3;
+                g_holdEntered = true;
+                g_zoomWant = -1;
+                g_reconEnterWait = kEnterWatchFrames;
+            }
+            else if (held && state == kLookState && phase != 3u && g_zoomWant >= 0 && static_cast<int>(index) != g_zoomWant)
+            {
+                // (R3 steps the zoom one level, round to the first after the last: pressed until it is there)
+                reconPress(kR3, "hold: zoom step (R3)");
+                g_holdWait = kPressFrames + 3;
+            }
+            else if (!held && state == kLookState && g_holdEntered && phase != 3u)
+            {
+                reconPress(kL3, "hold: let go - leave recon mode (L3)");
+                g_holdWait = kPressFrames + 3;
+                g_holdEntered = false;
+                g_zoomWant = -1;
+            }
+            else if (!held && state != kLookState)
+            {
+                g_holdEntered = false;
+                g_zoomWant = -1;
+            }
+            return;
+        }
+        (void)ps2_host_input::takeMouseButtonPresses(ps2_host_input::kMouseWheelUpButton); // (Click: the wheel is not the game's)
+        (void)ps2_host_input::takeMouseButtonPresses(ps2_host_input::kMouseWheelDownButton);
+        const bool busy = g_reconFrames.load(std::memory_order_relaxed) > 0 || g_reconWatch > 0;
+        if (clicks <= 0 && g_reconPending && !busy && actor)
+        {
+            g_reconPending = false; // (TODO 292 G: the click kept while the one before was being done)
+            clicks = 1;
+        }
         if (clicks <= 0 || ps2_host_input::mouseButtonBound(1))
             return;
-        if (!actor || g_reconFrames.load(std::memory_order_relaxed) > 0 || g_reconWatch > 0)
-            return; // (no level, or the last click still being done: one at a time)
+        if (!actor || busy)
+        {
+            // (TODO 292 G) A click while the one before is still being done (its press, a zoom step landing - half a
+            // second at 60) was dropped: a quick second click did nothing. One is kept and done after it.
+            if (actor)
+                g_reconPending = true;
+            if (g_reconTrace)
+                std::fprintf(stderr, "[recon] right click %s\n", !actor ? "left out: no player" : "kept: the click before still being done");
+            return;
+        }
+        if (g_reconTrace)
+            std::fprintf(stderr, "[recon] right click in state %u\n", state);
         if (state == kLookState)
         {
             const uint32_t phase = word(rdram, look + kLookPhase);
@@ -450,14 +741,56 @@ namespace camera_mode
         }
         else if (state <= 2u) // (standing, walking, running: into recon mode)
         {
+            // (TODO 292 G) R3 enters recon mode only from standing: the walk and run states answer Circle's action
+            // (0x35) alone - measured, 14 of 14 clicks while walking or running did nothing (the user: "most of the time
+            // it doesn't"). So moving, the click is Circle whatever option 3 says. TF_RECON_MOVING_R3=1: R3 as before.
+            static const bool r3Moving = std::getenv("TF_RECON_MOVING_R3") && *std::getenv("TF_RECON_MOVING_R3") == '1';
             const uint32_t options = word(rdram, kOptionsPointer);
             const uint8_t *opt = options ? getConstMemPtr(rdram, options + kOptionR3Look) : nullptr;
-            if (opt && *opt)
+            if (opt && *opt && (state == 0u || r3Moving))
                 reconPress(kR3, "into recon mode (R3)");
             else
                 reconPress(kCircle, "into recon mode (Circle)");
+            g_reconEnterWait = kEnterWatchFrames;
         }
         else
             reconPress(kR3, "R3 (not on foot)");
+    }
+
+    void addSettings()
+    {
+        if (const char *env = std::getenv("TF_RIGHT_AIM"); env && *env)
+            g_rightAim.store(std::atoi(env) == 1 ? 1 : 0);
+        ps2_settings::Setting s;
+        s.key = "TF_RIGHT_AIM";
+        s.section = "Mouse";
+        s.label = "Right-click aim";
+        s.help = "Click: the game's way, a click each for in, zoom, zoom, out. Hold: aim while the button is held; the mouse wheel "
+                 "steps the zoom while you hold it, unless you bound the wheel to a button in Keys (a binding always wins).";
+        s.choices = {{"0", "Click"}, {"1", "Hold"}};
+        s.defaultValue = "0";
+        s.apply = [](const std::string &value)
+        {
+            g_rightAim.store(value == "1" ? 1 : 0);
+            return true;
+        };
+        ps2_settings::add(s);
+        // (TODO 300 a) the steady first-person eye
+        if (const char *env = std::getenv("TF_FP_STEADY_EYE"); env && *env)
+            g_steadyEye.store(*env != '0');
+        ps2_settings::Setting e;
+        e.key = "TF_FP_STEADY_EYE";
+        e.section = "Gameplay";
+        e.label = "Steady first-person view";
+        e.help = "On: in first person the view stays steady while the robot fights, lands or is hit (the eye no longer rides the "
+                 "head's animation). Off: the view on the robot's head, as the game had it.";
+        e.choices = {{"1", "On"}, {"0", "Off"}};
+        e.defaultValue = "1";
+        e.apply = [](const std::string &value)
+        {
+            g_steadyEye.store(value != "0");
+            return true;
+        };
+        ps2_settings::add(e);
     }
 }

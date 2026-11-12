@@ -60,6 +60,8 @@ namespace nr::gfx
         Format colour = Format::RGBA8;
         bool depth = true;      // D32 alongside, also readable (the depth fog); false: colour alone
         bool shared = false;    // can be handed to the window (the picture)
+        bool motion = false;    // (TODO 299) a motion target beside the colour (RG16F, the temporal upscaler's), drawn with it
+        bool storage = false;   // (TODO 299) also writable by compute (the temporal upscaler's output)
     };
 
     // The passes of the shared shader set that are not the GS's draws: a full-screen triangle (drawn with draw(3): the
@@ -91,6 +93,9 @@ namespace nr::gfx
                        // of it (t1, any size, sampled linear) added, k times, into the picture - its colour only (alpha kept),
                        // RGBA8. b0: 1 / the target's width, height; k
     };
+
+    // (TODO 299) PipelineDesc::writeMask's bit for a draw that writes its motion into the target's motion target (the scene's 3D).
+    constexpr uint32_t kWriteMotion = 0x20u;
 
     struct PipelineDesc
     {
@@ -175,10 +180,29 @@ namespace nr::gfx
         Format format = Format::RGBA8;
     };
 
+    // (TODO 299) The temporal upscaler's frame: the projection's jitter (pixels of the render size), the frame's time, a
+    // camera cut (the history thrown away) and the sharpening.
+    struct Temporal
+    {
+        float jitterX = 0.0f, jitterY = 0.0f;
+        float frameMs = 16.7f;
+        bool reset = false;
+        float sharpness = 0.0f;
+        uint32_t rows = 0; // the source's rows upscaled, from the top (0: all - a field buffer's field A: its top half)
+        // The scene's camera (nr::taa::Camera, fitted from the game's projection): the depth's near / far in w's units, its
+        // field of view, w's units in metres.
+        float nearZ = 1.0f, farZ = 1.0e6f, fovY = 1.0f, metersPerUnit = 1.0f;
+        bool infinite = true;
+    };
+
     class Device
     {
     public:
         virtual ~Device() = default;
+        // (TODO 299) The temporal upscaler (the FidelityFX SDK's FSR 3.1 / 4): `source`'s colour, depth and motion (a target made
+        // with TargetDesc::motion) upscaled into `output` (made with TargetDesc::storage). False: not done (no SDK, a backend
+        // without it) - `output` is then as it was.
+        virtual bool temporalUpscale(TargetId source, TargetId output, const Temporal &t) { (void)source, (void)output, (void)t; return false; }
 
         // --- frame life (two slots in flight) ---
         // The frame's start, before anything is recorded: the picture's surfaces at that size (made again when it changes -
@@ -203,6 +227,7 @@ namespace nr::gfx
         virtual void report(Report what) = 0;
         virtual uint32_t vendorId() = 0;                        // the GPU's maker, its PCI vendor id (0x1002 AMD, 0x10DE NVIDIA; 0 unknown)
         virtual uint64_t videoMemory(bool budget) = 0;          // its video memory in use, or (budget) the system's budget for it
+        virtual void videoMemoryNote(double frameMs) { (void)frameMs; } // (issue #20) a frame over 250 ms: the video memory logged, at most once in 5 s
 
         // --- targets (the builder keys them by GS address; the device only owns the surfaces) ---
         virtual TargetId createTarget(const TargetDesc &d) = 0; // 0 = failed

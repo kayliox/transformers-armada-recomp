@@ -7,11 +7,13 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "nr_draw.h" // draw::Constants
+#include "nr_taa.h"  // (TODO 299) taa::upscalerOn: FSR 3 / 4's anti-aliasing and sharpening in place of ours
 
 namespace nr
 {
@@ -63,7 +65,8 @@ namespace nr::frame
         }
         return v;
     }
-    inline bool aaOn() { return aaMode() != 0; }
+    // (TODO 299: while FSR 3 / 4 runs, its own anti-aliasing replaces the edge filter)
+    inline bool aaOn() { return aaMode() != 0 && !taa::upscalerOn(); }
     // (TODO 108, TF_NATIVE_BLOOM: 1 the modern bloom in place of the game's glow; unset or 0 the game's own, the faithful look;
     // 2 neither - the glow left out, to measure what the game's adds.)
     inline int bloomMode()
@@ -152,6 +155,54 @@ namespace nr::frame
         return v;
     }
     inline void setRenderScale(int percent) { g_renderScale.store(std::clamp(percent, 25, 100), std::memory_order_relaxed); }
+    // The sharpening (TF_NATIVE_SHARPEN, the F1 setting, live): 0 off, 1 auto (the default: only below render scale 100%,
+    // where the picture is enlarged and comes out soft), 2 on. Drawn by the FXAA pass (TF_NATIVE_AA's default), as the
+    // amount CAS takes: 0 none - the pass's result as before.
+    inline std::atomic<int> g_sharpen{-1};
+    inline int sharpenMode()
+    {
+        int v = g_sharpen.load(std::memory_order_relaxed);
+        if (v < 0)
+        {
+            const char *e = std::getenv("TF_NATIVE_SHARPEN");
+            int expected = -1;
+            g_sharpen.compare_exchange_strong(expected, !e || !*e || std::strcmp(e, "auto") == 0 ? 1 : *e == '0' ? 0 : 2);
+            v = g_sharpen.load(std::memory_order_relaxed);
+        }
+        return v;
+    }
+    inline void setSharpen(int mode) { g_sharpen.store(std::clamp(mode, 0, 2), std::memory_order_relaxed); }
+    // (TODO 295) The window's upscaler (TF_NATIVE_UPSCALER, the F1 setting, live): 0 bilinear (the window's stretch, as
+    // before; the default until the CPU-path pacing is fixed and FSR's cost re-measured - your call, 2026-11-12), 1 auto
+    // (FSR 1 whenever the picture is smaller than the window), 2 FSR 1. nr_present.cpp draws
+    // it (fsr::draw) only when the picture is enlarged - at 100% nothing changes.
+    inline std::atomic<int> g_upscaler{-1};
+    inline int upscalerMode()
+    {
+        int v = g_upscaler.load(std::memory_order_relaxed);
+        if (v < 0)
+        {
+            const char *e = std::getenv("TF_NATIVE_UPSCALER");
+            int expected = -1;
+            // (fsr: FSR 3 / 4, the temporal upscaler - nr_taa.h; the picture is then at the window's lines, FSR 1 never needed)
+            g_upscaler.compare_exchange_strong(expected, !e || !*e || std::strcmp(e, "bilinear") == 0 || std::strcmp(e, "fsr") == 0 || *e == '0' ? 0
+                                                         : std::strcmp(e, "auto") == 0                                                  ? 1
+                                                                                                                                         : 2);
+            v = g_upscaler.load(std::memory_order_relaxed);
+        }
+        return v;
+    }
+    inline void setUpscaler(int mode) { g_upscaler.store(std::clamp(mode, 0, 2), std::memory_order_relaxed); }
+    inline bool fsrOn() { return upscalerMode() != 0; }
+    inline float sharpenAmount()
+    {
+        // (TODO 295: while FSR 1 enlarges the picture its RCAS sharpens it - PR #23's CAS here would sharpen it twice; TODO 299:
+        // FSR 3 / 4 sharpens with its own too - taaSharpness)
+        if ((fsrOn() && renderScale() < 100) || taa::upscalerOn())
+            return 0.0f;
+        const int mode = sharpenMode();
+        return mode == 2 || (mode == 1 && renderScale() < 100) ? 0.5f : 0.0f;
+    }
 
     // ---- The game textures' mip chains (the frame builder's, and the D3D12 device's own uploads) ----
     void halveLevel(const uint32_t *src, uint32_t pw, uint32_t ph, uint32_t *dst);

@@ -33,12 +33,15 @@
 #include "test_place.h"
 #include "ai_probe.h"
 #include "small_crosshair.h"
+#include "static_aim.h"
 #include "crisp_text.h"
 #include "sound_nodes.h"
 #include "sound_trace.h"
 #include "sirens_trace.h"
 #include "native_disc.h"
 #include "native_sound.h"
+#include "iop_boot.h"
+#include "iop_tripwire.h"
 #include "vrr_probe.h"
 #include "menu_mouse.h"
 #include "mod_menu.h"
@@ -56,6 +59,7 @@
 #include "runtime/ps2_settings.h"
 #include "runtime/ps2_vif1_thread.h"
 #include "nr_install.h"
+#include "nr_taa.h" // (TODO 299: the temporal upscaler's motion wants the second pass at the frame before's pose)
 
 #include <algorithm>
 #include <array>
@@ -260,6 +264,21 @@ namespace
         const uint32_t argLen = getRegU32(ctx, 5);
         const uint32_t argAddr = getRegU32(ctx, 6);
         const uint32_t resultAddr = getRegU32(ctx, 7);
+
+        // (TF_IOP_BOOT=0: the module answered as the IOP's load answers it, not loaded - iop_boot.cpp)
+        if (int32_t fakeId = 0, fakeStart = 0; iop_boot::takeModule(*runtime, rdram, iopAddr, fakeId, fakeStart))
+        {
+            if (resultAddr != 0u)
+            {
+                const uint32_t value = static_cast<uint32_t>(fakeStart);
+                std::memcpy(rdram + (resultAddr & PS2_RAM_MASK), &value, 4);
+            }
+            setReturnS32(ctx, fakeId);
+            EeScheduler &ee = runtime->eeScheduler(); // (as the load's reply would: the scheduler before the caller resumes)
+            (void)ee.rotateReadyQueue(0, false);
+            ee.transferIfRequested(false);
+            return;
+        }
 
         const uint32_t size = elfImageSize(*runtime, iopAddr);
         if (size == 0u)
@@ -1488,6 +1507,7 @@ namespace
             discord_presence::frame(rdram, game != 0u, g_executorVtable == 0x006B7360u, g_liveFmvStreams != 0 && g_liveFmvIsFilm);
             photo_mode::frame(rdram, game != 0u); // (before tuning: the game's speed it sets)
             fast_load::frame(rdram, *runtime, g_executorVtable == 0x006B7360u); // the sound muted while a level loads (fast_load.h)
+            start_screens::frame(*runtime, game != 0u || g_executorVtable == 0x006B7360u); // (TODO 298: the start's turbo ends)
             {
                 // (TODO 55) The HQ entered or left: the native renderer lets the old place's textures go (nr_install.h).
                 static int wasHq = -1;
@@ -1733,6 +1753,21 @@ namespace
         return on;
     }
 
+    // (TODO 292 C) Which device turns the view now: the mouse from its first travel taken, the pad again from the first
+    // frame its right stick is off centre (the context's aim stick, +0x188/+0x18C, while the mouse's own stick - mouseLook's,
+    // for the other views - has been at rest for a few frames).
+    uint64_t g_mouseTurnFrame = 0u, g_stickTurnFrame = 0u, g_mouseStickFrame = 0u;
+    bool g_mouseTurned = false;
+    bool mouseIsTurning() { return g_mouseTurned && g_mouseTurnFrame >= g_stickTurnFrame; }
+    void noteAimStick(const uint8_t *rdram, uint32_t context)
+    {
+        float s[2] = {0.0f, 0.0f};
+        if (const uint8_t *p = context ? getConstMemPtr(const_cast<uint8_t *>(rdram), context + 0x188u) : nullptr)
+            std::memcpy(s, p, sizeof(s));
+        if ((s[0] != 0.0f || s[1] != 0.0f) && g_frameKicks > g_mouseStickFrame + 3u)
+            g_stickTurnFrame = g_frameKicks;
+    }
+
     void dropMouseTravel()
     {
         float x = 0.0f, y = 0.0f;
@@ -1780,11 +1815,37 @@ namespace
                     pixelsY *= zoom;
                 }
             }
+            {
+                // (TODO 292 A) One frame turns at most TF_MOUSE_MAX_DEG_S (1500) degrees a second of the time since the
+                // take before (at most 50 ms of it): a 360 in a quarter second still turns, a pile of travel from a hitch
+                // does not swing the view at once. 0: no bound.
+                static const float maxRate = (std::getenv("TF_MOUSE_MAX_DEG_S") ? std::strtof(std::getenv("TF_MOUSE_MAX_DEG_S"), nullptr) : 1500.0f) / 57.29578f;
+                static auto lastTake = std::chrono::steady_clock::now();
+                const auto nowTake = std::chrono::steady_clock::now();
+                const float dt = std::clamp(std::chrono::duration<float>(nowTake - lastTake).count(), 1.0f / 480.0f, 0.05f);
+                lastTake = nowTake;
+                if (maxRate > 0.0f)
+                {
+                    const float maxPixels = maxRate * dt / kRadiansPerPixel;
+                    const float len = std::hypot(pixelsX, pixelsY);
+                    if (len > maxPixels)
+                    {
+                        static int told = 0;
+                        if (told++ < 30)
+                            std::fprintf(stderr, "[turn] a frame's mouse turn of %.1f degrees held to %.1f\n", len * kRadiansPerPixel * 57.29578f,
+                                         maxPixels * kRadiansPerPixel * 57.29578f);
+                        pixelsX *= maxPixels / len;
+                        pixelsY *= maxPixels / len;
+                    }
+                }
+            }
             g_cameraTurnKick = g_frameKicks;
             ps2_host_input::setMouseStick(0.0f, 0.0f);
             g_owedYaw = g_owedPitch = 0.0f;
             if ((pixelsX != 0.0f || pixelsY != 0.0f) && !photo_mode::active()) // (photo mode: the free camera's)
             {
+                g_mouseTurned = true; // (TODO 292 C: the mouse turns the view)
+                g_mouseTurnFrame = g_frameKicks;
                 const auto readFloat = [rdram](uint32_t address)
                 {
                     float value = 0.0f;
@@ -1795,6 +1856,15 @@ namespace
                 uint16_t id = 0u;
                 std::memcpy(&id, idField, sizeof(id));
                 const float limit = readFloat(kPitchLimitScale) * readFloat(kCameraData + id * 0x240u + 0x60u + 0x15Cu);
+                {
+                    // (TODO 292: the pitch limit the mouse is held to, each time it changes)
+                    static float toldLimit = -1.0f;
+                    if (limit != toldLimit)
+                    {
+                        toldLimit = limit;
+                        std::fprintf(stderr, "[turn] the camera's pitch limit: %.1f degrees (record %u)\n", limit * 57.29578f, id);
+                    }
+                }
                 float pitch = 0.0f, yaw = 0.0f;
                 std::memcpy(&pitch, angles, sizeof(pitch));
                 std::memcpy(&yaw, angles + 4, sizeof(yaw));
@@ -1812,7 +1882,35 @@ namespace
                     mouseYaw += 6.28318531f;
             }
         }
+        // (TODO 292 C) The game's Look Spring (Options, KEY_LOOKSPRING): 0x46D410 takes the right stick at rest as "no turn" and,
+        // while the player moves, a spring (context +0x2E0, its stiffness +0x300 from the option) pulls the pitch to the
+        // movement's every frame. The mouse leaves the stick at rest, so the up / down aim drifted back under it. While the
+        // mouse turns the view the stiffness reads 0 for the call (the spring left out); the pad keeps the option.
+        // TF_MOUSE_LOOKSPRING=1: the option for the mouse too, as before.
+        if (camera != 0u)
+            noteAimStick(rdram, camera);
+        static const bool springForMouse = std::getenv("TF_MOUSE_LOOKSPRING") && *std::getenv("TF_MOUSE_LOOKSPRING") == '1';
+        uint8_t *stiffness = camera != 0u && !springForMouse && mouseIsTurning() ? getMemPtr(rdram, camera + 0x300u) : nullptr;
+        float savedStiffness = 0.0f;
+        if (stiffness)
+        {
+            std::memcpy(&savedStiffness, stiffness, sizeof(savedStiffness));
+            if (savedStiffness > 0.0f)
+            {
+                const float zero = 0.0f;
+                std::memcpy(stiffness, &zero, sizeof(zero));
+            }
+            else
+                stiffness = nullptr;
+        }
         g_cameraTurn(rdram, ctx, runtime);
+        if (stiffness)
+        {
+            float now = 0.0f;
+            std::memcpy(&now, stiffness, sizeof(now));
+            if (now == 0.0f)
+                std::memcpy(stiffness, &savedStiffness, sizeof(savedStiffness));
+        }
         // (TF_TURN_LOG=1, a measuring aid: the third-person camera's pitch and yaw after the game's turn, each frame, with
         // the game-time tick - the turn's degrees a second at any rate)
         if (static const bool turnLog = std::getenv("TF_TURN_LOG") && *std::getenv("TF_TURN_LOG") == '1'; turnLog && angles)
@@ -1839,11 +1937,95 @@ namespace
                 if (mic >= 0x00100000u && mic < PS2_RAM_SIZE - 0x40u)
                     std::memcpy(view, rdram + mic + 0x30u, sizeof(view));
             }
-            std::fprintf(stderr, "[turn log] tick %llu pitch %.5f yaw %.5f view %.4f %.4f %.4f cam %.4f %.4f %.4f %.4f\n", static_cast<unsigned long long>(testTick(runtime)), a[0], a[1],
-                         view[0], view[1], view[2], cq[0], cq[1], cq[2], cq[3]);
+            std::fprintf(stderr, "[turn log] tick %llu pitch %.5f yaw %.5f view %.4f %.4f %.4f cam %.4f %.4f %.4f %.4f spring %.3f%s\n", static_cast<unsigned long long>(testTick(runtime)), a[0], a[1],
+                         view[0], view[1], view[2], cq[0], cq[1], cq[2], cq[3],
+                         [&] { float v = 0.0f; if (const uint8_t *p = getConstMemPtr(rdram, camera + 0x300u)) std::memcpy(&v, p, sizeof(v)); return v; }(),
+                         stiffness ? " (held off: the mouse turns)" : "");
         }
         if (angles && idField)
             view_turn::noteTurned(rdram, camera, mouseYaw, mousePitch, 1.0f / framesPerSecond());
+    }
+
+    // (TODO 292 E) A manned turret (the Autobot's state 0x13) turns by taTransformerStateTurret::UpdateTurning (0x472CB0): two
+    // springs follow the stick and turn the same heading (+0x11C) and pitch (+0x118) of the context that 0x46D410 turns on
+    // foot - the pitch held to the turret's own limits ([[turret +0x24] +0x130] +0x20 / +0x24, the turret at context +0xB8).
+    // The mouse went through the stick there (its dead zone, its springs, a top speed): now its travel goes to the two angles
+    // as on foot, the stick left at rest. Not on the jet bike (a turret state too, with an aim of its own). TF_TURRET_MOUSE=1:
+    // on - off by default until it has been seen working in a real turret.
+    constexpr uint32_t kTurretTurn = TF_GA(0x00472CB0u);
+    PS2Runtime::RecompiledFunction g_turretTurn = nullptr;
+
+    void turretTurn(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        static const bool off = !(std::getenv("TF_TURRET_MOUSE") && *std::getenv("TF_TURRET_MOUSE") == '1'); // (off by default until seen in a turret)
+        const uint32_t context = getRegU32(ctx, 5);
+        if (static const bool log = std::getenv("TF_TURRET_LOG") != nullptr; log && context)
+        {
+            // TF_TURRET_LOG=1: each turning's view angles (the context's pitch +0x118, heading +0x11C) and which way turned it
+            float pa[2] = {};
+            if (const uint8_t *q = getConstMemPtr(rdram, context + 0x118u))
+                std::memcpy(pa, q, sizeof(pa));
+            static int told = 0;
+            if (told++ % 6 == 0)
+                std::fprintf(stderr, "[turret] tick %llu pitch %.4f yaw %.4f (%s)\n", static_cast<unsigned long long>(testTick(runtime)), pa[0],
+                             pa[1], off ? "the game's stick" : "the mouse");
+        }
+        float bike[3];
+        if (off || context == 0u || cutsceneOwnsView(rdram) || photo_mode::active() || ext::aimPoint(rdram, bike))
+        {
+            g_turretTurn(rdram, ctx, runtime);
+            return;
+        }
+        uint8_t *angles = getMemPtr(rdram, context + 0x118u);
+        float pixelsX = 0.0f, pixelsY = 0.0f;
+        if (angles && view_turn::takeMouseTravel(pixelsX, pixelsY))
+        {
+            g_cameraTurnKick = g_frameKicks; // (mouseLook: this frame's travel taken)
+            ps2_host_input::setMouseStick(0.0f, 0.0f);
+            g_owedYaw = g_owedPitch = 0.0f;
+            if (pixelsX != 0.0f || pixelsY != 0.0f)
+            {
+                g_mouseTurned = true;
+                g_mouseTurnFrame = g_frameKicks;
+                const auto readFloat = [rdram](uint32_t address)
+                {
+                    float value = 0.0f;
+                    if (const uint8_t *q = getConstMemPtr(rdram, address))
+                        std::memcpy(&value, q, sizeof(value));
+                    return value;
+                };
+                const auto readWord = [rdram](uint32_t address)
+                {
+                    uint32_t value = 0u;
+                    if (address >= 0x00100000u && address < PS2_RAM_SIZE - 4u)
+                        if (const uint8_t *q = getConstMemPtr(rdram, address))
+                            std::memcpy(&value, q, sizeof(value));
+                    return value;
+                };
+                float lo = -1.0f, hi = 1.0f; // (no turret's limits found: +-57 degrees)
+                if (const uint32_t turret = readWord(context + 0xB8u))
+                    if (const uint32_t body = readWord(turret + 0x24u))
+                        if (const uint32_t limits = readWord(body + 0x130u))
+                        {
+                            lo = readFloat(limits + 0x20u);
+                            hi = readFloat(limits + 0x24u);
+                            if (!(std::isfinite(lo) && std::isfinite(hi) && lo < hi && hi - lo < 6.3f))
+                                lo = -1.0f, hi = 1.0f;
+                        }
+                float pitch = 0.0f, yaw = 0.0f;
+                std::memcpy(&pitch, angles, sizeof(pitch));
+                std::memcpy(&yaw, angles + 4, sizeof(yaw));
+                pitch = std::clamp(pitch + pixelsY * kRadiansPerPixel, lo, hi);
+                const float turns = readFloat(kTurnsPerRadian) * (yaw - pixelsX * kRadiansPerPixel) + 100.5f;
+                yaw = readFloat(kRadiansPerTurn) * (turns - static_cast<float>(static_cast<int32_t>(turns)) - 0.5f);
+                std::memcpy(angles, &pitch, sizeof(pitch));
+                std::memcpy(angles + 4, &yaw, sizeof(yaw));
+                static int told = 0;
+                if (told++ < 3)
+                    std::fprintf(stderr, "[turn] a turret turned by the mouse (its pitch limits %.1f..%.1f degrees)\n", lo * 57.29578f, hi * 57.29578f);
+            }
+        }
+        g_turretTurn(rdram, ctx, runtime);
     }
 
     void mouseLook()
@@ -1867,6 +2049,11 @@ namespace
                 ps2_host_input::setMouseStick(0.0f, 0.0f);
             g_owedYaw = g_owedPitch = 0.0f;
             return;
+        }
+        if (pixelsX != 0.0f || pixelsY != 0.0f)
+        {
+            g_mouseTurned = true; // (TODO 292 C: the mouse turns the view)
+            g_mouseTurnFrame = g_frameKicks;
         }
         // (TODO 287: the game inverts the stick by the save's option; taken back for the mouse, which has its own setting)
         if (g_stickInvertY)
@@ -1897,6 +2084,8 @@ namespace
         if (std::labs(stepsY) < kStickDeadZone)
             stepsY = 0;
         ps2_host_input::setMouseStick(static_cast<float>(stepsX) / 127.0f, static_cast<float>(stepsY) / 127.0f);
+        if (stepsX != 0 || stepsY != 0)
+            g_mouseStickFrame = g_frameKicks;
 
         // What the game turns with that.
         float dx = fromSteps(stepsX), dy = fromSteps(stepsY);
@@ -3391,7 +3580,7 @@ namespace
     // when a level (or the HQ) begins. TF_RATE_STEPS=fine / divisors (tests) goes over it.
     std::atomic<int> g_pacingChoice{-1}; // (the panel's choice: 0 auto, 1 even, 2 any; -1 none - the environment's)
     // ---- The frame-rate cap (TODO 160, 2026-11-04, the user: "behave like every other PC game") --------------------
-    // The settings' "Frame rate cap" (TF_FPS_CAP: 30, 45, 60, 90, 120, 144, 165, 240, 0 = unlimited; 240 by default) is the
+    // The settings' "Frame rate cap" (TF_FPS_CAP: 30, 45 (Linux), 60, 90, 120, 144, 165, 240, 0 = unlimited; 60 by default - the user's choice, 2026-11-12) is the
     // top of the levels' rate. The game's logic moves a fixed step a frame (a level reads FramePeriod when it begins:
     // its clock's step, the gravity a frame), so a PC that cannot draw the cap would play it in slow motion: the rate
     // follows what the PC manages instead - any whole rate from the cap down to 30, down on a miss that lasts, up again
@@ -7815,6 +8004,7 @@ namespace
         language::addSettings();    // Gameplay: the PAL release's language (language.h)
         mod_menu::addSettings();    // Controls: driving with W / S (mod_menu.h)
         small_crosshair::addSettings(); // Display: the small crosshair (small_crosshair.h)
+        static_aim::addSettings();      // Controls > Mouse: the still crosshair (static_aim.h, TODO 292 B)
         crisp_text::addSettings();  // Display: sharp text and PS5 button symbols (crisp_text.h, TODO 119)
         playrec::addSettings();     // Gameplay: play recording, F2 (playrec.h, N12 b)
         using ps2_settings::Choice;
@@ -7900,7 +8090,7 @@ namespace
 #else
             c.choices = {{"30", "30"}, {"60", "60"}, {"90", "90"}, {"120", "120"}, {"144", "144"}, {"165", "165"}, {"240", "240"}, {"0", "Unlimited"}};
 #endif
-            c.defaultValue = "240";
+            c.defaultValue = "60"; // (the user's choice, 2026-11-12: 60 unless the player picks another)
             c.available = []() { return followRates(); };
             c.unavailableHelp = "TF_RATE_LADDER=1 is set: the frame-rate ladder decides the rates (Game frame rate, Frame pacing).";
             c.apply = [](const std::string &value)
@@ -8551,6 +8741,34 @@ namespace
 
     // (TF_FPS=1) Every 2 s of wall time: the game's frames, VBlanks and pictures a second, the EE's work and the host's
     // idle time a frame. Called once a frame by the frame-kick hooks (the USA one and the PAL one).
+    // The 1% low (issue 12's thread placement bench): the game's frames of the last 30 s (the state load left out, as
+    // bench.ps1 does), the average of the slowest 1% as a rate. A ring buffer, so a long session costs no more than a
+    // short one and the report does not hitch the frames it measures. (TODO 291: filled at the main loop's frame start,
+    // tf::port::frameBegins - not at the display list's kick, whose thread now and then runs straight after the drawing.)
+    struct GameFrameTime
+    {
+        std::chrono::steady_clock::time_point at;
+        float ms;
+    };
+    constexpr size_t kGameFrameRing = 16384u; // (30 s at up to ~540 frames a second; faster, the window is shorter)
+    std::vector<GameFrameTime> g_gameFrameRing(kGameFrameRing);
+    size_t g_gameFrameNext = 0;
+    size_t g_gameFrameCount = 0;
+    bool g_fpsReportedOnce = false;
+
+    void noteGameFrame()
+    {
+        static std::chrono::steady_clock::time_point last{};
+        const auto now = std::chrono::steady_clock::now();
+        if (g_fpsReportedOnce && last != std::chrono::steady_clock::time_point{})
+        {
+            g_gameFrameRing[g_gameFrameNext] = GameFrameTime{now, std::chrono::duration<float, std::milli>(now - last).count()};
+            g_gameFrameNext = (g_gameFrameNext + 1u) % kGameFrameRing;
+            g_gameFrameCount = std::min(g_gameFrameCount + 1u, kGameFrameRing);
+        }
+        last = now;
+    }
+
     void printFrameRate(PS2Runtime *runtime)
     {
         using clock = std::chrono::steady_clock;
@@ -8560,35 +8778,14 @@ namespace
         static uint64_t windowPictures = 0;
         static uint64_t windowLeftOut = 0;
         static auto windowIdle = runtime->eeScheduler().idleHostTime();
-        // The 1% low (issue 12's thread placement bench): the frames of the last 30 s (the state load left out, as
-        // bench.ps1 does), the average of the slowest 1% as a rate. A ring buffer, so a long session costs no more
-        // than a short one and the report does not hitch the frames it measures.
-        struct FrameTime
-        {
-            clock::time_point at;
-            float ms;
-        };
-        constexpr size_t kRingFrames = 16384u; // (30 s at up to ~540 frames a second; faster, the window is shorter)
         constexpr auto kLowWindow = std::chrono::seconds(30);
-        static std::vector<FrameTime> ring(kRingFrames);
         static std::vector<float> slowest = []
         {
             std::vector<float> v;
-            v.reserve(kRingFrames);
+            v.reserve(kGameFrameRing);
             return v;
         }();
-        static size_t ringNext = 0;
-        static size_t ringCount = 0;
-        static clock::time_point lastFrame{};
-        static bool reportedOnce = false;
         const auto frameNow = clock::now();
-        if (reportedOnce && lastFrame != clock::time_point{})
-        {
-            ring[ringNext] = FrameTime{frameNow, std::chrono::duration<float, std::milli>(frameNow - lastFrame).count()};
-            ringNext = (ringNext + 1u) % kRingFrames;
-            ringCount = std::min(ringCount + 1u, kRingFrames);
-        }
-        lastFrame = frameNow;
         ++frames;
         const double elapsed = std::chrono::duration<double>(frameNow - windowStart).count();
         if (elapsed >= 2.0)
@@ -8607,17 +8804,15 @@ namespace
                       << " in-between left out " << ps2_host_display::secondFieldsLeftOut() - windowLeftOut;
             // (newest first, up to the first frame older than the window)
             slowest.clear();
-            for (size_t i = 0; i < ringCount; ++i)
+            for (size_t i = 0; i < g_gameFrameCount; ++i)
             {
-                const FrameTime &f = ring[(ringNext + kRingFrames - 1u - i) % kRingFrames];
+                const GameFrameTime &f = g_gameFrameRing[(g_gameFrameNext + kGameFrameRing - 1u - i) % kGameFrameRing];
                 if (frameNow - f.at > kLowWindow)
                     break;
                 slowest.push_back(f.ms);
             }
             // (TODO 291: the 1% low of the pictures shown, as the pacing line counts them - what the player sees - with the game's
-            // frames' own beside it: the game's wait for a VBlank inside a frame pairs a late frame with a short one while the
-            // pictures stay even, and their 1% low read as a stutter the screen never showed. Without a native picture live:
-            // the game's frames', as before.)
+            // frames' own beside it, timed by the main loop's frame starts. Without a native picture live: the game's frames'.)
             const double pictureLow = nr::pictureLowRate(30.0);
             if (slowest.size() >= 100u)
             {
@@ -8635,7 +8830,7 @@ namespace
             else if (pictureLow > 0.0)
                 std::cerr << " 1% low " << pictureLow << " (the pictures)";
             std::cerr << std::endl;
-            reportedOnce = true;
+            g_fpsReportedOnce = true;
             frames = 0;
             windowTick = tick;
             windowPictures = pictures;
@@ -8653,7 +8848,6 @@ namespace
         if (language::redirectForText(rdram, ctx, runtime)) // (the PAL release's text in another language: language.h)
             return;
         testStall(runtime);
-        reportSlowFrame(rdram, runtime);
         key_text::frame(rdram); // (the sticks' words for the keyboard: key_text.h)
         ps2_host_display::trace("frame kick", runtime->memory().gs().dispfb2);
         if (g_frameLog)
@@ -9354,11 +9548,13 @@ namespace
         sirens_trace::install(runtime); // TF_SIRENS_LOG=<file> (sirens_trace.cpp)
         native_disc::install(runtime);  // TF_NATIVE_DISC=1: TwoFish's disc reads answered on the host (native_disc.cpp)
         native_sound::install(runtime); // TF_NATIVE_SOUND=1: the sound server answered on the EE (native_sound.cpp)
+        iop_boot::install(runtime);     // TF_IOP_BOOT=0: the game boots without the IOP (iop_boot.cpp; after the two above)
         distance_meter::install(runtime); // the distance meter (distance_meter.cpp)
         boss_cheat::install(runtime); // one-hit kills leave the bosses' fights to play out (boss_cheat.h, TODO 199)
         start_screens::install(runtime);  // boot straight to the main menu (start_screens.h, TODO 110)
         camera_mode::install(runtime);    // first / third person (camera_mode.cpp)
         photo_mode::install(runtime);     // the free camera, F8 (photo_mode.cpp)
+        static_aim::install(runtime);     // the camera's pivot, the crosshair (static_aim.cpp, TODO 292)
         game_config::installHud(runtime); // the HUD setting and photo mode's hidden HUD at once (game_config.h, TODO 228)
         if (!ext::install(ext::Phase::AfterPhotoMode, runtime)) runtime.requestStop(); // (the jet bike: its addresses stay put)
         actor_guard::install(runtime);    // freed actors' child walks left out (actor_guard.h, TODO 51)
@@ -9484,6 +9680,7 @@ namespace
                 adoptLoadedState(runtime.memory().getRDRAM(), &scratch, &runtime);
                 guest_code::writeAll(runtime.memory().getRDRAM()); // (the added data, whatever the state had)
                 native_sound::stateLoaded(runtime.memory().getRDRAM()); // (its engine from the state's record)
+                iop_boot::stateLoaded(runtime); // (a state made with the other boot told; the IOP parked again)
                 sound_nodes::stateLoaded(); // (the console frames they owe: none, as in a game started with the state)
             });
         // The frame rate (see "The frame rate"): TF_FRAME_RATE=<frames a second>, 60 by default;
@@ -9495,12 +9692,13 @@ namespace
             g_force60 = fps60 && std::strcmp(fps60, "force") == 0;
             if (const char *rate = std::getenv("TF_FRAME_RATE"); rate && *rate)
                 g_frameRate = std::clamp(std::atoi(rate), 30, 480);
-            // (TODO 160: the cap - over TF_FRAME_RATE; 240 by default when neither is set; 0 unlimited)
+            // (TODO 160: the cap - over TF_FRAME_RATE; 60 by default when neither is set - the user's choice 2026-11-12, "capped at 60 by
+            // default, with the ability to change to higher or unlimited"; a saved choice stays; 0 unlimited)
             if (const char *cap = std::getenv("TF_FPS_CAP"); cap && *cap)
                 g_frameRate = std::atoi(cap) <= 0 ? kUnlimitedRate : std::clamp(std::atoi(cap), 30, kUnlimitedRate);
             else if (!(std::getenv("TF_FRAME_RATE") && *std::getenv("TF_FRAME_RATE")) && !(fps60 && std::strcmp(fps60, "0") == 0) &&
                      followRates())
-                g_frameRate = 240;
+                g_frameRate = 60;
             g_rateSetting = g_frameRate;
             // (TODO 161 a: the fixed logic rate - over the cap, which then caps the pictures; not with the console's 30 asked
             // for, nor with the old ladder)
@@ -9647,6 +9845,7 @@ namespace
                 runtime.registerFunction(kApplyProfileOptions, applyProfileOptions);
         }
         runtime.registerFunction(kSifLoadModuleBuffer, sifLoadModuleBufferFromIop);
+        iop_tripwire::install(runtime); // (the IOP's calls counted - the emulation-out plan's S1; after the SIF replacements above: it wraps them)
         if ((g_setVelocity = runtime.lookupFunction(kSetVelocity)) != nullptr)
             runtime.registerFunction(kSetVelocity, setVelocityAtRate); // (TODO 153)
         if ((g_lerp = runtime.lookupFunction(kLerp)) != nullptr)
@@ -9661,6 +9860,8 @@ namespace
             runtime.registerFunction(kOptionsDefaults[1], optionsDefaults<1>);
         if ((g_cameraTurn = runtime.lookupFunction(kCameraTurn)) != nullptr)
             runtime.registerFunction(kCameraTurn, cameraTurn); // (mouse look)
+        if ((g_turretTurn = runtime.lookupFunction(kTurretTurn)) != nullptr)
+            runtime.registerFunction(kTurretTurn, turretTurn); // (TODO 292 E: the mouse on a turret)
         ai_probe::install(runtime); // TF_AI_PROBE (a testing aid: ai_probe.h)
         installCallTracer(runtime);
         installCallCounter(runtime);
@@ -9719,11 +9920,17 @@ namespace tf::port
     // (TODO 266) The settings' frame rate cap (0: Unlimited), for the menus' pictures with VSync off.
     int frameCap() { return g_rateSetting >= kUnlimitedRate ? 0 : g_rateSetting; }
 
-    float oneFieldFactor() { return posePictures() ? 0.0f : 1.0f; }
+    // (TODO 299: and while the temporal upscaler wants each draw's frame before's pose - the second pass carries it)
+    float oneFieldFactor() { return posePictures() || nr::taa::wantsMotion() ? 0.0f : 1.0f; }
 
     bool moviePlaying() { return g_liveFmvStreams != 0; }
 
+    // (TODO 298) The start runs unthrottled to the main menu: the window black meanwhile (nr_present.cpp).
+    bool startHeld() { return start_screens::starting(); }
+
     uint64_t testTickNow() { return static_cast<uint64_t>(g_testTick + 1e-6); }
+
+    bool mouseTurnsView() { return mouseIsTurning(); }
 
     bool lateFramesTakeNextVBlank()
     {
@@ -9814,6 +10021,13 @@ namespace tf::port
     void idleSkipped(uint32_t cycles)
     {
         g_skippedSinceWait += cycles;
+    }
+
+    void frameBegins(uint8_t *rdram, PS2Runtime *runtime)
+    {
+        reportSlowFrame(rdram, runtime);
+        if (g_printFps)
+            noteGameFrame();
     }
 }
 

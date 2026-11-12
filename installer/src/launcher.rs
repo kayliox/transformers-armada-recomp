@@ -170,16 +170,35 @@ mod tests {
 
     #[test]
     fn a_process_started_again_inside_the_job_is_waited_for() {
+        use std::os::windows::process::CommandExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
         // (as the game's restart: the first process starts the next and ends at once; the next stays in the job)
         // (a second's wait first: the job is assigned right after the start, as for the game long before its restart)
-        let mut first = Command::new("cmd").args(["/c", "ping -n 2 127.0.0.1 >nul & start /b ping -n 3 127.0.0.1 >nul"])
+        // The started-again process runs until the test creates a file (or about 5 minutes pass), so the test - not a
+        // timing that a busy PC can stretch - decides when it ends: the wait must return only after that.
+        let release = std::env::temp_dir().join(format!("tfa-launcher-release-{}", std::process::id()));
+        let _ = std::fs::remove_file(&release);
+        let next = format!("for /l %i in (1,1,300) do @(if exist \"{0}\" (exit 0) else ping -n 2 127.0.0.1 >nul)", release.display());
+        let mut first = Command::new("cmd")
+            .raw_arg(format!("/c \"ping -n 2 127.0.0.1 >nul & start /b cmd /c \"{next}\"\""))
             .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
         let tree = winapi::ProcessTree::new(&first, true);
         let mut code = first.wait().unwrap().code().unwrap_or(1);
         assert!(!tree.processes().is_empty(), "the started-again process is still in the job");
-        let started = std::time::Instant::now();
+        let released = Arc::new(AtomicBool::new(false));
+        let releaser = {
+            let (released, release) = (released.clone(), release.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                released.store(true, Ordering::SeqCst);
+                std::fs::write(&release, b"release").unwrap();
+            })
+        };
         wait_for_rest(&tree, &mut code);
-        assert!(started.elapsed() >= std::time::Duration::from_millis(1500), "waited for the started-again process");
+        assert!(released.load(Ordering::SeqCst), "waited for the started-again process");
+        releaser.join().unwrap();
+        let _ = std::fs::remove_file(&release);
         assert_eq!(code, 0);
         assert!(tree.processes().is_empty());
     }

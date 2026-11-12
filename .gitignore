@@ -22,6 +22,9 @@ ps2_log.txt
 # Save states hold the game's memory (and the memory card they were made with)
 states/
 *.ps2state
+# (the state library's scripts are versioned; the states it makes are not)
+!/tools/states/
+/tools/states/lib/
 # Play recordings (F2, TF_PLAY_RECORD): a save state or the memory card inside
 /Recordings/
 *.tfrec/

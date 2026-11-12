@@ -24,6 +24,7 @@
 #include "native_sound.h"
 
 #include "guest_code.h"
+#include "iop_tripwire.h"
 #include "native_disc.h"
 #include "native_sound_mixer.h"
 #include "sound_ledger.h"
@@ -626,6 +627,7 @@ namespace native_sound
             }
             g_runtime->setIopParked(true);
             g_iopParked = true;
+            iop_tripwire::noteParked(*g_runtime); // (the boot's record: emulation-out S1)
             std::fprintf(stderr, "[native sound] the IOP is parked (nothing left for it to do)\n");
         }
 
@@ -712,8 +714,10 @@ namespace native_sound
                 }
                 if (op == 0 || isLibrary())
                 {
+                    const auto loadStart = std::chrono::steady_clock::now();
                     const bool ok = mixer::loadLibrary(handle, file);
-                    std::fprintf(stderr, "[native sound] tone library %d '%s' %s\n", handle, file.c_str(), ok ? "loaded" : "FAILED");
+                    std::fprintf(stderr, "[native sound] tone library %d '%s' %s (%.0f ms)\n", handle, file.c_str(), ok ? "loaded" : "FAILED",
+                                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loadStart).count());
                     // A level's bank (.tla). Revisited after it is done the game loads a trimmed one
                     // (`<level>_ret.tla`) that lacks tones the level still plays - the carrier's
                     // elevator and switches (Switch_On, Elevator_Instrument, Launch, Move,

@@ -2,10 +2,12 @@
 #include "view_turn.h"
 
 #include "cam_trace.h"
+#include "camera_mode.h"
 #include "photo_mode.h"
 #include "playrec.h"
 #include "port.h"
 #include "ps2_runtime.h"
+#include "static_aim.h"
 #include "runtime/ps2_host_input.h"
 
 #include <algorithm>
@@ -288,6 +290,10 @@ namespace view_turn
             double prevYaw = 0.0, prevPitch = 0.0, yawUnwrapped = 0.0;
             double prevPivot[3] = {}, prevEye[3] = {}, prevForward[3] = {};
             uint64_t serial = 0;
+            int64_t endNs = 0; // (when the frame before ended: TODO 292's slow frames)
+            uint32_t viewNode = 0u; // (the view's camera node: noteViewNode)
+            bool reticle = false;   // (TODO 292 B: the matrix sent now is the game's crosshair model's: not turned)
+            uint64_t reticleDraws = 0, reticleDrawsAtEnd = 0;
         } g_game;
     }
 
@@ -307,6 +313,10 @@ namespace view_turn
         double frameSeconds = 0.0;
         uint64_t tick = 0, serial = 0;
         int main = -1; // (the scene's camera: the most used index - set by the renderer through turnable's caller)
+        double realFrameMs = 0.0; // (TODO 292: the time since the frame before ended, on the clock)
+        bool reticleKept = false;  // (TODO 292 B: the crosshair model's draws left unturned this frame)
+        bool reticleKnown = false; // (and where it is, for TF_XHAIR_PICTURE_LOG)
+        double reticle[3] = {};
     };
 
     bool enabled()
@@ -371,6 +381,35 @@ namespace view_turn
         }
         const int64_t t = nowNs();
         pullLocked(t);
+        // (TODO 292 A) Travel no one took for a while - a load, a frame of many hundred ms, a pause that took none - is not
+        // turned in one go when the takes come back: the view swung to its pitch limit at once on entering a level. Of a
+        // gap over TF_MOUSE_STALE_MS (250 by default; 0: as before) only the last 50 ms of travel is kept.
+        static const int64_t staleNs = [] {
+            const char *v = std::getenv("TF_MOUSE_STALE_MS");
+            return static_cast<int64_t>((v && *v ? std::atof(v) : 250.0) * 1.0e6);
+        }();
+        if (staleNs > 0 && m.takenNs != 0 && t - m.takenNs > staleNs && !m.history.empty())
+        {
+            const int64_t keepFrom = t - 50000000ll;
+            double kx = m.x, ky = m.y;
+            for (auto it = m.history.rbegin(); it != m.history.rend(); ++it)
+                if (it->ns <= keepFrom)
+                {
+                    kx = it->x;
+                    ky = it->y;
+                    break;
+                }
+            const double droppedX = kx - m.takenX, droppedY = ky - m.takenY;
+            if (std::fabs(droppedX) + std::fabs(droppedY) > 0.5)
+            {
+                static int told = 0;
+                if (told++ < 50)
+                    std::fprintf(stderr, "[turn] mouse travel of %.0f, %.0f pixels left out: no frame took it for %.0f ms\n", droppedX, droppedY,
+                                 static_cast<double>(t - m.takenNs) / 1.0e6);
+            }
+            m.takenX = kx;
+            m.takenY = ky;
+        }
         pixelsX = static_cast<float>(m.x - m.takenX);
         pixelsY = static_cast<float>(m.y - m.takenY);
         m.takenX = m.x;
@@ -418,9 +457,47 @@ namespace view_turn
         g_game.transform = transform;
     }
 
+    void noteViewNode(uint32_t node) { g_game.viewNode = node; }
+
     void noteMatrixSent(const uint8_t *rdram, const float *sent)
     {
         Game &g = g_game;
+        {
+            // (TODO 292 B) The game's crosshair model (the original crosshair) is a model in the scene, placed once a frame on
+            // the frame's camera's ray. Turned with the scene by a picture's turn it was carried off that ray - by the mouse's
+            // travel since the frame was read, more for a model a few units ahead of the eye - so it shook while the view
+            // turned (the user: "the original crosshair stutters a lot when moving the camera around"). The model's matrices
+            // are found by their origin (the scratchpad's model-to-camera at 0xD40, put back into the world by the camera's
+            // transform) lying where the crosshair was placed (photo_mode::crosshair), and their draws are left unturned: the
+            // crosshair keeps its place on the screen in every picture. TF_CROSSHAIR_TURN=1: turned with the scene, as before.
+            static const bool turnIt = std::getenv("TF_CROSSHAIR_TURN") && *std::getenv("TF_CROSSHAIR_TURN") == '1';
+            g.reticle = false;
+            float at[3];
+            uint32_t transform = g.transform;
+            if (!transform && g.viewNode)
+                transform = readWord(rdram, g.viewNode + 0x14u);
+            if (!turnIt && transform >= 0x00100000u && transform < PS2_RAM_SIZE - 0x40u && photo_mode::crosshair(at))
+            {
+                float rows[16], m[16];
+                const uint8_t *t = getConstMemPtr(const_cast<uint8_t *>(rdram), transform);
+                const uint8_t *mc = getConstMemPtr(const_cast<uint8_t *>(rdram), 0x70000D40u);
+                if (t && mc)
+                {
+                    std::memcpy(rows, t, sizeof(rows));
+                    std::memcpy(m, mc, sizeof(m));
+                    // (the camera's space: x right = -left, y up, z ahead, from the eye)
+                    double d2 = 0.0;
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        const double w = rows[12 + i] - rows[4 + i] * m[12] + rows[8 + i] * m[13] + rows[i] * m[14];
+                        d2 += (w - at[i]) * (w - at[i]);
+                    }
+                    g.reticle = d2 < 0.05 * 0.05;
+                    if (g.reticle)
+                        ++g.reticleDraws;
+                }
+            }
+        }
         {
             // (TF_TURN_DUMP=<count>, a checking aid: the scratchpad's camera matrices at the first matrices sent of the frames
             // after the third-person camera's turn is first seen - 0x6A0, 0x6E0, 0xD40, 0xEC0, 0xF00 - and the camera's own)
@@ -498,7 +575,8 @@ namespace view_turn
         g.index = static_cast<uint8_t>(g.cameras.size() - 1u);
     }
 
-    uint8_t cameraIndex() { return g_game.index; }
+    uint8_t cameraIndex() { return g_game.reticle ? 254u : g_game.index; } // (254: the crosshair model's, never turned)
+
 
     std::shared_ptr<const FrameCamera> endFrame(const uint8_t *rdram, uint64_t tick)
     {
@@ -506,8 +584,34 @@ namespace view_turn
         (void)signs;
         Game &g = g_game;
         auto fc = std::make_shared<FrameCamera>();
+        {
+            // (the average of the last four frames: one frame's end comes early or late by the waits around it - a 29 ms
+            // gap then a 3 ms one at a steady 60 - so a single gap is no measure)
+            const int64_t t = nowNs();
+            static int64_t ends[5] = {};
+            static int count = 0;
+            for (int i = 4; i > 0; --i)
+                ends[i] = ends[i - 1];
+            ends[0] = t;
+            count = std::min(count + 1, 5);
+            const int64_t span = t - ends[count - 1];
+            fc->realFrameMs = count > 1 && span < 2000000000ll ? static_cast<double>(span) / 1.0e6 / (count - 1) : 0.0;
+            g.endNs = t;
+        }
         fc->tick = tick;
         fc->serial = ++g.serial;
+        fc->reticleKept = g.reticleDraws != g.reticleDrawsAtEnd;
+        g.reticleDrawsAtEnd = g.reticleDraws;
+        g.reticle = false;
+        {
+            float at[3];
+            if (photo_mode::crosshair(at))
+            {
+                fc->reticleKnown = true;
+                for (int i = 0; i < 3; ++i)
+                    fc->reticle[i] = at[i];
+            }
+        }
         fc->cameras = std::move(g.cameras);
         g.cameras.clear();
         g.index = 0;
@@ -554,6 +658,13 @@ namespace view_turn
         // The camera's transform (forward, left, up, position) and its target (the player).
         float rows[16] = {};
         bool have = false;
+        if (!g.transform && g.viewNode)
+        {
+            // (TODO 292 A: no sound listener's camera seen - Antarctica - so the view's own node's transform)
+            const uint32_t t = readWord(rdram, g.viewNode + 0x14u);
+            if (t >= 0x00100000u && t < PS2_RAM_SIZE - 0x50u)
+                g.transform = t;
+        }
         if (kind >= 0 && g.transform)
             if (const uint8_t *p = getConstMemPtr(const_cast<uint8_t *>(rdram), g.transform))
             {
@@ -563,18 +674,54 @@ namespace view_turn
         uint32_t player = g.camera ? readWord(rdram, g.camera + 0x74u) : 0u;
         if (!(player >= 0x00100000u && player < PS2_RAM_SIZE))
             player = 0u;
-        if (!have || !player || photo_mode::active())
+        // (TODO 292 A: the walking camera's centre is the game's own pivot below, the player object not needed for it - in
+        // Antarctica there was none, and no picture turned)
+        float gamePivot[3] = {};
+        const bool haveGamePivot = kind == 0 && static_aim::cameraPivot(gamePivot);
+        if (!have || (!player && !haveGamePivot) || photo_mode::active())
         {
+            if (static const bool debug = std::getenv("TF_TURN_DEBUG") && *std::getenv("TF_TURN_DEBUG") == '1'; debug)
+                std::fprintf(stderr, "[turn debug] tick %llu: no turn - kind %d, transform %08x (%s), player %08x, the game's pivot %s\n",
+                             static_cast<unsigned long long>(tick), kind, g.transform, have ? "read" : "not read", player, haveGamePivot ? "known" : "not known");
             g.prevValid = false;
             return fc;
         }
         for (int i = 0; i < 3; ++i)
         {
-            fc->pivot[i] = readFloat(rdram, player + 0x620u + 4u * static_cast<uint32_t>(i));
+            fc->pivot[i] = player ? readFloat(rdram, player + 0x620u + 4u * static_cast<uint32_t>(i)) : 0.0f;
             fc->eye[i] = rows[12 + i];
             fc->forward[i] = rows[i];
             fc->left[i] = rows[4 + i];
             fc->up[i] = rows[8 + i];
+        }
+        // (TODO 292 A) The centre the view turns about. The player's position (player +0x620) was taken for it: in Alaska
+        // and Antarctica that word is 0 - the pictures' turn swung the view about the world's origin, 3 km away, so a
+        // degree of mouse moved the camera by 50 units: into the canyon's walls, above the cliffs, down on the robot (the
+        // user's clip, SirCebollo's "from the moment he enters Alaska"; the pad's turn adds nothing to a frame's own
+        // picture, so the pad was fine). The walking camera turns about the game's own pivot (GetThirdPersonCameraPivotPoint,
+        // recorded by static_aim each frame); first person about the eye. Whatever the source, a centre further than
+        // TF_TURN_PIVOT_MAX (60) units from the eye turns no picture.
+        if (kind == 0)
+        {
+            if (camera_mode::firstPerson() && !camera_mode::inVehicle())
+                for (int i = 0; i < 3; ++i)
+                    fc->pivot[i] = fc->eye[i];
+            else if (haveGamePivot)
+                for (int i = 0; i < 3; ++i)
+                    fc->pivot[i] = gamePivot[i];
+        }
+        {
+            static const double maxPivot = std::getenv("TF_TURN_PIVOT_MAX") ? std::atof(std::getenv("TF_TURN_PIVOT_MAX")) : 60.0;
+            const double d = std::sqrt((fc->eye[0] - fc->pivot[0]) * (fc->eye[0] - fc->pivot[0]) + (fc->eye[1] - fc->pivot[1]) * (fc->eye[1] - fc->pivot[1]) +
+                                       (fc->eye[2] - fc->pivot[2]) * (fc->eye[2] - fc->pivot[2]));
+            if (maxPivot > 0.0 && !(d <= maxPivot))
+            {
+                static int told = 0;
+                if (told++ < 10)
+                    std::fprintf(stderr, "[turn] the view's centre is %.0f units from the eye (kind %d): no picture turned beyond its frame\n", d, kind);
+                g.prevValid = false;
+                return fc;
+            }
         }
         fc->kind = kind;
         fc->mouseDirect = kind == 0;
@@ -857,9 +1004,38 @@ namespace view_turn
             dYaw += fixed.first;
             dPitch += fixed.second;
         }
+        // (TODO 292 A/D) The turn a picture shows beyond its frame is bounded. Where the game's frames are slow (over
+        // TF_TURN_SLOW_MS = 25 ms on the clock, a hitch or a slow PC: 55-69 ms on a laptop) no picture turns beyond its frame
+        // - the turn of a whole long frame swung the view about the player through the terrain, and the next frame took it
+        // back (the game's camera keeps out of the ground, the pictures' turn does not). Otherwise at most TF_TURN_MAX_DEG
+        // (8) of yaw and a third of that of pitch: a picture between two frames shows a part of a frame's turn, never a
+        // swing. 0 for either: no bound of that kind.
+        {
+            static const double slowMs = std::getenv("TF_TURN_SLOW_MS") ? std::atof(std::getenv("TF_TURN_SLOW_MS")) : 25.0;
+            static const double maxRad = (std::getenv("TF_TURN_MAX_DEG") ? std::atof(std::getenv("TF_TURN_MAX_DEG")) : 8.0) * kPi / 180.0;
+            if (slowMs > 0.0 && fc.realFrameMs > slowMs)
+            {
+                static int told = 0;
+                if (told++ < 20)
+                    std::fprintf(stderr, "[turn] a slow frame (%.1f ms): its pictures show the frame's own view\n", fc.realFrameMs);
+                dYaw = dPitch = 0.0;
+            }
+            if (maxRad > 0.0)
+            {
+                dYaw = std::clamp(dYaw, -maxRad, maxRad);
+                dPitch = std::clamp(dPitch, -maxRad / 3.0, maxRad / 3.0);
+            }
+        }
         const double targetYaw = fc.yaw + dYaw;
         const double targetPitch = fc.limit > 0.0 ? std::clamp(fc.pitch + dPitch, -fc.limit, fc.limit) : fc.pitch + dPitch;
         const double turnYaw = wrapAngle(targetYaw - poseYaw), turnPitch = targetPitch - posePitch;
+        // (TF_TURN_DEBUG=1, a measuring aid: each picture's turn, its frame's tick, pose and the frame's own turn - degrees)
+        if (static const bool debug = std::getenv("TF_TURN_DEBUG") && *std::getenv("TF_TURN_DEBUG") == '1'; debug)
+            std::fprintf(stderr, "[turn debug] tick %llu s %.2f: turn yaw %+.2f pitch %+.2f (mouse/stick %+.2f %+.2f, frame %+.2f %+.2f), pitch %.2f, %.1f ms frame; pivot %.1f %.1f %.1f, the eye %.1f from it\n",
+                         static_cast<unsigned long long>(fc.tick), sc, turnYaw * 57.2958, turnPitch * 57.2958, dYaw * 57.2958, dPitch * 57.2958,
+                         fc.dYaw * 57.2958, fc.dPitch * 57.2958, fc.pitch * 57.2958, fc.realFrameMs, fc.pivot[0], fc.pivot[1], fc.pivot[2],
+                         std::sqrt((fc.eye[0] - fc.pivot[0]) * (fc.eye[0] - fc.pivot[0]) + (fc.eye[1] - fc.pivot[1]) * (fc.eye[1] - fc.pivot[1]) +
+                                   (fc.eye[2] - fc.pivot[2]) * (fc.eye[2] - fc.pivot[2])));
         out.yawShown = fc.yawUnwrapped - (fc.yaw - poseYaw) + turnYaw;
         if (std::fabs(turnYaw) < 1e-7 && std::fabs(turnPitch) < 1e-7)
             return;
@@ -917,6 +1093,24 @@ namespace view_turn
             out.clip[i] = static_cast<float>(turnClip[i]);
         }
         out.any = true;
+        // (TF_XHAIR_PICTURE_LOG=1, a measuring aid for TODO 292 B: per picture, how far the picture's turn carries the game's
+        // crosshair model off its place - GS pixels of the 448-line picture - and whether its draws were kept unturned)
+        if (static const bool xlog = std::getenv("TF_XHAIR_PICTURE_LOG") && *std::getenv("TF_XHAIR_PICTURE_LOG") == '1'; xlog && fc.reticleKnown)
+        {
+            double v[4] = {fc.reticle[0], fc.reticle[1], fc.reticle[2], 1.0}, scr[4] = {}, st[4] = {};
+            for (int j = 0; j < 4; ++j)
+                for (int k = 0; k < 4; ++k)
+                    scr[j] += v[k] * mw[4 * k + j];
+            for (int j = 0; j < 4; ++j)
+                for (int k = 0; k < 4; ++k)
+                    st[j] += scr[k] * turn[4 * k + j];
+            if (std::fabs(scr[3]) > 1e-9 && std::fabs(st[3]) > 1e-9)
+            {
+                const double dx = st[0] / st[3] - scr[0] / scr[3], dy = st[1] / st[3] - scr[1] / scr[3];
+                std::fprintf(stderr, "[xhair picture] tick %llu s %.2f: the turn would carry it %.2f, %.2f pixels; %s\n",
+                             static_cast<unsigned long long>(fc.tick), sc, dx, dy, fc.reticleKept ? "kept in place" : "turned with the scene");
+            }
+        }
     }
 
     void notePictureYaw(uint64_t id, bool valid, double yaw, int64_t sampleNs)

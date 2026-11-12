@@ -1,0 +1,81 @@
+Subject: [PATCH] Runtime: GLFW's joysticks made on a thread of their own (Windows; PS2X_JOYSTICK_THREAD)
+
+raylib asks for the joysticks as the window opens, and GLFW then scans every HID device through DirectInput
+(EnumDevices: 270-340 ms on a PC with many USB devices, every time) on the window's thread before the game can start.
+The scan now runs on a thread of its own while the game starts; the gamepads count as absent until it is done.
+PS2X_JOYSTICK_THREAD=0: as raylib has it.
+
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -102,6 +102,71 @@ else()
+                 file(WRITE "${_ps2x_rcore}" "${_ps2x_rcore_new}")
+             endif()
+         endif()
++        # (TODO 298) GLFW's joysticks made on a thread of their own (Windows): raylib asks for them as the window opens
++        # (glfwSetJoystickCallback, the gamepads' names) and GLFW then scans every HID device through DirectInput - 0.3 s
++        # and more of the window's thread before the game could start (EnumDevices alone 270-340 ms on a PC with many USB
++        # devices, every time). The thread does that scan while the game starts; the gamepads count as absent until it
++        # is done (a few hundred ms), then as before. PS2X_JOYSTICK_THREAD=0: on the window's thread, as raylib has it.
++        file(READ "${_ps2x_rcore}" _ps2x_rcore_text)
++        if(NOT _ps2x_rcore_text MATCHES "PS2X_JOYSTICK_THREAD")
++            set(_ps2x_js_init "    glfwSetJoystickCallback(JoystickCallback);")
++            set(_ps2x_js_names "        if (glfwJoystickPresent(i)) strcpy(CORE.Input.Gamepad.name[i], glfwGetJoystickName(i));")
++            set(_ps2x_js_poll "        if (glfwJoystickPresent(i)) CORE.Input.Gamepad.ready[i] = true;")
++            set(_ps2x_js_helper "#if defined(_WIN32) /* PS2X_JOYSTICK_THREAD: PS2Recomp, TODO 298 */
++#include <process.h>
++static volatile long ps2xJoysticksReady = 1;
++static void __cdecl ps2xJoystickThread(void *unused)
++{
++    (void)unused;
++    (void)glfwSetJoystickCallback(JoystickCallback); /* (spelled apart from the lines replaced below) */
++    for (int i = 0; i < MAX_GAMEPADS; i++)
++    {
++        if (glfwJoystickPresent(i) != 0) strcpy(CORE.Input.Gamepad.name[i], glfwGetJoystickName(i));
++    }
++    ps2xJoysticksReady = 1;
++}
++static int ps2xJoysticksOnThread(void)
++{
++    const char *e = getenv(\"PS2X_JOYSTICK_THREAD\");
++    if (e && e[0] == '0') return 0;
++    ps2xJoysticksReady = 0;
++    if (_beginthread(ps2xJoystickThread, 0, NULL) == (uintptr_t)-1L) { ps2xJoysticksReady = 1; return 0; }
++    return 1;
++}
++#define PS2X_JOYSTICKS_READY() (ps2xJoysticksReady != 0)
++#else
++#define ps2xJoysticksOnThread() 0
++#define PS2X_JOYSTICKS_READY() 1
++#endif
++")
++            # (the helper right after the callback's declaration at the top - before PollInputEvents and InitPlatform use it)
++            set(_ps2x_at -1)
++            string(FIND "${_ps2x_rcore_text}" "static void JoystickCallback(int jid, int event);" _ps2x_decl)
++            if(NOT _ps2x_decl EQUAL -1)
++                string(SUBSTRING "${_ps2x_rcore_text}" ${_ps2x_decl} -1 _ps2x_rest)
++                string(FIND "${_ps2x_rest}" "\n" _ps2x_eol)
++                if(NOT _ps2x_eol EQUAL -1)
++                    math(EXPR _ps2x_at "${_ps2x_decl} + ${_ps2x_eol} + 1")
++                endif()
++            endif()
++            string(FIND "${_ps2x_rcore_text}" "${_ps2x_js_init}" _ps2x_at_init)
++            string(FIND "${_ps2x_rcore_text}" "${_ps2x_js_names}" _ps2x_at_names)
++            string(FIND "${_ps2x_rcore_text}" "${_ps2x_js_poll}" _ps2x_at_poll)
++            if(_ps2x_at EQUAL -1 OR _ps2x_at_init EQUAL -1 OR _ps2x_at_names EQUAL -1 OR _ps2x_at_poll EQUAL -1)
++                message(WARNING "raylib's joystick start not found: GLFW's joysticks stay on the window's thread (TODO 298)")
++            else()
++                string(SUBSTRING "${_ps2x_rcore_text}" 0 ${_ps2x_at} _ps2x_head)
++                string(SUBSTRING "${_ps2x_rcore_text}" ${_ps2x_at} -1 _ps2x_tail)
++                set(_ps2x_rcore_new "${_ps2x_head}${_ps2x_js_helper}${_ps2x_tail}")
++                string(REPLACE "${_ps2x_js_init}" "    const int ps2xJsOnThread = ps2xJoysticksOnThread(); if (!ps2xJsOnThread) glfwSetJoystickCallback(JoystickCallback);"
++                    _ps2x_rcore_new "${_ps2x_rcore_new}")
++                string(REPLACE "${_ps2x_js_names}" "        if (!ps2xJsOnThread && glfwJoystickPresent(i)) strcpy(CORE.Input.Gamepad.name[i], glfwGetJoystickName(i));"
++                    _ps2x_rcore_new "${_ps2x_rcore_new}")
++                string(REPLACE "${_ps2x_js_poll}" "        if (PS2X_JOYSTICKS_READY() && glfwJoystickPresent(i)) CORE.Input.Gamepad.ready[i] = true;"
++                    _ps2x_rcore_new "${_ps2x_rcore_new}")
++                file(WRITE "${_ps2x_rcore}" "${_ps2x_rcore_new}")
++            endif()
++        endif()
+     endif()
+ 
+     if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID)

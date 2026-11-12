@@ -1,0 +1,189 @@
+Subject: [PATCH] Runtime: the mouse wheel as two bindable buttons; the mouse buttons held
+
+MOUSE_WHEEL_UP / MOUSE_WHEEL_DOWN in the keyboard and mouse layout: a notch is a short press (60 ms down, 45 ms up) of
+what it is bound to, queued, so the game sees each one at 30-240 frames a second. takeMouseButtonPresses(10 / 11) gives
+a game the notches for its own use; mouseButtonHeld(left / right / middle); injectMouseWheel for tests.
+
+--- a/ps2xRuntime/include/runtime/ps2_host_input.h
++++ b/ps2xRuntime/include/runtime/ps2_host_input.h
+@@ -57,6 +57,13 @@
+     // a pad input (then the pad has it, as any key).
+     int takeMouseButtonPresses(int button);
+     bool mouseButtonBound(int button);
++    // (patch 0173) The wheel is two more buttons of the layout, MOUSE_WHEEL_UP / MOUSE_WHEEL_DOWN (10 / 11 here): a notch
++    // presses what they are bound to briefly; takeMouseButtonPresses(10 / 11) gives the game its notches. mouseButtonHeld:
++    // left / right / middle held now, while the mouse belongs to the game.
++    constexpr int kMouseWheelUpButton = 10, kMouseWheelDownButton = 11;
++    bool mouseButtonHeld(int button);
++    // (tests) Wheel notches (+ up, - down) as if the wheel had turned, while the mouse belongs to the game.
++    void injectMouseWheel(int notches);
+ 
+     // The keyboard and mouse layout: for each pad button and stick direction, the keys and mouse
+     // buttons that press it, as "cross=X;circle=C,BACKSPACE;r1=LEFT_ALT,MOUSE_LEFT;lup=W;..."
+--- a/ps2xRuntime/src/lib/ps2_pad.cpp
++++ b/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -281,6 +281,8 @@
+     // setKeyBindings, in the form "cross=X;circle=C,BACKSPACE;r1=LEFT_ALT,MOUSE_LEFT;lup=W;...":
+     // the inputs named for an input replace its defaults, the others keep theirs.
+     constexpr int kMouseCode = 1000;
++    // (the mouse wheel, a notch up or down, as two more "buttons" of the layout: MOUSE_WHEEL_UP / MOUSE_WHEEL_DOWN)
++    constexpr int kMouseWheelUp = 10, kMouseWheelDown = 11;
+     enum BindingInput
+     {
+         kBindUp, kBindDown, kBindLeft, kBindRight, kBindCross, kBindCircle, kBindSquare, kBindTriangle,
+@@ -331,7 +333,8 @@
+         {"KP_9", KEY_KP_9}, {"KP_ENTER", KEY_KP_ENTER}, {"KP_ADD", KEY_KP_ADD}, {"KP_SUBTRACT", KEY_KP_SUBTRACT},
+         {"MOUSE_LEFT", kMouseCode + MOUSE_BUTTON_LEFT}, {"MOUSE_RIGHT", kMouseCode + MOUSE_BUTTON_RIGHT},
+         {"MOUSE_MIDDLE", kMouseCode + MOUSE_BUTTON_MIDDLE}, {"MOUSE_SIDE", kMouseCode + MOUSE_BUTTON_SIDE},
+-        {"MOUSE_EXTRA", kMouseCode + MOUSE_BUTTON_EXTRA}};
++        {"MOUSE_EXTRA", kMouseCode + MOUSE_BUTTON_EXTRA}, {"MOUSE_WHEEL_UP", kMouseCode + kMouseWheelUp},
++        {"MOUSE_WHEEL_DOWN", kMouseCode + kMouseWheelDown}};
+ 
+     std::string keyNameOf(int code)
+     {
+@@ -433,10 +436,48 @@
+         return out;
+     }
+ 
++    // A wheel notch bound to a pad input is a short press of it: down 60 ms, then up at least 45 ms before the next notch's
++    // press (so the game sees each one at 30-240 frames a second, however fast the wheel turns). Notches wait in a short queue
++    // (at most 4, none older than 0.4 s: a turn of the wheel no input takes is not pressed later).
++    std::atomic<int> g_wheelNotches[2];
++    std::atomic<int64_t> g_wheelLastNotchNs[2];
++    std::atomic<int64_t> g_wheelDownUntilNs[2], g_wheelUpUntilNs[2];
++    int64_t wheelNowNs()
++    {
++        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    }
++    bool wheelDown(int button)
++    {
++        const int d = button == kMouseWheelUp ? 0 : 1;
++        const int64_t now = wheelNowNs();
++        if (now < g_wheelDownUntilNs[d].load(std::memory_order_relaxed))
++            return true;
++        if (now < g_wheelUpUntilNs[d].load(std::memory_order_relaxed))
++            return false;
++        if (g_wheelNotches[d].load(std::memory_order_relaxed) > 0 && now - g_wheelLastNotchNs[d].load(std::memory_order_relaxed) > 400000000ll)
++            g_wheelNotches[d].store(0, std::memory_order_relaxed);
++        int n = g_wheelNotches[d].load(std::memory_order_relaxed);
++        while (n > 0 && !g_wheelNotches[d].compare_exchange_weak(n, n - 1, std::memory_order_relaxed))
++        {
++        }
++        if (n <= 0)
++            return false;
++        g_wheelDownUntilNs[d].store(now + 60000000ll, std::memory_order_relaxed);
++        g_wheelUpUntilNs[d].store(now + 105000000ll, std::memory_order_relaxed);
++        return true;
++    }
++    bool mouseCodeDown(int code)
++    {
++        const int button = code - kMouseCode;
++        if (button == kMouseWheelUp || button == kMouseWheelDown)
++            return wheelDown(button);
++        return IsMouseButtonDown(button);
++    }
++
+     bool bindingDown(int code, bool mouseLive)
+     {
+         if (code >= kMouseCode)
+-            return mouseLive && IsMouseButtonDown(code - kMouseCode);
++            return mouseLive && mouseCodeDown(code);
+         return IsKeyDown(code);
+     }
+ 
+@@ -709,6 +750,28 @@
+         // frame between two pad reads is otherwise lost: the pad sees the button held or not only at the read).
+         constexpr int kCountedMouseButtons = 3; // left, right, middle
+         std::atomic<int> g_mousePresses[kCountedMouseButtons];
++        // (patch 0173) The buttons held now (left, right, middle), and the wheel's notches for the game's own use (up, down;
++        // takeMouseButtonPresses(MOUSE_WHEEL_UP / DOWN's 10 / 11)), whole notches of a smooth wheel added up.
++        std::atomic<bool> g_mouseHeld[kCountedMouseButtons];
++        std::atomic<int> g_wheelPresses[2];
++        float g_wheelSum = 0.0f;
++        std::atomic<int> g_wheelInjected{0}; // (injectMouseWheel: a test's notches)
++
++        // (patch 0173) The wheel: each whole notch once for a binding (a short press, wheelDown) and once for the game.
++        void pumpWheel(float move)
++        {
++            g_wheelSum += move + static_cast<float>(g_wheelInjected.exchange(0, std::memory_order_relaxed));
++            const int64_t now = wheelNowNs();
++            while (g_wheelSum >= 1.0f || g_wheelSum <= -1.0f)
++            {
++                const int d = g_wheelSum > 0.0f ? 0 : 1;
++                g_wheelSum += d == 0 ? -1.0f : 1.0f;
++                if (g_wheelNotches[d].load(std::memory_order_relaxed) < 4)
++                    g_wheelNotches[d].fetch_add(1, std::memory_order_relaxed);
++                g_wheelLastNotchNs[d].store(now, std::memory_order_relaxed);
++                g_wheelPresses[d].fetch_add(1, std::memory_order_relaxed);
++            }
++        }
+ 
+         // IsKeyPressed only compares final held states, so a press and release
+         // received in the same PollInputEvents are otherwise lost. Raylib queues
+@@ -736,9 +799,18 @@
+ 
+     int takeMouseButtonPresses(int button)
+     {
++        if (button == kMouseWheelUp || button == kMouseWheelDown)
++            return g_wheelPresses[button == kMouseWheelUp ? 0 : 1].exchange(0, std::memory_order_relaxed);
+         return button >= 0 && button < kCountedMouseButtons ? g_mousePresses[button].exchange(0, std::memory_order_relaxed) : 0;
+     }
+ 
++    bool mouseButtonHeld(int button)
++    {
++        return button >= 0 && button < kCountedMouseButtons && g_mouseHeld[button].load(std::memory_order_relaxed);
++    }
++
++    void injectMouseWheel(int notches) { g_wheelInjected.fetch_add(notches, std::memory_order_relaxed); }
++
+     bool mouseButtonBound(int button)
+     {
+         std::lock_guard<std::mutex> lock(g_bindingsMutex);
+@@ -769,6 +841,7 @@
+         {
+             g_mouseCaptured.store(true, std::memory_order_relaxed);
+             g_mouseButtonsLive.store(false, std::memory_order_relaxed);
++            pumpWheel(0.0f); // (patch 0173: a test's injected notches)
+             if (!mappedByGame)
+                 publishMouseSpeed(config.testX, config.testY);
+             return;
+@@ -802,11 +875,19 @@
+         }
+         g_mouseCaptured.store(captured, std::memory_order_relaxed);
+         if (!captured)
++        {
++            for (int b = 0; b < kCountedMouseButtons; ++b)
++                g_mouseHeld[b].store(false, std::memory_order_relaxed);
++            g_wheelSum = 0.0f;
+             return;
++        }
+         if (g_mouseButtonsLive.load(std::memory_order_relaxed))
+             for (int b = 0; b < kCountedMouseButtons; ++b)
+                 if (IsMouseButtonPressed(b))
+                     g_mousePresses[b].fetch_add(1, std::memory_order_relaxed);
++        for (int b = 0; b < kCountedMouseButtons; ++b)
++            g_mouseHeld[b].store(g_mouseButtonsLive.load(std::memory_order_relaxed) && IsMouseButtonDown(b), std::memory_order_relaxed);
++        pumpWheel(GetMouseWheelMove());
+ 
+         if (!g_mouseButtonsLive.load(std::memory_order_relaxed) && !IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
+             !IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && !IsMouseButtonDown(MOUSE_BUTTON_MIDDLE))
+@@ -1081,7 +1162,8 @@
+     // ps2_host_input::setKeyBindings). Keys while the window takes input, mouse buttons once the
+     // mouse belongs to the game.
+     const bool mouseButtons = g_mouseCaptured.load(std::memory_order_relaxed) && g_mouseButtonsLive.load(std::memory_order_relaxed);
+-    if (live || mouseButtons)
++    const bool mouseOwned = g_mouseCaptured.load(std::memory_order_relaxed); // (patch 0173: the wheel's notches)
++    if (live || mouseOwned)
+     {
+         constexpr size_t kMost = 8u;
+         int codes[kBindCount][kMost];
+@@ -1101,7 +1183,8 @@
+             for (size_t c = 0; c < counts[input]; ++c)
+             {
+                 const int code = codes[input][c];
+-                if (code >= kMouseCode ? (mouseButtons && IsMouseButtonDown(code - kMouseCode)) : (live && IsKeyDown(code)))
++                const bool wheel = code == kMouseCode + kMouseWheelUp || code == kMouseCode + kMouseWheelDown;
++                if (code >= kMouseCode ? ((wheel ? mouseOwned : mouseButtons) && mouseCodeDown(code)) : (live && IsKeyDown(code)))
+                 {
+                     keyboardUsed = true;
+                     return true;

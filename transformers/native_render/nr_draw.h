@@ -80,5 +80,7 @@ namespace nr::draw
         float picture[4];
         float turn[16];
         float turnClip[16];
+        float taa[4]; // (TODO 299) x: the temporal upscaler's motion view (TF_TAA_DEBUG), y: the motion target written, w: the view's scale
+        float jitter[4]; // (TODO 299) the projection's jitter of the scene's 3D (clip space x, y): the temporal upscaler's
     };
 }

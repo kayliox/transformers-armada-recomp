@@ -28,6 +28,14 @@
 // that screen as usual - the setting can never stop the game from starting. TF_START_TRACE=1 logs the
 // front end's movies and screens as they come.
 // Linux adds Quit Game to that menu; it takes the same shutdown path as closing the window.
+//
+// (TODO 298) And none of it is waited for: until the main menu is up the game runs unthrottled (the
+// scheduler's turbo, as the fast load's: its own time goes on VBlank by VBlank, no waiting for the host's
+// clock) with its sound muted and the window black - the boot's 12.6 s of console time were the screens'
+// fades and the movies' openings at the console's pace, the PC's work a fraction of it. Released at the
+// main menu (the title in "title" mode), at a card question or error (the player's to answer at the
+// game's pace), when a level or the HQ runs (a start-up state) or after 3000 VBlanks whatever happens.
+// TF_START_TURBO=0: the console's pace, as before.
 
 #include <cstdint>
 
@@ -40,6 +48,11 @@ namespace start_screens
     void noteScriptedRun();
     void addSettings();
     void install(PS2Runtime &runtime);
+    // Every game frame (overrides.cpp): ends the start's turbo when the game has gone past the start (`inGame`: a
+    // level or the HQ runs).
+    void frame(PS2Runtime &runtime, bool inGame);
+    // The start's turbo runs (the window shows black meanwhile).
+    bool starting();
     // A start movie the setting skips (by its key, hd_movies::movieKey: "NATARI", "NINTRO", ...) - the
     // FMV skip's fallback presses (overrides.cpp) use it too, for a movie the state skip above missed.
     bool skipsMovie(const char *movieKey);

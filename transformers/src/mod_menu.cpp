@@ -4,6 +4,7 @@
 
 #include "camera_mode.h"
 #include "graphics_driver.h"
+#include "gpu_recovery.h"
 #include "hd_pack.h"
 #include "hd_progress.h"
 #include "install_layout.h"
@@ -55,7 +56,7 @@
 #include "imgui.h"
 #include "raylib.h"
 #include "rlgl.h"
-#include "rlImGui.h"
+#include "runtime/ps2_overlay.h"
 #include "runtime/ps2_sony_pad.h"
 #include "ps2_runtime.h"
 #include "runtime/ps2_host_display.h"
@@ -97,7 +98,7 @@ namespace mod_menu
         }
 
         // ---------------------------------------------------------------------------------
-        // The 32 cheat codes (docs/CHEATS.md of github.com/kayliox/transformers-armada-ps2-mods:
+        // The 32 cheat codes (docs/CHEATS.md of the mods repository:
         // decoded from the game's own table, the same in the PAL and USA releases).
 
         struct Cheat
@@ -1042,12 +1043,12 @@ namespace mod_menu
 
         void drawControls()
         {
-            ImGui::TextWrapped("Click Change, then press the key or mouse button (Esc cancels). Add keeps the old ones too. "
+            ImGui::TextWrapped("Click Change, then press the key or mouse button, or turn the mouse wheel (Esc cancels). Add keeps the old ones too. "
                                "WASD, the mouse and a gamepad work as before; this changes only the keyboard and mouse.");
             const std::string layout = ps2_host_input::keyBindings();
             if (g_capturing >= 0)
             {
-                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Press a key or mouse button for: %s", kControls[g_capturing].label);
+                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Press a key or mouse button, or turn the wheel, for: %s", kControls[g_capturing].label);
                 // (held state, not raylib's pressed queue: the runtime polls input several times a
                 // frame. Waits until everything held when Change was clicked is let go.)
                 int code = -1;
@@ -1066,6 +1067,10 @@ namespace mod_menu
                         if (g_captureArmed && code < 0)
                             code = ps2_host_input::mouseButtonCode(b);
                     }
+                // (TODO 292 H) A turn of the wheel: MOUSE_WHEEL_UP / DOWN (a notch presses the input briefly)
+                if (g_captureArmed && code < 0 && g_wheelY != 0.0f)
+                    code = ps2_host_input::mouseButtonCode(g_wheelY > 0.0f ? ps2_host_input::kMouseWheelUpButton
+                                                                           : ps2_host_input::kMouseWheelDownButton);
                 if (!anyHeld)
                     g_captureArmed = true;
                 if (code == KEY_ESCAPE)
@@ -1382,7 +1387,7 @@ namespace mod_menu
                 return Page::Sound;
             if (r.section == "Gameplay" || r.section == "Debug")
                 return Page::Gameplay;
-            if (r.section == "Cheats" || r.section == "Prototype" || r.section == "Jet bike")
+            if (r.section == "Cheats" || r.section == "Prototype" || r.section == "Jet bike" || r.section == "Apex movement")
                 return Page::Mods;
             if (r.section == "Updates")
                 return Page::About; // (the update check: updates.h)
@@ -1498,6 +1503,8 @@ namespace mod_menu
             {"PS2X_MOUSE_SENSITIVITY", "Mouse speed", "How fast the mouse turns the camera."},
             {"PS2X_MOUSE_INVERT_Y", "Invert mouse up / down", "On: moving the mouse up looks down. The game's own Invert Y is for the controller."},
             {"TF_MENU_MOUSE", "Mouse in menus", "Point and click in the game's menus."},
+            {"TF_RIGHT_AIM", "Right-click aim", "Click: a click each for aim, zoom, zoom, out. Hold: aim while held, the wheel zooms (unless the wheel is bound in Keys)."},
+            {"TF_STATIC_AIM", "Still crosshair", "The crosshair keeps its place on the screen, near or far, and shots go where it points. With the mouse: while the mouse turns the view."},
             {"PS2X_SONYPAD_RUMBLE", "Vibration", "Controller vibration strength."},
             {"PS2X_SONYPAD_LIGHTBAR", "Light bar", "The DualSense or DualShock 4 light colour. Your Autobot's: Optimus red, Hot Shot yellow, Red Alert blue."},
             {"TF_LIGHTBAR_ALERTS", "Light bar warnings", "The light blinks blue and red when your health is low, and blinks your Autobot's colour when he is destroyed."},
@@ -1808,12 +1815,15 @@ namespace mod_menu
             "TF_DRAW_DISTANCE", "TF_SCENERY_DISTANCE", "TF_FOREST_DISTANCE", "TF_FOREST_SPRITES", "TF_GRASS_DISTANCE",
             "TF_TERRAIN_DETAIL", "TF_FOREST_ADAPTIVE", "TF_FOREST_FULL_DETAIL", "TF_ENEMY_DETAIL", "TF_NATIVE_AA", "PS2X_GPU_AA", "PS2X_GPU_MSAA",
             "TF_NATIVE_SSAA", "TF_NATIVE_QUALITY", "TF_SHARP_TEXTURES", "TF_SMOOTH_TEXTURES", "PS2X_TEXTURE_PACK", "PS2X_GPU_ANISOTROPY", "TF_HIRES",
-            "TF_MOUSE", "PS2X_MOUSE_SENSITIVITY", "TF_MENU_MOUSE", "PS2X_SONYPAD_RUMBLE", "PS2X_SONYPAD_LIGHTBAR", "TF_LIGHTBAR_ALERTS", "TF_ADAPTIVE_TRIGGERS", "TF_TRIGGER_STRENGTH", "TF_PAD_SPEAKER", "TF_PAD_SPEAKER_VOLUME", "TF_PAD_SPEAKER_DELAY", "PS2X_GAMEPAD_BACKEND",
+            "TF_MOUSE", "PS2X_MOUSE_SENSITIVITY", "TF_MENU_MOUSE", "TF_STATIC_AIM", "TF_RIGHT_AIM", "TF_FP_STEADY_EYE", "PS2X_SONYPAD_RUMBLE", "PS2X_SONYPAD_LIGHTBAR", "TF_LIGHTBAR_ALERTS", "TF_ADAPTIVE_TRIGGERS", "TF_TRIGGER_STRENGTH", "TF_PAD_SPEAKER", "TF_PAD_SPEAKER_VOLUME", "TF_PAD_SPEAKER_DELAY", "PS2X_GAMEPAD_BACKEND",
             "PS2X_STICK_LEFT_DEADZONE", "PS2X_STICK_RIGHT_DEADZONE",
             "PS2X_STICK_RESPONSE", "PS2X_STICK_VEHICLE_MODE", "PS2X_STICK_LEFT_LIFT", "PS2X_STICK_LEFT_SENSITIVITY",
             "PS2X_STICK_RIGHT_LIFT", "PS2X_STICK_VEHICLE_LIFT", "PS2X_STICK_VEHICLE_RESPONSE",
             "TF_CAR_KEYS", "PS2X_AUDIO", "PS2X_AUDIO_VOLUME", "TF_NATIVE_SOUND", "TF_CFG_showHUD", "TF_START_SCREENS",
-            "TF_ENEMY_WAVES", "TF_PLAY_RECORDING", "TF_UPDATE_CHECK"};
+            "TF_ENEMY_WAVES", "TF_PLAY_RECORDING", "TF_UPDATE_CHECK",
+            // (Kept in settings.ini only, never a row: the HD texture pack's folder and the HD set's - the Graphics
+            // page's pack button and the setup set them; without these "Show all settings" listed them as raw rows.)
+            "TF_HD_PACK", "TF_HIRES_DIR"};
         bool laidOut(const std::string &key)
         {
             return std::find_if(std::begin(kPlaced), std::end(kPlaced), [&](const char *k) { return key == k; }) != std::end(kPlaced);
@@ -1880,7 +1890,10 @@ namespace mod_menu
         void pageGraphics()
         {
             driverWarning();
-            mergedRow("preset", "Preset", "One choice for all the graphics settings.", presets(), true);
+            mergedRow("preset", "Preset",
+                      "One choice for all the graphics settings. On built-in graphics, the Render scale setting "
+                      "makes by far the biggest difference to the frame rate.",
+                      presets(), true);
             if (advanced("graphics-renderer"))
                 keyRow("TF_RENDERER");
             advancedEnd();
@@ -2049,6 +2062,10 @@ namespace mod_menu
             keyRow("PS2X_MOUSE_SENSITIVITY");
             keyRow("PS2X_MOUSE_INVERT_Y"); // (TODO 287: the mouse's own, not the save's Invert Y)
             keyRow("TF_MENU_MOUSE");
+            keyRow("TF_RIGHT_AIM"); // (TODO 292 H: right-click aim, Click / Hold)
+            if (advanced("controls-mouse"))
+                keyRow("TF_STATIC_AIM"); // (TODO 292 B: the still crosshair)
+            advancedEnd();
             settingRows(Page::Controls, "Mouse");
             pageHeading("Controller");
             keyRow("PS2X_SONYPAD_RUMBLE");
@@ -2136,6 +2153,9 @@ namespace mod_menu
                 if (ImGui::IsItemHovered())
                     menu_style::setHelp("Freeze the game and fly the camera (mouse to look, WASD to move, F8 or Esc to leave).");
             }
+            if (advanced("gameplay-camera"))
+                keyRow("TF_FP_STEADY_EYE"); // (TODO 300 a: the steady first-person eye, camera_mode.h)
+            advancedEnd();
             pageHeading("Game");
             keyRow("TF_CFG_showHUD");
             keyRow("TF_CRISP_TEXT");
@@ -2179,6 +2199,8 @@ namespace mod_menu
                 ext::menuSection("Prototype"); // (an extension's controls: the jet bike's Summon, port_ext.h)
             settingRows(Page::Mods, "Prototype");
             settingRows(Page::Mods, "Jet bike"); // (TODO 92: its own settings)
+            pageHeading("Apex movement"); // (TODO 300: the overlay's apex_mod.cpp)
+            settingRows(Page::Mods, "Apex movement");
             pageHeading("Gameplay");
             keyRow("TF_ENEMY_WAVES");
             keyRow("TF_PLAY_RECORDING");
@@ -2930,6 +2952,7 @@ namespace mod_menu
         }
         updates::addSettings(); // About: checking for updates automatically (updates.h)
         menu_mouse::addSettings(); // Controls: the mouse in the pause menu (menu_mouse.h)
+        camera_mode::addSettings(); // Controls: right-click aim, Click / Hold (camera_mode.h, TODO 292 H)
         distance_meter::addSettings(); // Mods & cheats: the prototype's distance meter (distance_meter.h)
         boss_cheat::addSettings(); // Mods & cheats: one-hit kills on bosses (boss_cheat.h, TODO 199)
         speedrun_timer::addSettings(); // Display, On screen: the speedrun timer (speedrun_timer.h)
@@ -3106,9 +3129,14 @@ namespace mod_menu
             wasOpen = g_open || g_holdBlock;
         }
         updates::frame(runtime); // (an update's steps, a resume's outcome: updates.h)
+        gpu_recovery::frame(runtime); // (a lost graphics device: the game saved and started again - gpu_recovery.h)
         state_manager::frame(runtime); // (a save or load asked for in the Debug page: its answer - state_manager.h)
-        syncInputState(); // (also for the runtime's debugger, drawn after this with the same ImGui)
-        takeOverlayInput(); // (TODO 170 / 174: every character and wheel notch since the last picture)
+        // (A window host that hands ImGui every input event itself - SDL3's, ps2_overlay.h - needs none of the two.)
+        if (!ps2_overlay::hostFeedsInput())
+        {
+            syncInputState(); // (also for the runtime's debugger, drawn after this with the same ImGui)
+            takeOverlayInput(); // (TODO 170 / 174: every character and wheel notch since the last picture)
+        }
         typeTestFrame(runtime.eeScheduler().currentVSyncTick());
         clickTestFrame(runtime.eeScheduler().currentVSyncTick(), g_open);
         loadControls(); // (controls.txt, once)
@@ -3186,6 +3214,16 @@ namespace mod_menu
                 DrawText(shownMessage.c_str(), size + 2, y + 2, size, Color{0, 0, 0, 170});
                 DrawText(shownMessage.c_str(), size, y, size, Color{255, 200, 90, 235});
                 y -= size + size / 2;
+            }
+            // (TODO 291) A lost graphics device: the game restarted itself from the moment it was at, or went on with the emulated renderer.
+            {
+                double age = 0.0;
+                if (const std::string gpu = gpu_recovery::message(age); !gpu.empty() && age < 15.0)
+                {
+                    DrawText(gpu.c_str(), size + 2, y + 2, size, Color{0, 0, 0, 170});
+                    DrawText(gpu.c_str(), size, y, size, Color{255, 200, 90, 235});
+                    y -= size + size / 2;
+                }
             }
             if (const std::string notice = updates::noticeText(); !notice.empty() && g_inMenu.load(std::memory_order_relaxed) != 0)
             {
@@ -3289,9 +3327,12 @@ namespace mod_menu
             return;
         menu_style::prepare(); // (fonts: before ImGui's frame)
 
-        dropRaylibCharacters(); // (TODO 170: the characters come from the window's messages - feedOverlayInput)
-        rlImGuiBegin();
-        feedOverlayInput();
+        const bool ownInput = !ps2_overlay::hostFeedsInput(); // (rlImGui reads once a picture: TODO 170 / 174)
+        if (ownInput)
+            dropRaylibCharacters(); // (TODO 170: the characters come from the window's messages - feedOverlayInput)
+        ps2_overlay::begin();
+        if (ownInput)
+            feedOverlayInput();
         {
             // The menu's own look, put back after it for the runtime's debugger (the same ImGui).
             const ImGuiStyle saved = ImGui::GetStyle();
@@ -3311,7 +3352,7 @@ namespace mod_menu
             navLog();
             ImGui::GetStyle() = saved;
         }
-        rlImGuiEnd();
+        ps2_overlay::end();
         // TF_MENU_SHOT=<vblank> (tests): the window's picture with the menu over it, once the menu has been open from
         // that VBlank for 30 frames, to runs/menu_shot.png (what the overlay looks like, on a machine nobody watches).
         // TF_MENU_SHOT_PAGES=all or <page>,<page>... with it: one picture of each shown page in turn, 30 frames apart, to

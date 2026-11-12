@@ -103,6 +103,7 @@ namespace tf::timing
                     return;
             case kFrame:
             {
+                port::frameBegins(g.rdram(), g.runtime()); // (PC: the frame statistics, TF_FPS / TF_HITCH_MS)
                 // The frame is to end once its VBlanks have passed from now.
                 const int32_t end = (f32(ctx->f[kVBlanksAFrame]) + f32::fromInt(vblankCount)).toInt();
                 g.setGpr(kFrameEnd, static_cast<uint32_t>(end));

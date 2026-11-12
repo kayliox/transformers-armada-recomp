@@ -1,0 +1,90 @@
+Subject: [PATCH] Runtime: a state's open files found again when it was made in another folder (TODO 301)
+
+A state keeps the paths of the files the IOP had open (the disc's files, a mods build's disc copy) as they
+were where it was made. Loaded in another folder or on another PC, they were not there: "cannot reopen" for
+every one. Now a path that is not there is opened as the same file under this run's own folders (the disc's,
+the host's, the cards', the executable's), by the longest tail of its path found there; the state keeps the
+path as it was, so the format is unchanged and old states benefit too.
+
+--- a/ps2xRuntime/src/lib/ps2_iop_host.cpp
++++ b/ps2xRuntime/src/lib/ps2_iop_host.cpp
+@@ -14,7 +14,9 @@
+ #include <iostream>
+ #include <limits>
+ #include <map>
++#include <string>
+ #include <utility>
++#include <vector>
+ 
+ #if !defined(_WIN32)
+ #include <sys/types.h>
+@@ -562,6 +564,49 @@ namespace
+         }
+         return stream;
+     }
++
++    // A file a state names that is not where it was (the state made in another folder or on another PC - the disc's
++    // files in another place, a mods build's disc copy, an install moved): the same file under this run's own folders,
++    // found by the longest tail of its path that is there (the disc's folder first, then the host's and the cards').
++    // "C:\old\Mods\.build\disc\FMV\CG\EP01\N1_1.PSS" is "<disc>\FMV\CG\EP01\N1_1.PSS" here. The state keeps the path
++    // as it was: only where it is opened changes. Nothing found: the path as it is (and its "cannot reopen" line).
++    std::filesystem::path relocateStateHostFile(const std::filesystem::path &path)
++    {
++        std::error_code error;
++        if (path.empty() || std::filesystem::is_regular_file(path, error))
++            return path;
++        // (split on both separators: a Windows state's path on Linux - the Deck - is one name to std::filesystem there)
++        std::vector<std::string> parts;
++        std::string part;
++        for (const char c : path.string())
++        {
++            if (c == '/' || c == '\\')
++            {
++                if (!part.empty())
++                    parts.push_back(part);
++                part.clear();
++            }
++            else
++                part.push_back(c);
++        }
++        if (!part.empty())
++            parts.push_back(part);
++        const PS2Runtime::IoPaths &io = PS2Runtime::getIoPaths();
++        for (const std::filesystem::path &root : {io.cdRoot, io.hostRoot, io.mcRoot, io.elfDirectory})
++        {
++            if (root.empty())
++                continue;
++            for (size_t keep = parts.size() > 1 ? parts.size() - 1 : 0; keep >= 1; --keep)
++            {
++                std::filesystem::path candidate = root;
++                for (size_t i = parts.size() - keep; i < parts.size(); ++i)
++                    candidate /= parts[i];
++                if (std::filesystem::is_regular_file(candidate, error))
++                    return candidate;
++            }
++        }
++        return path;
++    }
+ }
+ 
+ void PS2IopHostAdapter::saveState(ps2x::StateWriter &out) const
+@@ -601,10 +646,17 @@ void PS2IopHostAdapter::loadState(ps2x::StateReader &in)
+         if (path == kStateCdImageToken)
+             path = cdImage;
+         HostFile file;
+-        file.path = path;
+-        file.stream = openStateHostFile(std::filesystem::path(path), file.size);
++        const std::filesystem::path here = relocateStateHostFile(std::filesystem::path(path));
++        file.path = here.string();
++        file.stream = openStateHostFile(here, file.size);
+         if (!file.stream)
+             std::cerr << "[state] cannot reopen " << path << " (IOP file handle " << handle << ")" << std::endl;
++        else if (file.path != path)
++        {
++            static int told = 0;
++            if (told++ < 4)
++                std::cerr << "[state] " << path << " opened as " << file.path << " (the state was made in another folder)" << std::endl;
++        }
+         m_hostFiles.emplace(handle, std::move(file));
+     }
+     m_nextHostFileHandle = in.u64();

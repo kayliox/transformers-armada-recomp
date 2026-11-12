@@ -13,6 +13,7 @@
 #include "dev_tree.h"
 #include "nr_types.h"
 #include "nr_backend.h"
+#include "nr_policy.h"
 #include "nr_prompt_style.h"
 
 #include "raylib.h"
@@ -695,7 +696,7 @@ namespace nr
         // Uncompressed RGBA, a level's thousand large images took 6-9 GB of video memory and the HQ 15-18 GB
         // (a 4096 x 4096 image with its mips: 85 MB). Now each is BC7 (a quarter of that: 8 bits a texel,
         // colour and alpha alike), its longest side held to what the adapter's video memory allows
-        // (d3d::largeImageCap: 2048 on a 4 GB card - the chain read from the level of that size, not the
+        // (policy::largeImageCap: 2048 on a 4 GB card - the chain read from the level of that size, not the
         // game's texture), and kept compressed on disk beside the upscaled tree (TF_HIRES_CACHE=<dir>, default
         // <upscaled>/../upscaled_bc7_cache; =0 none), so the PNG is decoded and compressed once per machine.
         // TF_HIRES_BC=0: RGBA as before (the cap still applies).
@@ -914,7 +915,7 @@ namespace nr
                 return false;
             }
             const uint64_t srcTime = static_cast<uint64_t>(fs::last_write_time(packDds.empty() ? png : packDds, ec).time_since_epoch().count());
-            const uint32_t cap = backend().largeImageCap();
+            const uint32_t cap = policy::largeImageCap();
             const fs::path root = bcOn() ? cacheRoot() : fs::path();
             const fs::path cached = root.empty() ? fs::path() : fromPack ? root / "pcsx2_pack" / (*chosen + ".bc7") : crisp.empty() ? root / (*chosen + ".bc7") : root / ("crisp_" + set) / (*chosen + ".bc7");
             if (!crisp.empty())
@@ -1213,6 +1214,18 @@ namespace nr
         return useXboxPrompts(g_padPrompts.load(std::memory_order_relaxed),
                               ps2_host_input::lastPadStyle() == ps2_host_input::PadStyle::PlayStation,
                               ps2_host_input::keyboardPrompts(), g.ps2Symbols);
+    }
+
+    void prepareHires()
+    {
+        // (TF_RENDERER=emulated draws without them: nothing to make)
+        if (const char *renderer = std::getenv("TF_RENDERER"); renderer && std::string(renderer) != "native")
+            return;
+        std::thread([] {
+            std::lock_guard<std::mutex> lock(g_queueMutex);
+            if (!g.ready)
+                build();
+        }).detach();
     }
 
     bool hasUpscaled(const std::string &name)

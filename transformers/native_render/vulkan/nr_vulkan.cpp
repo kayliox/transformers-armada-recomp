@@ -14,14 +14,19 @@
 // FXAA, SMAA, the probe, the sparks, the bloom, the tone mapping and the local contrast.
 // Left for milestone 4: the extra moment pictures (TF_POSES), predication, pipeline statistics, the GPU grass and the
 // pipeline cache on disk.
-// drawsPictures() stays false unless TF_VK_ALONE=1: the emulated GS keeps drawing the game in the main window and the
-// Vulkan window beside it shows the Vulkan picture. TF_VK_ALONE=1 (a test switch) makes Vulkan the game's renderer: the
-// GS stops drawing the scenes, and the main window takes the Vulkan picture as CPU pixels (with TF_NATIVE_SHARE=0).
+// Milestone 3: under SDL3's window (PS2X_PLATFORM=sdl3, PS2Recomp's ps2_platform.h) the game's own window is Vulkan's -
+// nr_vulkan_window.h presents it on the main thread, in a submit of its own, the frame's picture copied into a window
+// picture at the frame's end and waited for on the GPU (a timeline semaphore); Vulkan draws the game (drawsPictures()).
+// With raylib's window, as before: drawsPictures() stays false unless TF_VK_ALONE=1 - the emulated GS keeps drawing the
+// game in the main window and a Vulkan window beside it shows the Vulkan picture; TF_VK_ALONE=1 (a test switch) makes
+// Vulkan the game's renderer, the main window taking its picture as CPU pixels (with TF_NATIVE_SHARE=0).
 //
 // Switches: TF_VK_DEBUG=1 the validation layer (when installed) with its messages on stderr; TF_VK_GPU=<n> the n-th GPU
 // Vulkan lists; TF_VK_PRESENT=fifo (default) / mailbox / immediate; TF_VK_WINDOW=0 no window (pictures only to shots);
 // TF_VK_TEST=1 the picture cleared to a colour that cycles with the frame's VBlank before it is shown (a check that each
-// picture reaches the window, evenly); TF_VK_ALONE=1 above. PS2X_WINDOW_HIDDEN=1 (test machines) keeps this window hidden.
+// picture reaches the window, evenly); TF_VK_ALONE=1 above; TF_VK_KEPTSETS=<n> (a test) caps the descriptor sets kept across
+// frames at n (16384) - setFor; TF_VK_RING=copy / mapped / host and TF_VK_MESHES=mapped / host: where the GPU reads the rings
+// and the meshes from (chooseBufferPlaces). PS2X_WINDOW_HIDDEN=1 (test machines) keeps this window hidden.
 #if defined(TF_VULKAN)
 
 #include <volk.h> // (first: it includes the Vulkan headers itself, without prototypes)
@@ -38,8 +43,11 @@
 #if defined(__linux__)
 #include "nr_picture_mailbox.h" // (Published: the TF_VK_ALONE CPU hand-over, tested by tests/vulkan_picture_tests.cpp)
 #endif
+#include "nr_policy.h"
 #include "nr_types.h"
 #include "nr_vulkan_shaders.h" // (the SPIR-V the build compiled: bake_spirv.cpp)
+#include "nr_vulkan_window.h"
+#include "nr_pace.h"
 
 #include "ext/smaa/AreaTex.h"   // (SMAA's lookup tables, MIT: ext/smaa/LICENSE.txt - as the D3D12 backend uploads them)
 #include "ext/smaa/SearchTex.h"
@@ -138,6 +146,7 @@ namespace nr::vulkan
             VmaAllocation alloc = nullptr;
             uint8_t *mapped = nullptr;
             VkDeviceSize size = 0;
+            bool vram = false; // (in video memory the CPU maps: counted in g.mappedVramUsed)
         };
 
         struct Target
@@ -203,6 +212,43 @@ namespace nr::vulkan
             Image *image = nullptr;
         };
 
+        // A descriptor set's contents beyond b0 and b1 (the ring, the same for every set): t0-t2's views and layouts.
+        struct SetKey
+        {
+            VkImageView views[3] = {};
+            VkImageLayout layouts[3] = {};
+            bool operator==(const SetKey &o) const
+            {
+                return std::memcmp(views, o.views, sizeof(views)) == 0 && std::memcmp(layouts, o.layouts, sizeof(layouts)) == 0;
+            }
+        };
+        struct SetKeyHash
+        {
+            size_t operator()(const SetKey &k) const
+            {
+                uint64_t h = 0x9E3779B97F4A7C15ull;
+                for (int i = 0; i < 3; ++i)
+                {
+                    h = (h ^ reinterpret_cast<uint64_t>(k.views[i])) * 0xFF51AFD7ED558CCDull;
+                    h = (h ^ static_cast<uint64_t>(k.layouts[i])) * 0xC4CEB9FE1A85EC53ull;
+                }
+                return static_cast<size_t>(h ^ (h >> 29));
+            }
+        };
+        struct KeptSet
+        {
+            VkDescriptorSet set = VK_NULL_HANDLE;
+            uint32_t pool = 0; // (g.setPools' index: freed back into it)
+        };
+
+        // Where the GPU reads the rings from (chooseBufferPlaces).
+        enum class RingPlace
+        {
+            Host,
+            Mapped,
+            Copy,
+        };
+
         struct State
         {
             bool ready = false, failed = false;
@@ -216,11 +262,18 @@ namespace nr::vulkan
             VkQueue queue = VK_NULL_HANDLE;
             VmaAllocator vma = nullptr;
             bool memoryBudget = false;
+            // (chooseBufferPlaces: where the GPU reads the rings and the meshes from - TF_VK_RING, TF_VK_MESHES)
+            RingPlace ringPlace = RingPlace::Host;
+            bool mappedVramMeshes = false;
+            uint64_t mappedVramBudget = 0, mappedVramUsed = 0;
             uint32_t timestampBits = 0;
             // ---- what the device can do ----
             bool canDraw = false;    // Vulkan 1.3 (dynamic rendering), clip distances, the shaders compiled
             bool geometry = false;   // the clipping geometry shader
             bool anisotropy = false, bc7 = false;
+            // ---- milestone 3: the game's window presented here (nr_vulkan_window.h) ----
+            VkSemaphore timeline = VK_NULL_HANDLE; // (each window picture's value, signalled by its frame's submit)
+            bool presentId = false, presentWait = false;
             // ---- the window's swapchain ----
             VkSurfaceKHR surface = VK_NULL_HANDLE;
             VkSwapchainKHR swapchain = VK_NULL_HANDLE;
@@ -263,6 +316,8 @@ namespace nr::vulkan
             uint64_t uploadsBytes = 0, uploads = 0;
             // ---- rings: one host-visible buffer - constants, instances, vertices (two slots each), the pictures' b1 ----
             Buffer ring;
+            Buffer ringGpu;                  // (RingPlace::Copy: the rings' twin in video memory, the frame's part copied in)
+            VkBuffer ringRead = VK_NULL_HANDLE; // (the buffer the draws read the rings from: ring's or ringGpu's)
             uint64_t ringBase[4] = {};
             uint64_t ringAt[3] = {};
             uint64_t ringPeak[3] = {};
@@ -273,14 +328,18 @@ namespace nr::vulkan
             VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
             VkPipelineLayout layout = VK_NULL_HANDLE;
             VkPipelineCache cache = VK_NULL_HANDLE;
-            std::vector<VkDescriptorPool> pools[kSlots];
-            uint32_t poolAt[kSlots] = {};
+            // (the descriptor sets, kept across frames: one per texture triple and layouts - setFor)
+            std::vector<VkDescriptorPool> setPools;
+            uint32_t setPoolAt = 0;                   // (the pool the last set came from: tried first)
+            std::unordered_map<SetKey, KeptSet, SetKeyHash> sets;
+            std::vector<VkImageView> goneViews;      // (destroyed since the last sweep: their sets let go of)
+            std::vector<KeptSet> setsLater[kSlots];  // (let go of once that slot's frame has finished)
             Shader vs, ps, gs, aaVs, aaPs, probeVs, probePs, cloudVs, cloudPs, bloomVs, bloomDownPs, bloomUpPs, toneVs, tonePs, clarityVs, clarityPs;
             Shader smaaEdgeVs, smaaEdgePs, smaaWeightVs, smaaWeightPs, smaaBlendVs, smaaBlendPs;
             Image smaaArea, smaaSearch; // (SMAA's lookup tables, uploaded with the white texture)
             bool smaaReady = false;
             std::unordered_map<uint64_t, VkPipeline> pipelines; // (VK_NULL_HANDLE: tried and failed)
-            uint64_t setsThisFrame = 0, drawsThisFrame = 0;
+            uint64_t setsThisFrame = 0, setChangesThisFrame = 0, drawsThisFrame = 0;
             uint64_t staleSlots = 0, movedForRead = 0; // (resolve: slots read as white, targets moved to be read - all frames)
             // ---- the recording's state (milestone 2) ----
             bool rendering = false;            // dynamic rendering begun (ended before copies, clears, layout changes)
@@ -298,6 +357,20 @@ namespace nr::vulkan
             VkImageView boundViews[3] = {};
             VkImageLayout boundLayouts[3] = {};
             uint32_t boundB0 = ~0u;
+            // (what the list has already: set again only when it changes - the same viewport, scissor, blend constants or
+            // streams draw after draw cost a driver call each)
+            VkViewport boundViewport{};
+            VkRect2D boundScissor{};
+            float boundBlend[4] = {};
+            bool haveViewport = false, haveScissor = false, haveBlend = false;
+            VkBuffer boundBuffers[3] = {};
+            VkDeviceSize boundOffsets[3] = {}, boundStrides[3] = {};
+            VkBuffer boundIndexBuffer = VK_NULL_HANDLE;
+            VkDeviceSize boundIndexOffset = 0;
+            // (setPipeline's pipeline, kept for the draws after it while the description, target format and depth stay)
+            VkPipeline descPipeline = VK_NULL_HANDLE;
+            gfx::Format descFormat{};
+            bool descDepth = false, descPipelineValid = false;
             // ---- read-backs ----
             std::vector<ReadbackBuffer> readbacks = std::vector<ReadbackBuffer>(1);
             std::vector<gfx::ReadbackId> readbackFree[kSlots], readbackReleased[kSlots];
@@ -312,6 +385,8 @@ namespace nr::vulkan
             VkQueryPool stamps = VK_NULL_HANDLE;
             uint32_t stampsUsed[kSlots] = {};
             VkQueryPool picStamps = VK_NULL_HANDLE; // (the picture's own: its start and end, two a slot - the profile's whole frame)
+            VkQueryPool copyStamps = VK_NULL_HANDLE; // (RingPlace::Copy: the rings' copy, two a slot - added to the whole frame)
+            bool copyTimed[kSlots] = {};
             bool picTimed[kSlots] = {};
             // ---- figures ----
             uint64_t presented = 0, notPresented = 0;
@@ -323,6 +398,7 @@ namespace nr::vulkan
         std::atomic<bool> g_lost{false};
         std::atomic<double> g_slotWaitAll{0.0};
         std::atomic<double> g_gpuPictureMs{0.0}; // (the picture's GPU time, smoothed as D3D12's)
+        std::atomic<int64_t> g_memoryMB{-1};     // (its GPU's largest device-local heap, MB, once chosen; -1: not yet)
         std::mutex g_startMutex;
         // (TF_VK_ALONE: read at its first use, not when the program starts - settings.ini is loaded into the environment
         // after the static objects are made, so the file's TF_VK_ALONE=1 was missed and only the environment worked)
@@ -602,39 +678,65 @@ namespace nr::vulkan
         void destroyImage(Image &im)
         {
             if (im.view)
+            {
+                g.goneViews.push_back(im.view); // (the kept descriptor sets naming it let go of: sweepSets)
                 vkDestroyImageView(g.device, im.view, nullptr);
+            }
             if (im.image)
                 vmaDestroyImage(g.vma, im.image, im.alloc);
             im = Image{};
         }
 
         // A buffer the CPU writes in order (rings, meshes, uploads) or reads (read-backs), mapped while it lives; memory the
-        // CPU and GPU see alike (coherent), as Direct3D 12's upload and read-back heaps.
-        bool makeBuffer(Buffer &b, VkDeviceSize size, VkBufferUsageFlags usage, bool cpuReads)
+        // CPU and GPU see alike (coherent), as Direct3D 12's upload and read-back heaps: system memory, or with `inVram`
+        // video memory the CPU maps (chooseBufferPlaces - while the budget lasts, else system memory as before).
+        bool makeBuffer(Buffer &b, VkDeviceSize size, VkBufferUsageFlags usage, bool cpuReads, bool inVram = false)
         {
             b = Buffer{};
             VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
             bi.size = std::max<VkDeviceSize>(size, 16u);
             bi.usage = usage;
             bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            inVram = inVram && !cpuReads && g.mappedVramUsed + bi.size <= g.mappedVramBudget;
             VmaAllocationCreateInfo ac{};
-            ac.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+            ac.usage = inVram ? VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE : VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
             ac.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
                        (cpuReads ? VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT : VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
             ac.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            if (inVram)
+            {
+                ac.requiredFlags |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+                ac.flags |= VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT; // (never past the heap's budget: system memory then)
+            }
             VmaAllocationInfo info{};
-            if (!ok(vmaCreateBuffer(g.vma, &bi, &ac, &b.buffer, &b.alloc, &info), "vmaCreateBuffer"))
+            VkResult r = vmaCreateBuffer(g.vma, &bi, &ac, &b.buffer, &b.alloc, &info);
+            if (r != VK_SUCCESS && inVram)
+            {
+                // (the mapped video memory full after all: system memory, as without it)
+                inVram = false;
+                ac.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+                ac.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+                r = vmaCreateBuffer(g.vma, &bi, &ac, &b.buffer, &b.alloc, &info);
+            }
+            if (!ok(r, "vmaCreateBuffer"))
             {
                 b = Buffer{};
                 return false;
             }
             b.mapped = static_cast<uint8_t *>(info.pMappedData);
             b.size = bi.size;
+            if (inVram)
+            {
+                b.vram = true;
+                g.mappedVramUsed += b.size;
+            }
             return b.mapped != nullptr;
         }
 
         void destroyBuffer(Buffer &b)
         {
+            if (b.vram)
+                g.mappedVramUsed -= std::min<uint64_t>(g.mappedVramUsed, b.size);
             if (b.buffer)
                 vmaDestroyBuffer(g.vma, b.buffer, b.alloc);
             b = Buffer{};
@@ -816,17 +918,15 @@ namespace nr::vulkan
 
         void waitIdle()
         {
+            std::lock_guard<std::mutex> q(vk::window::queueMutex()); // (the window's thread submits too: nr_vulkan_window.h)
             if (g.device)
                 vkDeviceWaitIdle(g.device);
         }
 
-        // ---- the quality preset (the D3D12 backend's, from Vulkan's video memory) --------------------------------------
+        // ---- the video memory figure (the quality preset and the large images' cap and budget made of it: nr_policy.cpp) --
+        // Its GPU's largest device-local heap, MB (g.mem filled).
         uint64_t memoryMB()
         {
-            if (const char *e = std::getenv("TF_NATIVE_VRAM_MB"); e && *e)
-                return std::strtoull(e, nullptr, 10);
-            if (!g.phys)
-                return 0u;
             uint64_t largest = 0;
             for (uint32_t i = 0; i < g.mem.memoryHeapCount; ++i)
                 if (g.mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
@@ -834,16 +934,52 @@ namespace nr::vulkan
             return largest >> 20;
         }
 
-        int presetFor(uint64_t mb)
+        // ---- where the GPU reads the buffers the CPU writes from (TF_VK_RING, TF_VK_MESHES) -------------------------------
+        // The rings (the draws' constants, the instances, the frame's vertices - 4 to 5 MB a frame in a level) and the
+        // meshes are written by the CPU in order and read by the GPU. Direct3D 12 keeps them in upload heaps (Windows
+        // drivers may place those in video memory the CPU maps through a Resizable BAR: AMD's does for some, vkd3d-proton
+        // for all within VRAM / 16). Vulkan kept them in system memory, the GPU reading them over the bus at every draw: an
+        // RTX 4090's frame (the level, 1920 x 1440) took 1.35-1.42 ms of GPU there and 0.72-0.78 ms with both in mapped
+        // video memory, and an RX 7900 XTX's 3D draws took about four times Direct3D 12's. Where they go:
+        // - the rings (TF_VK_RING): `mapped` (the default with a discrete GPU and a Resizable BAR) - in video memory the CPU
+        //   maps, within VRAM / 16 (beyond: system memory): the GPU reads them there, the CPU's writes cross the bus (the
+        //   render thread somewhat slower); `copy` - the CPU writes system memory as before and the frame's part of each ring
+        //   is copied into a twin in video memory at the start of the frame's GPU work, which the draws read (the copy's
+        //   time counted in the frame's: 1.13-1.22 ms on that RTX 4090); `host` - system memory, as before (the default
+        //   otherwise: an integrated GPU has one memory, a 256 MB BAR is too small for the rings).
+        // - the meshes (TF_VK_MESHES): `mapped` (the default with a discrete GPU and a Resizable BAR, within the same
+        //   budget) or `host`. They matter less (0.05 to 0.1 ms of that RTX 4090's frame).
+        // The texture uploads' staging stays in system memory (each read once).
+        void chooseBufferPlaces()
         {
-            const char *e = std::getenv("TF_NATIVE_QUALITY");
-            const std::string v = e ? e : "";
-            const int level = v == "low" ? 0 : v == "medium" ? 1 : v == "high" ? 2 : v == "ultra" ? 3 : -1;
-            if (level >= 0)
-                return level;
-            return mb == 0u ? 2 : mb < 3000u ? 0 : mb < 5000u ? 1 : mb < 10000u ? 2 : 3;
+            uint64_t vram = 0, mapped = 0;
+            for (uint32_t i = 0; i < g.mem.memoryHeapCount; ++i)
+                if (g.mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+                    vram = std::max<uint64_t>(vram, g.mem.memoryHeaps[i].size);
+            const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            for (uint32_t t = 0; t < g.mem.memoryTypeCount; ++t)
+                if ((g.mem.memoryTypes[t].propertyFlags & want) == want)
+                    mapped = std::max<uint64_t>(mapped, g.mem.memoryHeaps[g.mem.memoryTypes[t].heapIndex].size);
+            const bool discrete = g.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+            const bool rebar = vram > 0 && mapped >= vram / 10u * 9u; // (all of it, give or take the driver's own)
+            const char *r = std::getenv("TF_VK_RING"), *m = std::getenv("TF_VK_MESHES");
+            const std::string ring = r && *r ? r : "auto", meshes = m && *m ? m : "auto";
+            g.ringPlace = ring == "copy"                                ? RingPlace::Copy
+                          : ring == "mapped" && mapped                  ? RingPlace::Mapped
+                          : ring == "auto" && discrete && rebar         ? RingPlace::Mapped
+                                                                        : RingPlace::Host;
+            g.mappedVramMeshes = mapped > 0 && (meshes == "mapped" || (meshes == "auto" && discrete && rebar));
+            g.mappedVramBudget = g.ringPlace == RingPlace::Mapped || g.mappedVramMeshes ? (rebar ? vram / 16u : mapped / 2u) : 0u;
+            std::fprintf(stderr, "[vulkan] memory: video memory %llu MB, of it mapped by the CPU %llu MB%s (%s GPU); the rings %s, the meshes in %s "
+                                 "(TF_VK_RING=%s, TF_VK_MESHES=%s; up to %llu MB of mapped video memory)\n",
+                         static_cast<unsigned long long>(vram >> 20), static_cast<unsigned long long>(mapped >> 20),
+                         rebar ? " (a Resizable BAR)" : "", discrete ? "a discrete" : "an integrated or other",
+                         g.ringPlace == RingPlace::Copy     ? "copied into video memory each frame"
+                         : g.ringPlace == RingPlace::Mapped ? "in mapped video memory"
+                                                            : "in system memory",
+                         g.mappedVramMeshes ? "mapped video memory" : "system memory", ring.c_str(), meshes.c_str(),
+                         static_cast<unsigned long long>(g.mappedVramBudget >> 20));
         }
-
         // ---- shaders: the D3D12 backend's HLSL as SPIR-V ---------------------------------------------------------------
         // A vertex shader's inputs from its SPIR-V: DXC names each "in.var.<SEMANTIC>" and decorates it with its location.
         std::vector<std::pair<std::string, uint32_t>> inputsOf(const uint32_t *w, size_t count)
@@ -970,15 +1106,14 @@ namespace nr::vulkan
         }
 
         // ---- the bindings: Direct3D 12's root signature as one descriptor set (VULKAN_PLAN.md, the binding layout) ------
-        bool makeBindings(int preset)
+        bool makeBindings()
         {
-            // s0: anisotropic, wrap (4, 8, 16, 16 by the quality preset, TF_NATIVE_ANISO); s1 trilinear; s2 point with linear
+            // s0: anisotropic, wrap (4, 8, 16, 16 by the quality preset, TF_NATIVE_ANISO: nr_policy.cpp); s1 trilinear; s2 point with linear
             // mips (the GS's nearest with TEX1's level); s3 anisotropic at TF_NATIVE_ANISO_ALT (16); s4, s5 SMAA's - linear and
             // point, clamped, no mips. (nr_d3d.cpp's static samplers, the same filters.)
-            static const uint32_t kPresetAniso[4] = {4u, 8u, 16u, 16u};
-            const char *aniso = std::getenv("TF_NATIVE_ANISO"), *alt = std::getenv("TF_NATIVE_ANISO_ALT");
+            const char *alt = std::getenv("TF_NATIVE_ANISO_ALT");
             const float maxAniso = g.props.limits.maxSamplerAnisotropy;
-            const float a0 = static_cast<float>(aniso ? std::clamp(std::atoi(aniso), 1, 16) : static_cast<int>(kPresetAniso[std::clamp(preset, 0, 3)]));
+            const float a0 = static_cast<float>(policy::anisotropy());
             const float a3 = static_cast<float>(alt ? std::clamp(std::atoi(alt), 1, 16) : 16);
             for (int k = 0; k < 6; ++k)
             {
@@ -1056,43 +1191,142 @@ namespace nr::vulkan
             return true;
         }
 
-        // A descriptor set from the slot's pools (reset when the slot is recorded again; another pool when one is full).
-        VkDescriptorSet allocSet()
+        // ---- descriptor sets, kept across frames ----------------------------------------------------------------------
+        // One set per texture triple - t0-t2's views and the layouts they are read in; b0 and b1 are the ring's for every
+        // set, their offsets dynamic - made the first time a draw binds that triple and kept: a level's frame binds a few
+        // hundred triples again and again. (A set made and written at every texture change - 580 to 1650 a frame in a level -
+        // was about half of the Vulkan render thread's time over Direct3D 12's.) Kept until one of its views is destroyed:
+        // the images are destroyed once every frame that read them has finished (retire), so their sets are then unused too.
+
+        // The most sets kept (16384): beyond, all are let go of once this frame has finished, and made again as needed.
+        // TF_VK_KEPTSETS=<n>, a test switch: another cap - a small one lets go of them every few draws, for the validation
+        // layer to check.
+        size_t maxKeptSets()
         {
-            const uint32_t s = g.slot;
-            std::vector<VkDescriptorPool> &pools = g.pools[s];
-            for (;;)
+            static const size_t cap = [] {
+                const char *e = std::getenv("TF_VK_KEPTSETS");
+                const long n = e ? std::atol(e) : 0;
+                return n > 0 ? static_cast<size_t>(n) : size_t(16384u);
+            }();
+            return cap;
+        }
+
+        // The sets naming a destroyed view let go of (before any look-up: a new view can come back with the old handle).
+        void sweepSets()
+        {
+            if (g.goneViews.empty())
+                return;
+            std::sort(g.goneViews.begin(), g.goneViews.end());
+            const auto gone = [](VkImageView v) { return v && std::binary_search(g.goneViews.begin(), g.goneViews.end(), v); };
+            for (auto it = g.sets.begin(); it != g.sets.end();)
             {
-                if (g.poolAt[s] == pools.size())
+                const SetKey &k = it->first;
+                if (gone(k.views[0]) || gone(k.views[1]) || gone(k.views[2]))
                 {
-                    constexpr uint32_t kSets = 4096u;
-                    const VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 2u * kSets},
-                                                           {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 3u * kSets},
-                                                           {VK_DESCRIPTOR_TYPE_SAMPLER, 6u * kSets}};
-                    VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-                    pi.maxSets = kSets;
-                    pi.poolSizeCount = 3u;
-                    pi.pPoolSizes = sizes;
-                    VkDescriptorPool pool = VK_NULL_HANDLE;
-                    if (!ok(vkCreateDescriptorPool(g.device, &pi, nullptr, &pool), "vkCreateDescriptorPool"))
-                        return VK_NULL_HANDLE;
-                    pools.push_back(pool);
+                    if (it->second.set == g.boundSet)
+                        g.boundSet = VK_NULL_HANDLE; // (looked up again at the next draw, never compared by its old views)
+                    vkFreeDescriptorSets(g.device, g.setPools[it->second.pool], 1u, &it->second.set);
+                    it = g.sets.erase(it);
                 }
-                VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-                ai.descriptorPool = pools[g.poolAt[s]];
-                ai.descriptorSetCount = 1u;
-                ai.pSetLayouts = &g.setLayout;
-                VkDescriptorSet set = VK_NULL_HANDLE;
-                const VkResult r = vkAllocateDescriptorSets(g.device, &ai, &set);
-                if (r == VK_SUCCESS)
-                    return set;
-                if (r != VK_ERROR_OUT_OF_POOL_MEMORY && r != VK_ERROR_FRAGMENTED_POOL)
-                {
-                    ok(r, "vkAllocateDescriptorSets");
-                    return VK_NULL_HANDLE;
-                }
-                ++g.poolAt[s];
+                else
+                    ++it;
             }
+            g.goneViews.clear();
+        }
+
+        // (Recording: the slot's frame may still bind them until it has finished.)
+        void letGoOfSetsLater(uint32_t s)
+        {
+            for (auto &[key, kept] : g.sets)
+                g.setsLater[s].push_back(kept);
+            g.sets.clear();
+            g.boundSet = VK_NULL_HANDLE;
+        }
+
+        void freeSetsLater(uint32_t s)
+        {
+            for (const KeptSet &kept : g.setsLater[s])
+                vkFreeDescriptorSets(g.device, g.setPools[kept.pool], 1u, &kept.set);
+            g.setsLater[s].clear();
+        }
+
+        VkDescriptorSet setFor(const SetKey &k)
+        {
+            sweepSets();
+            if (const auto it = g.sets.find(k); it != g.sets.end())
+                return it->second.set;
+            if (g.sets.size() >= maxKeptSets())
+                letGoOfSetsLater(g.slot);
+            VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            ai.descriptorSetCount = 1u;
+            ai.pSetLayouts = &g.setLayout;
+            KeptSet kept;
+            const uint32_t pools = static_cast<uint32_t>(g.setPools.size());
+            for (uint32_t i = 0; i < pools && !kept.set; ++i)
+            {
+                const uint32_t p = (g.setPoolAt + i) % pools;
+                ai.descriptorPool = g.setPools[p];
+                const VkResult r = vkAllocateDescriptorSets(g.device, &ai, &kept.set);
+                if (r == VK_SUCCESS)
+                    kept.pool = p;
+                else
+                {
+                    kept.set = VK_NULL_HANDLE;
+                    if (r != VK_ERROR_OUT_OF_POOL_MEMORY && r != VK_ERROR_FRAGMENTED_POOL)
+                    {
+                        ok(r, "vkAllocateDescriptorSets");
+                        return VK_NULL_HANDLE;
+                    }
+                }
+            }
+            if (!kept.set)
+            {
+                // (another pool: its sets freed one by one as their views go)
+                constexpr uint32_t kSets = 1024u;
+                const VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 2u * kSets},
+                                                       {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 3u * kSets},
+                                                       {VK_DESCRIPTOR_TYPE_SAMPLER, 6u * kSets}};
+                VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+                pi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+                pi.maxSets = kSets;
+                pi.poolSizeCount = 3u;
+                pi.pPoolSizes = sizes;
+                VkDescriptorPool pool = VK_NULL_HANDLE;
+                if (!ok(vkCreateDescriptorPool(g.device, &pi, nullptr, &pool), "vkCreateDescriptorPool"))
+                    return VK_NULL_HANDLE;
+                g.setPools.push_back(pool);
+                ai.descriptorPool = pool;
+                if (!ok(vkAllocateDescriptorSets(g.device, &ai, &kept.set), "vkAllocateDescriptorSets"))
+                    return VK_NULL_HANDLE;
+                kept.pool = pools;
+            }
+            g.setPoolAt = kept.pool;
+            const VkDescriptorBufferInfo b0{g.ringRead, 0u, kB0Range}, b1{g.ringRead, 0u, kPictureBytes};
+            VkDescriptorImageInfo images[3];
+            VkWriteDescriptorSet w[5]{};
+            for (int i = 0; i < 5; ++i)
+            {
+                w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                w[i].dstSet = kept.set;
+                w[i].descriptorCount = 1u;
+            }
+            w[0].dstBinding = 0u;
+            w[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+            w[0].pBufferInfo = &b0;
+            w[1].dstBinding = 1u;
+            w[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+            w[1].pBufferInfo = &b1;
+            for (int i = 0; i < 3; ++i)
+            {
+                images[i] = {VK_NULL_HANDLE, k.views[i], k.layouts[i]};
+                w[2 + i].dstBinding = 10u + static_cast<uint32_t>(i);
+                w[2 + i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+                w[2 + i].pImageInfo = &images[i];
+            }
+            vkUpdateDescriptorSets(g.device, 5u, w, 0u, nullptr);
+            g.sets.emplace(k, kept);
+            ++g.setsThisFrame;
+            return kept.set;
         }
 
         // ---- pipelines ---------------------------------------------------------------------------------------------------
@@ -1423,6 +1657,15 @@ namespace nr::vulkan
                              static_cast<uint64_t>(colour) << 20 | static_cast<uint64_t>(depth) << 24;
         }
 
+        // Two descriptions alike in every field (setPipeline: the same one again needs no new look-up).
+        bool sameDesc(const gfx::PipelineDesc &a, const gfx::PipelineDesc &b)
+        {
+            return a.effect == b.effect && a.variant == b.variant && a.alphaTest == b.alphaTest && a.blend.enabled == b.blend.enabled &&
+                   a.blend.src == b.blend.src && a.blend.dst == b.blend.dst && a.blend.op == b.blend.op &&
+                   a.blend.premultiply == b.blend.premultiply && a.depthTest == b.depthTest && a.depthFunc == b.depthFunc &&
+                   a.depthWrite == b.depthWrite && a.writeMask == b.writeMask && a.picture == b.picture && a.clip == b.clip;
+        }
+
         // A description's pipeline as Vulkan state (the whole pixel shader; a variant's is set by the variants' thread).
         PipeSpec specOf(const gfx::PipelineDesc &p, gfx::Format colour, bool depth)
         {
@@ -1576,10 +1819,13 @@ namespace nr::vulkan
         bool startDevice()
         {
             const auto t0 = Clock::now();
-            const bool windowed = !envIs("TF_VK_WINDOW", "0");
+            // (Milestone 3: under SDL3's platform the game's own window is Vulkan's - nr_vulkan_window.h; else, as before,
+            // a development window of its own beside the game's)
+            const bool gameWindow = vk::window::on();
+            const bool windowed = !gameWindow && !envIs("TF_VK_WINDOW", "0");
             if (windowed && !openWindow())
                 std::fprintf(stderr, "[vulkan] no window: the pictures go only to shots\n");
-            SDL_Window *window = g_win.window;
+            SDL_Window *window = gameWindow ? vk::window::sdlWindow() : g_win.window;
             // (SDL's own Vulkan loader when the window is SDL's - it can have none, then the system's vulkan-1)
             PFN_vkGetInstanceProcAddr sdlLoader = window ? reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_Vulkan_GetVkGetInstanceProcAddr()) : nullptr;
             if (window && !sdlLoader)
@@ -1705,6 +1951,7 @@ namespace nr::vulkan
             g.family = familyOf(g.phys);
             vkGetPhysicalDeviceProperties(g.phys, &g.props);
             vkGetPhysicalDeviceMemoryProperties(g.phys, &g.mem);
+            g_memoryMB.store(static_cast<int64_t>(memoryMB()), std::memory_order_release); // (the policy's figure from now)
             {
                 uint32_t m = 0;
                 vkGetPhysicalDeviceQueueFamilyProperties(g.phys, &m, nullptr);
@@ -1736,15 +1983,48 @@ namespace nr::vulkan
                 deviceExtensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
                 g.memoryBudget = true;
             }
+            // (the game's window: present_id + present_wait where offered - the window then knows when its pictures reach
+            // the screen; nr_vulkan_window.h)
+            const bool presentExt = g.surface && gameWindow && offered(VK_KHR_PRESENT_ID_EXTENSION_NAME) && offered(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
             const bool is13 = app.apiVersion >= VK_API_VERSION_1_3 && g.props.apiVersion >= VK_API_VERSION_1_3;
             VkPhysicalDeviceVulkan13Features have13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+            VkPhysicalDeviceVulkan12Features have12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+            VkPhysicalDevicePresentIdFeaturesKHR havePid{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
+            VkPhysicalDevicePresentWaitFeaturesKHR havePw{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR};
             VkPhysicalDeviceFeatures2 haveF{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
             if (is13)
+            {
                 haveF.pNext = &have13;
+                have13.pNext = &have12;
+                if (presentExt)
+                {
+                    have12.pNext = &havePid;
+                    havePid.pNext = &havePw;
+                }
+            }
             vkGetPhysicalDeviceFeatures2(g.phys, &haveF);
+            // (kayliox's Linux note: the grass compute's divisions are doubles - a GPU without shaderFloat64 needs its float
+            // path when the GPU grass comes to Vulkan; told here so a report shows it)
+            if (!haveF.features.shaderFloat64)
+                std::fprintf(stderr, "[vulkan] this GPU has no shaderFloat64: the GPU grass (not in Vulkan yet) would need its float path\n");
             VkPhysicalDeviceVulkan13Features want13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
             want13.dynamicRendering = have13.dynamicRendering;
             want13.shaderDemoteToHelperInvocation = have13.shaderDemoteToHelperInvocation; // (discard as Direct3D's: nr_vulkan_shaders.h)
+            VkPhysicalDeviceVulkan12Features want12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+            want12.timelineSemaphore = have12.timelineSemaphore; // (the window pictures' values: nr_vulkan_window.h)
+            want13.pNext = &want12;
+            VkPhysicalDevicePresentIdFeaturesKHR wantPid{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
+            VkPhysicalDevicePresentWaitFeaturesKHR wantPw{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR};
+            if (presentExt && havePid.presentId && havePw.presentWait)
+            {
+                deviceExtensions.push_back(VK_KHR_PRESENT_ID_EXTENSION_NAME);
+                deviceExtensions.push_back(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+                wantPid.presentId = VK_TRUE;
+                wantPw.presentWait = VK_TRUE;
+                want12.pNext = &wantPid;
+                wantPid.pNext = &wantPw;
+                g.presentId = g.presentWait = true;
+            }
             VkPhysicalDeviceFeatures2 wantF{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
             wantF.features.samplerAnisotropy = haveF.features.samplerAnisotropy;
             wantF.features.geometryShader = haveF.features.geometryShader;
@@ -1789,6 +2069,7 @@ namespace nr::vulkan
                 if (!ok(vmaCreateAllocator(&ai, &g.vma), "vmaCreateAllocator"))
                     return false;
             }
+            chooseBufferPlaces();
             // ---- the frames' command buffers, fences and semaphores; the time stamps ----
             VkCommandPoolCreateInfo pi{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
             pi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -1818,6 +2099,8 @@ namespace nr::vulkan
                 qp.queryCount = kSlots * 2u;
                 if (!ok(vkCreateQueryPool(g.device, &qp, nullptr, &g.picStamps), "vkCreateQueryPool"))
                     g.picStamps = VK_NULL_HANDLE;
+                if (!ok(vkCreateQueryPool(g.device, &qp, nullptr, &g.copyStamps), "vkCreateQueryPool"))
+                    g.copyStamps = VK_NULL_HANDLE;
             }
             // ---- the rings (one buffer: constants, instances, vertices - two slots each - and the pictures' b1, then room
             // for b0's whole range at the end), the slots' upload buffers, the white texture ----
@@ -1825,9 +2108,38 @@ namespace nr::vulkan
             g.ringBase[1] = g.ringBase[0] + kRingBytes[0] * kSlots;
             g.ringBase[2] = g.ringBase[1] + kRingBytes[1] * kSlots;
             g.ringBase[3] = g.ringBase[2] + kRingBytes[2] * kSlots;
-            if (!makeBuffer(g.ring, g.ringBase[3] + kPictureBytes * kSlots + kB0Range,
-                            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, false))
+            const VkDeviceSize ringBytes = g.ringBase[3] + kPictureBytes * kSlots + kB0Range;
+            const VkBufferUsageFlags ringUse = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+            if (!makeBuffer(g.ring, ringBytes, ringUse | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false, g.ringPlace == RingPlace::Mapped))
                 return false;
+            if (g.ringPlace == RingPlace::Mapped && !g.ring.vram)
+            {
+                g.ringPlace = RingPlace::Host;
+                std::fprintf(stderr, "[vulkan] the rings did not fit in mapped video memory: they are in system memory\n");
+            }
+            g.ringRead = g.ring.buffer;
+            if (g.ringPlace == RingPlace::Copy)
+            {
+                // (its twin in video memory, only the GPU's: the draws read it, the frame's end copies into it)
+                VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+                bi.size = ringBytes;
+                bi.usage = ringUse | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                VmaAllocationCreateInfo ac{};
+                ac.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+                ac.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+                if (vmaCreateBuffer(g.vma, &bi, &ac, &g.ringGpu.buffer, &g.ringGpu.alloc, nullptr) == VK_SUCCESS)
+                {
+                    g.ringGpu.size = ringBytes;
+                    g.ringRead = g.ringGpu.buffer;
+                }
+                else
+                {
+                    g.ringGpu = Buffer{};
+                    g.ringPlace = RingPlace::Host;
+                    std::fprintf(stderr, "[vulkan] the rings' twin in video memory could not be made: they are read from system memory\n");
+                }
+            }
             for (uint32_t s = 0; s < kSlots; ++s)
                 if (!makeBuffer(g.staging[s], kStagingBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false))
                     return false;
@@ -1843,16 +2155,42 @@ namespace nr::vulkan
                 destroyImage(g.smaaSearch);
             }
             // ---- the bindings, the shaders ----
-            if (g.canDraw && (!makeBindings(presetFor(memoryMB())) || !makeShaders()))
+            if (g.canDraw && (!makeBindings() || !makeShaders()))
                 g.canDraw = false;
-            if (g.surface)
+            if (g.surface && gameWindow)
+            {
+                // (the game's window: its swapchain is the window's thread's - this device only hands it the pictures)
+                if (want12.timelineSemaphore)
+                {
+                    VkSemaphoreTypeCreateInfo ti{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+                    ti.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+                    VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+                    si.pNext = &ti;
+                    ok(vkCreateSemaphore(g.device, &si, nullptr, &g.timeline), "vkCreateSemaphore (timeline)");
+                }
+                vk::window::Device d;
+                d.instance = g.instance;
+                d.phys = g.phys;
+                d.device = g.device;
+                d.family = g.family;
+                d.queue = g.queue;
+                d.vma = g.vma;
+                d.apiVersion = app.apiVersion;
+                d.surface = g.surface;
+                d.presentId = g.presentId;
+                d.presentWait = g.presentWait;
+                d.timeline = g.timeline;
+                vk::window::deviceReady(d);
+            }
+            else if (g.surface)
                 makeSwapchain();
             std::fprintf(stderr, "[vulkan] %s, Vulkan %u.%u (driver %u), %s; made in %.0f ms\n", g.props.deviceName,
                          VK_API_VERSION_MAJOR(app.apiVersion), VK_API_VERSION_MINOR(app.apiVersion), g.props.driverVersion,
-                         g.surface ? "its own window" : "no window",
+                         gameWindow && g.surface ? "the game's window" : g.surface ? "its own window" : "no window",
                          std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
             std::fprintf(stderr, "[vulkan] milestone 2: %s\n",
                          !g.canDraw ? "no draws on this GPU - the game stays drawn by the emulated GS"
+                         : gameWindow && g.surface ? "the game's draws, in the game's own window (SDL3's, presented by Vulkan: milestone 3)"
                          : alone()  ? "the game's draws; TF_VK_ALONE: Vulkan draws the game (the main window shows its picture with TF_NATIVE_SHARE=0)"
                                     : "the game's draws, shown in the Vulkan window; the emulated GS keeps drawing the main window (TF_VK_ALONE=1: Vulkan alone)");
             g.since = Clock::now();
@@ -1873,6 +2211,36 @@ namespace nr::vulkan
             g.failed = false;
             g.ready = true;
             return true;
+        }
+
+        // ---- the shared pacer (nr_pace.h): the game's window's pictures handed over at their moments ------------------
+        // Its GPU side is the window pictures' timeline semaphore (nr_vulkan_window.h): how far it has come, and a wait for a
+        // value that gives up when the device is lost (200 ms at a time, as Direct3D 12's).
+        pace::Pacer &pacer()
+        {
+            static pace::Pacer *p = [] {
+                pace::Gpu gpu;
+                gpu.completed = [] {
+                    uint64_t v = 0;
+                    if (g.timeline)
+                        vkGetSemaphoreCounterValue(g.device, g.timeline, &v);
+                    return v;
+                };
+                gpu.waitFor = [](uint64_t value) {
+                    VkSemaphoreWaitInfo wi{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+                    wi.semaphoreCount = 1u;
+                    wi.pSemaphores = &g.timeline;
+                    wi.pValues = &value;
+                    while (g.timeline && !g_lost.load(std::memory_order_relaxed))
+                    {
+                        const VkResult r = vkWaitSemaphores(g.device, &wi, 200ull * 1000000ull);
+                        if (r != VK_TIMEOUT)
+                            break;
+                    }
+                };
+                return new pace::Pacer(std::move(gpu)); // (never destroyed: its thread runs to the end)
+            }();
+            return *p;
         }
 
         // ---- the slots ---------------------------------------------------------------------------------------------
@@ -1928,7 +2296,22 @@ namespace nr::vulkan
                 g.inFlight[s] = false;
                 const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
                 g_slotWaitAll.store(g_slotWaitAll.load(std::memory_order_relaxed) + ms, std::memory_order_relaxed);
-                // (The picture's time on the GPU, as D3D12's device takes it: the profile's whole frame, gpuPictureMs.)
+                // (The picture's time on the GPU, as D3D12's device takes it: the profile's whole frame, gpuPictureMs. With the
+                // rings copied into video memory, the copy's time is part of it.)
+                double copyMs = 0.0;
+                if (g.copyTimed[s])
+                {
+                    g.copyTimed[s] = false;
+                    uint64_t t[2] = {};
+                    if (vkGetQueryPoolResults(g.device, g.copyStamps, s * 2u, 2u, sizeof(t), t, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
+                    {
+                        const uint64_t mask = g.timestampBits >= 64u ? ~0ull : (1ull << g.timestampBits) - 1ull;
+                        const uint64_t d = ((t[1] & mask) - (t[0] & mask)) & mask;
+                        const double ms = static_cast<double>(d) * static_cast<double>(g.props.limits.timestampPeriod) / 1.0e6;
+                        if (ms > 0.0 && ms < 1000.0)
+                            copyMs = ms;
+                    }
+                }
                 if (g.picTimed[s])
                 {
                     g.picTimed[s] = false;
@@ -1937,7 +2320,7 @@ namespace nr::vulkan
                     {
                         const uint64_t mask = g.timestampBits >= 64u ? ~0ull : (1ull << g.timestampBits) - 1ull;
                         const uint64_t d = ((t[1] & mask) - (t[0] & mask)) & mask;
-                        const double gpuMs = static_cast<double>(d) * static_cast<double>(g.props.limits.timestampPeriod) / 1.0e6;
+                        const double gpuMs = static_cast<double>(d) * static_cast<double>(g.props.limits.timestampPeriod) / 1.0e6 + copyMs;
                         if (gpuMs > 0.0 && gpuMs < 1000.0)
                         {
                             frame::g_frameGpu += gpuMs;
@@ -1959,6 +2342,8 @@ namespace nr::vulkan
             for (Buffer &b : g.retiredBuffers[s])
                 destroyBuffer(b);
             g.retiredBuffers[s].clear();
+            freeSetsLater(s);
+            sweepSets(); // (the sets of the images just destroyed)
         }
 
         void writeBmp(const std::string &path, const gfx::Readback &rb)
@@ -2034,6 +2419,44 @@ namespace nr::vulkan
             offset = 0u;
             retire(own, s);
             return true;
+        }
+
+        // RingPlace::Copy: the frame's part of each ring (and b1, written just before the submit - the copy reads it when the
+        // GPU runs it) copied into the twin the draws read, on the frame's upload list, then made visible to them. b0's part
+        // reaches a whole range past its last entry (a draw's constants are read as kB0Range), within the slot's part.
+        void copyRings(uint32_t s)
+        {
+            const VkCommandBuffer u = upList();
+            if (!u)
+                return;
+            VkBufferCopy r[4];
+            uint32_t n = 0;
+            for (int k = 0; k < 3; ++k)
+            {
+                const uint64_t base = g.ringBase[k] + static_cast<uint64_t>(s) * kRingBytes[k];
+                uint64_t used = k == 1 ? g.ringAt[1] * frame::kInstanceStride : g.ringAt[k];
+                if (k == 0 && used)
+                    used = std::min<uint64_t>(kRingBytes[0], used + kB0Range);
+                if (used)
+                    r[n++] = {base, base, used};
+            }
+            const uint64_t b1 = g.ringBase[3] + static_cast<uint64_t>(s) * kPictureBytes;
+            r[n++] = {b1, b1, kPictureBytes};
+            if (g.copyStamps)
+            {
+                vkCmdResetQueryPool(u, g.copyStamps, s * 2u, 2u);
+                vkCmdWriteTimestamp(u, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g.copyStamps, s * 2u);
+            }
+            vkCmdCopyBuffer(u, g.ring.buffer, g.ringGpu.buffer, n, r);
+            VkMemoryBarrier done{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            done.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            done.dstAccessMask = VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT;
+            vkCmdPipelineBarrier(u, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, 0, 1, &done, 0, nullptr, 0, nullptr);
+            if (g.copyStamps)
+            {
+                vkCmdWriteTimestamp(u, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g.copyStamps, s * 2u + 1u);
+                g.copyTimed[s] = true;
+            }
         }
 
         // An image made for the texture and its levels uploaded on this frame's upload list (ready for this frame's draws).
@@ -2159,9 +2582,6 @@ namespace nr::vulkan
                 if (g_lost.load(std::memory_order_relaxed))
                     return false;
                 // (the slot's per-frame memory: its frame before is done)
-                for (VkDescriptorPool pool : g.pools[g.slot])
-                    vkResetDescriptorPool(g.device, pool, 0);
-                g.poolAt[g.slot] = 0;
                 g.stagingAt[g.slot] = 0;
                 g.upBegun[g.slot] = false;
                 if (pictureWidth != g.picW || pictureHeight != g.picH || !g.picColour.image)
@@ -2188,7 +2608,7 @@ namespace nr::vulkan
                                      !(g.swapchain && !g.swapStale && static_cast<uint32_t>(g_win.w.load()) == g.swapExtent.width &&
                                        static_cast<uint32_t>(g_win.h.load()) == g.swapExtent.height);
                 static Clock::time_point lastTry{};
-                if (g.surface && (resized || ((g.swapStale || !g.swapchain) && Clock::now() - lastTry > std::chrono::milliseconds(500))))
+                if (g.surface && !vk::window::on() && (resized || ((g.swapStale || !g.swapchain) && Clock::now() - lastTry > std::chrono::milliseconds(500))))
                 {
                     lastTry = Clock::now();
                     waitIdle();
@@ -2229,13 +2649,17 @@ namespace nr::vulkan
                 g.tex[0] = g.tex[1] = g.tex[2] = 0u;
                 g.b0 = 0u;
                 g.vb = g.ib = Stream{};
-                g.vbB = Stream{g.ring.buffer, g.ringBase[2] + static_cast<uint64_t>(s) * kRingBytes[2], 0u};
+                g.vbB = Stream{g.ringRead, g.ringBase[2] + static_cast<uint64_t>(s) * kRingBytes[2], 0u};
                 g.boundPipeline = VK_NULL_HANDLE;
                 g.boundHasStreams = false;
                 g.streamsDirty = g.indexDirty = true;
                 g.boundSet = VK_NULL_HANDLE;
                 g.boundB0 = ~0u;
-                g.setsThisFrame = g.drawsThisFrame = 0;
+                g.haveViewport = g.haveScissor = g.haveBlend = false;
+                std::memset(g.boundBuffers, 0, sizeof(g.boundBuffers));
+                g.boundIndexBuffer = VK_NULL_HANDLE;
+                g.descPipelineValid = false; // (a variant made since may take the whole shader's place)
+                g.setsThisFrame = g.setChangesThisFrame = g.drawsThisFrame = 0;
                 psv::collect(g.pipelines); // (the variants made since the frame before)
                 if (g.picZero)
                 {
@@ -2354,6 +2778,27 @@ namespace nr::vulkan
                     g.publishTurn[s] = g.frameIndex;
 #endif
                 }
+                // (Milestone 3) The game's window: the picture copied into a window picture of its own, which the window's
+                // thread draws with the overlays and presents in a submit of its own (nr_vulkan_window.h) - this frame's
+                // submit never waits for the window or its screen.
+                int windowPicture = -1;
+                uint64_t windowValue = 0u;
+                if (vk::window::on() && g.timeline && end.picture && g.canDraw && picture.image)
+                {
+                    vk::window::Target t;
+                    if (vk::window::takeFree(picture.w, picture.h, picture.format, t))
+                    {
+                        moveTo(picture, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                        transition(c, t.image, VK_IMAGE_ASPECT_COLOR_BIT, t.layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                        VkImageCopy region{};
+                        region.srcSubresource = region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
+                        region.extent = {picture.w, picture.h, 1u};
+                        vkCmdCopyImage(c, picture.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+                        transition(c, t.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                        windowPicture = t.index;
+                        windowValue = vk::window::nextValue();
+                    }
+                }
                 // The picture into the window: the swapchain's next image, the picture fitted into it (bars black).
                 uint32_t imageIndex = 0;
                 bool acquired = false;
@@ -2411,6 +2856,8 @@ namespace nr::vulkan
                 g.recording = false;
                 if (!ok(vkEndCommandBuffer(c), "vkEndCommandBuffer"))
                     return false;
+                if (g.ringGpu.buffer)
+                    copyRings(s);
                 const bool uploads = g.upBegun[s];
                 if (uploads && !ok(vkEndCommandBuffer(g.upCmd[s]), "vkEndCommandBuffer (uploads)"))
                     return false;
@@ -2445,8 +2892,45 @@ namespace nr::vulkan
                     si.signalSemaphoreCount = 1u;
                     si.pSignalSemaphores = &g.presentReady[imageIndex];
                 }
-                if (!ok(vkQueueSubmit(g.queue, 1, &si, g.fence[s]), "vkQueueSubmit"))
-                    return false;
+                VkTimelineSemaphoreSubmitInfo windowSignal{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+                if (windowPicture >= 0)
+                {
+                    windowSignal.signalSemaphoreValueCount = 1u;
+                    windowSignal.pSignalSemaphoreValues = &windowValue;
+                    si.pNext = &windowSignal;
+                    si.signalSemaphoreCount = 1u;
+                    si.pSignalSemaphores = &g.timeline;
+                }
+                {
+                    std::lock_guard<std::mutex> q(vk::window::queueMutex());
+                    if (!ok(vkQueueSubmit(g.queue, 1, &si, g.fence[s]), "vkQueueSubmit"))
+                        return false;
+                }
+                if (windowPicture >= 0)
+                {
+                    // (Milestone 3) Handed over by the shared pacer (nr_pace.h) at its frame's moment plus the steady delay,
+                    // once the timeline has passed its value - as Direct3D 12's shared pictures; TF_PACING=0: at once.
+                    const bool has3D = end.frame && end.frame->has3D;
+                    const uint64_t tick = end.frame ? end.frame->tick : 0u;
+                    const int64_t dueNs = !end.pictures.empty() ? end.pictures[0].dueNs : 0;
+                    if (pace::mode() != 0)
+                    {
+                        pace::Moment moment;
+                        moment.dueNs = dueNs;
+                        if (end.frame)
+                        {
+                            moment.periodNs = end.frame->periodNs;
+                            moment.quantumNs = end.frame->pictureNs;
+                            moment.refreshNs = end.frame->refreshNs;
+                            moment.onRefresh = end.frame->vblanksOnRefresh;
+                        }
+                        pacer().submit(windowValue, moment, [windowPicture, windowValue, has3D, tick, dueNs](int64_t readyNs) {
+                            vk::window::published(windowPicture, windowValue, has3D, tick, dueNs, readyNs);
+                        });
+                    }
+                    else
+                        vk::window::published(windowPicture, windowValue, has3D, tick, dueNs, 0);
+                }
                 g.inFlight[s] = true;
                 ++g.frameIndex;
                 if (acquired)
@@ -2457,7 +2941,11 @@ namespace nr::vulkan
                     pi.swapchainCount = 1u;
                     pi.pSwapchains = &g.swapchain;
                     pi.pImageIndices = &imageIndex;
-                    const VkResult r = vkQueuePresentKHR(g.queue, &pi);
+                    VkResult r;
+                    {
+                        std::lock_guard<std::mutex> q(vk::window::queueMutex());
+                        r = vkQueuePresentKHR(g.queue, &pi);
+                    }
                     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR)
                         g.swapStale = true;
                     else if (r != VK_SUCCESS)
@@ -2479,10 +2967,13 @@ namespace nr::vulkan
                 const double seconds = std::chrono::duration<double>(Clock::now() - g.since).count();
                 if (seconds >= 10.0)
                 {
+                    if (vk::window::on())
+                        vk::window::takeCounts(g.presented, g.notPresented); // (the game's window's presents)
                     std::fprintf(stderr, "[vulkan] %.1f pictures a second shown in its window (%llu not shown) over %.0f s; last frame %llu draws, "
-                                         "%llu descriptor sets, %zu pipelines; slots read as white %llu, targets moved to be read %llu\n",
+                                         "%llu descriptor sets bound (%llu made, %zu kept), %zu pipelines; slots read as white %llu, targets moved to be read %llu\n",
                                  static_cast<double>(g.presented) / seconds, static_cast<unsigned long long>(g.notPresented), seconds,
-                                 static_cast<unsigned long long>(g.drawsThisFrame), static_cast<unsigned long long>(g.setsThisFrame), g.pipelines.size(),
+                                 static_cast<unsigned long long>(g.drawsThisFrame), static_cast<unsigned long long>(g.setChangesThisFrame),
+                                 static_cast<unsigned long long>(g.setsThisFrame), g.sets.size(), g.pipelines.size(),
                                  static_cast<unsigned long long>(g.staleSlots), static_cast<unsigned long long>(g.movedForRead));
                     g.presented = g.notPresented = 0;
                     g.since = Clock::now();
@@ -2833,7 +3324,8 @@ namespace nr::vulkan
                 return t.levels > 1u ? top * 4u / 3u : top;
             }
 
-            // --- meshes (in memory the CPU writes and the GPU reads over the bus, as D3D12's upload heap) ---
+            // --- meshes (in memory the CPU writes, as D3D12's upload heap: mapped video memory with a Resizable BAR, else system
+            // memory the GPU reads over the bus - chooseBufferPlaces) ---
             uint32_t createMesh(const void *vertices, uint32_t vertexBytes, const void *indices, uint32_t indexBytes) override
             {
                 uint32_t id;
@@ -2854,7 +3346,7 @@ namespace nr::vulkan
                 if (g.canDraw)
                 {
                     if (!makeBuffer(m.mem, static_cast<VkDeviceSize>(vertexBytes) + indexBytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                                    false))
+                                    false, g.mappedVramMeshes))
                     {
                         m = MeshInfo{};
                         g.freeMeshes.push_back(id);
@@ -2927,7 +3419,11 @@ namespace nr::vulkan
                     return;
                 // (Y flipped by a negative height: Direct3D's clip space as the shaders write it, its top at y)
                 const VkViewport vp{x, y + h, w, -h, 0.0f, 1.0f};
+                if (g.haveViewport && std::memcmp(&vp, &g.boundViewport, sizeof(vp)) == 0)
+                    return;
                 vkCmdSetViewport(g.cmd[g.slot], 0, 1, &vp);
+                g.boundViewport = vp;
+                g.haveViewport = true;
             }
 
             void setScissor(const gfx::Rect &r) override
@@ -2936,26 +3432,41 @@ namespace nr::vulkan
                     return;
                 const int32_t x0 = std::max(0, r.x0), y0 = std::max(0, r.y0);
                 const VkRect2D s{{x0, y0}, {static_cast<uint32_t>(std::max(0, r.x1 - x0)), static_cast<uint32_t>(std::max(0, r.y1 - y0))}};
+                if (g.haveScissor && std::memcmp(&s, &g.boundScissor, sizeof(s)) == 0)
+                    return;
                 vkCmdSetScissor(g.cmd[g.slot], 0, 1, &s);
+                g.boundScissor = s;
+                g.haveScissor = true;
             }
 
             bool setPipeline(const gfx::PipelineDesc &p) override
             {
                 if (!g.canDraw || !effectMade(p.effect))
                     return false;
-                g.desc = p;
-                g.haveDesc = true;
                 if (p.effect == gfx::Effect::SmaaWeights)
                 {
                     // (Its own tables: SMAA's area and search textures in t1, t2 - the frame builder keeps those slots.)
                     g.tex[1] = kSmaaAreaId;
                     g.tex[2] = kSmaaSearchId;
                 }
-                // (made now for the bound target's format, so that a pipeline that cannot be made leaves the draw out)
-                if (Target *t = targetOf(g.target))
+                // (made now for the bound target's format, so that a pipeline that cannot be made leaves the draw out; kept
+                // for the draws after it while the description, the target's format and depth stay - flush. Most draws set
+                // the description they had: looked up again only when something in it changed.)
+                Target *t = targetOf(g.target);
+                const bool depth = t && g.withDepth && depthOf(*t).image;
+                if (g.haveDesc && g.descPipelineValid && g.descPipeline && t && sameDesc(p, g.desc) && g.descFormat == formatOf(*t) &&
+                    g.descDepth == depth)
+                    return true;
+                g.desc = p;
+                g.haveDesc = true;
+                g.descPipelineValid = false;
+                if (t)
                 {
-                    const bool depth = g.withDepth && depthOf(*t).image;
-                    if (!pipelineFor(p, formatOf(*t), depth))
+                    g.descPipeline = pipelineFor(p, formatOf(*t), depth);
+                    g.descFormat = formatOf(*t);
+                    g.descDepth = depth;
+                    g.descPipelineValid = true;
+                    if (!g.descPipeline)
                     {
                         g.haveDesc = false;
                         return false;
@@ -2968,8 +3479,11 @@ namespace nr::vulkan
 
             void setBlendFactor(const float rgba[4]) override
             {
-                if (g.recording)
-                    vkCmdSetBlendConstants(g.cmd[g.slot], rgba);
+                if (!g.recording || (g.haveBlend && std::memcmp(rgba, g.boundBlend, sizeof(g.boundBlend)) == 0))
+                    return;
+                vkCmdSetBlendConstants(g.cmd[g.slot], rgba);
+                std::memcpy(g.boundBlend, rgba, sizeof(g.boundBlend));
+                g.haveBlend = true;
             }
 
             void bindTextures(gfx::TextureId t0, gfx::TextureId t1, gfx::TextureId t2) override
@@ -2987,19 +3501,19 @@ namespace nr::vulkan
             // before's vertices (2), the indices - set on the list at the next draw ---
             void setVertices(const gfx::RingSpan &v, uint32_t stride) override
             {
-                g.vb = Stream{g.ring.buffer, v.gpu, stride};
+                g.vb = Stream{g.ringRead, v.gpu, stride};
                 g.streamsDirty = true;
             }
             void setIndices(const gfx::RingSpan &i) override
             {
-                g.ib = Stream{g.ring.buffer, i.gpu, 4u};
+                g.ib = Stream{g.ringRead, i.gpu, 4u};
                 g.indexDirty = true;
             }
             void setPreviousVertices(const gfx::RingSpan &v) override
             {
                 // (none: a zero stride's one entry at the ring's start - read by nothing, pose.y off)
-                g.vbB = v.size ? Stream{g.ring.buffer, v.gpu, kVertexBStride}
-                               : Stream{g.ring.buffer, g.ringBase[2] + static_cast<uint64_t>(g.slot) * kRingBytes[2], 0u};
+                g.vbB = v.size ? Stream{g.ringRead, v.gpu, kVertexBStride}
+                               : Stream{g.ringRead, g.ringBase[2] + static_cast<uint64_t>(g.slot) * kRingBytes[2], 0u};
                 g.streamsDirty = true;
             }
             void setMesh(uint32_t meshId) override
@@ -3202,8 +3716,8 @@ namespace nr::vulkan
             }
 
             // Everything a draw needs set on the list: the textures readable, the target's rendering begun, the pipeline,
-            // the descriptor set (a new one when a texture or its layout changed; b0's offset as its dynamic offset), the
-            // streams. False: the draw is left out.
+            // the descriptor set (the texture triple's kept one; b0's offset as its dynamic offset), the streams - each
+            // only when it changed. False: the draw is left out.
             bool flush(bool indexed)
             {
                 if (!g.canDraw || !g.recording || !g.haveDesc || g.viewportEmpty)
@@ -3215,7 +3729,15 @@ namespace nr::vulkan
                 Image *dep = g.withDepth && depthOf(*t).image ? &depthOf(*t) : nullptr;
                 if (!col.image || !col.view)
                     return false;
-                const VkPipeline pipeline = pipelineFor(g.desc, formatOf(*t), dep != nullptr);
+                const gfx::Format format = formatOf(*t);
+                if (!g.descPipelineValid || g.descFormat != format || g.descDepth != (dep != nullptr))
+                {
+                    g.descPipeline = pipelineFor(g.desc, format, dep != nullptr);
+                    g.descFormat = format;
+                    g.descDepth = dep != nullptr;
+                    g.descPipelineValid = true;
+                }
+                const VkPipeline pipeline = g.descPipeline;
                 if (!pipeline)
                     return false;
                 Bound b[3];
@@ -3256,48 +3778,27 @@ namespace nr::vulkan
                     vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
                     g.boundPipeline = pipeline;
                     g.boundHasStreams = g.desc.effect == gfx::Effect::None || g.desc.effect == gfx::Effect::Cloud;
-                    g.streamsDirty = true; // (the strides are set again with the streams)
+                    g.streamsDirty = true; // (looked at again: an effect's pipeline reads no streams, the next draw's may)
                 }
-                bool rebind = false;
-                VkImageView views[3];
-                VkImageLayout layouts[3];
+                // The descriptor set: the triple's kept one (setFor), bound when the triple changed; b0's offset as its
+                // dynamic offset, bound again when it moved.
+                SetKey key;
                 for (int k = 0; k < 3; ++k)
                 {
-                    views[k] = b[k].view;
-                    layouts[k] = b[k].image ? b[k].image->layout : b[k].layout;
+                    key.views[k] = b[k].view;
+                    key.layouts[k] = b[k].image ? b[k].image->layout : b[k].layout;
                 }
-                if (!g.boundSet || std::memcmp(views, g.boundViews, sizeof(views)) != 0 || std::memcmp(layouts, g.boundLayouts, sizeof(layouts)) != 0)
+                bool rebind = false;
+                if (!g.boundSet || std::memcmp(key.views, g.boundViews, sizeof(key.views)) != 0 ||
+                    std::memcmp(key.layouts, g.boundLayouts, sizeof(key.layouts)) != 0)
                 {
-                    const VkDescriptorSet set = allocSet();
+                    const VkDescriptorSet set = setFor(key);
                     if (!set)
                         return false;
-                    const VkDescriptorBufferInfo b0{g.ring.buffer, 0u, kB0Range}, b1{g.ring.buffer, 0u, kPictureBytes};
-                    VkDescriptorImageInfo images[3];
-                    VkWriteDescriptorSet w[5]{};
-                    for (int k = 0; k < 5; ++k)
-                    {
-                        w[k].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                        w[k].dstSet = set;
-                        w[k].descriptorCount = 1u;
-                    }
-                    w[0].dstBinding = 0u;
-                    w[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-                    w[0].pBufferInfo = &b0;
-                    w[1].dstBinding = 1u;
-                    w[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-                    w[1].pBufferInfo = &b1;
-                    for (int k = 0; k < 3; ++k)
-                    {
-                        images[k] = {VK_NULL_HANDLE, views[k], layouts[k]};
-                        w[2 + k].dstBinding = 10u + static_cast<uint32_t>(k);
-                        w[2 + k].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-                        w[2 + k].pImageInfo = &images[k];
-                    }
-                    vkUpdateDescriptorSets(g.device, 5u, w, 0u, nullptr);
                     g.boundSet = set;
-                    std::memcpy(g.boundViews, views, sizeof(views));
-                    std::memcpy(g.boundLayouts, layouts, sizeof(layouts));
-                    ++g.setsThisFrame;
+                    std::memcpy(g.boundViews, key.views, sizeof(key.views));
+                    std::memcpy(g.boundLayouts, key.layouts, sizeof(key.layouts));
+                    ++g.setChangesThisFrame;
                     rebind = true;
                 }
                 if (rebind || g.boundB0 != g.b0)
@@ -3308,15 +3809,28 @@ namespace nr::vulkan
                 }
                 if (g.streamsDirty && g.boundHasStreams)
                 {
-                    const VkBuffer buffers[3] = {g.vb.buffer ? g.vb.buffer : g.ring.buffer, g.ring.buffer, g.vbB.buffer ? g.vbB.buffer : g.ring.buffer};
+                    const VkBuffer buffers[3] = {g.vb.buffer ? g.vb.buffer : g.ringRead, g.ringRead, g.vbB.buffer ? g.vbB.buffer : g.ringRead};
                     const VkDeviceSize offsets[3] = {g.vb.buffer ? g.vb.offset : 0u, g.ringBase[1], g.vbB.offset};
                     const VkDeviceSize strides[3] = {g.vb.buffer ? g.vb.stride : sizeof(Vertex), frame::kInstanceStride, g.vbB.stride};
-                    vkCmdBindVertexBuffers2(c, 0u, 3u, buffers, offsets, nullptr, strides);
+                    // (the same streams as the list has - a mesh drawn again, a pipeline changed between - left as they are)
+                    if (std::memcmp(buffers, g.boundBuffers, sizeof(buffers)) != 0 || std::memcmp(offsets, g.boundOffsets, sizeof(offsets)) != 0 ||
+                        std::memcmp(strides, g.boundStrides, sizeof(strides)) != 0)
+                    {
+                        vkCmdBindVertexBuffers2(c, 0u, 3u, buffers, offsets, nullptr, strides);
+                        std::memcpy(g.boundBuffers, buffers, sizeof(buffers));
+                        std::memcpy(g.boundOffsets, offsets, sizeof(offsets));
+                        std::memcpy(g.boundStrides, strides, sizeof(strides));
+                    }
                     g.streamsDirty = false;
                 }
                 if (indexed && g.indexDirty && g.ib.buffer)
                 {
-                    vkCmdBindIndexBuffer(c, g.ib.buffer, g.ib.offset, VK_INDEX_TYPE_UINT32);
+                    if (g.ib.buffer != g.boundIndexBuffer || g.ib.offset != g.boundIndexOffset)
+                    {
+                        vkCmdBindIndexBuffer(c, g.ib.buffer, g.ib.offset, VK_INDEX_TYPE_UINT32);
+                        g.boundIndexBuffer = g.ib.buffer;
+                        g.boundIndexOffset = g.ib.offset;
+                    }
                     g.indexDirty = false;
                 }
                 return !indexed || g.ib.buffer != VK_NULL_HANDLE;
@@ -3352,7 +3866,8 @@ namespace nr::vulkan
             // and the emulated GS goes on drawing the game in its window while the Vulkan window shows Vulkan's picture.)
             bool drawsPictures() override
             {
-                return alone() && g_starting.load(std::memory_order_acquire) == 2 && g.ready && g.canDraw && !g_lost.load(std::memory_order_relaxed);
+                // (milestone 3: in the game's own window - SDL3's, nr_vulkan_window.h - Vulkan draws the game)
+                return (alone() || vk::window::on()) && g_starting.load(std::memory_order_acquire) == 2 && g.ready && g.canDraw && !g_lost.load(std::memory_order_relaxed);
             }
             bool deviceLost() override { return g_lost.load(std::memory_order_relaxed); }
             bool grassGpuReady() override { return false; }
@@ -3418,6 +3933,8 @@ namespace nr::vulkan
 #else
             bool waitPicture(uint64_t serial, int64_t untilNs, int64_t &lastNs) override
             {
+                if (vk::window::on())
+                    return vk::window::waitNewer(serial, untilNs, lastNs);
                 std::unique_lock<std::mutex> lock(g_pub.mutex);
                 const auto until = Clock::time_point(std::chrono::nanoseconds(untilNs));
                 g_pub.cv.wait_until(lock, until, [serial] { return g_pub.serial != serial; });
@@ -3425,7 +3942,13 @@ namespace nr::vulkan
                 return g_pub.serial != serial;
             }
 #endif
-            int pacingMode() override { return 0; }
+            // (the game's window: each picture shown when the shared pacer hands it over - nr_pace.h, TF_PACING)
+            int pacingMode() override { return vk::window::on() ? pace::mode() : 0; }
+            bool presentsWindow() override { return vk::window::on(); }
+            bool latestWindowPicture(WindowPicture &out) override
+            {
+                return vk::window::on() && vk::window::latest(out.texture, out.width, out.height, out.serial, out.has3D, out.tick, out.dueNs, out.readyNs);
+            }
 
 #if defined(__linux__)
             void setWindowSize(int width, int height) override
@@ -3440,44 +3963,11 @@ namespace nr::vulkan
             void setSupersampling(bool on) override { frame::g_ssaa.store(on ? 1 : 0, std::memory_order_relaxed); }
             void setSpeedupsForced(int on) override { frame::g_speedupsForced.store(on, std::memory_order_relaxed); }
 
-            uint32_t largeImageCap() override
-            {
-                const char *e = std::getenv("TF_HIRES_MAX");
-                if (e && *e)
-                    return static_cast<uint32_t>(std::max(0, std::atoi(e)));
-                const uint64_t mb = memoryMB();
-                static const uint32_t kPresetCap[4] = {1024u, 2048u, 2048u, 0u};
-                const uint32_t byMemory = mb == 0u ? 0u : mb < 3000u ? 1024u : mb < 5000u ? 2048u : 0u, byPreset = kPresetCap[qualityPreset()];
-                return !byMemory ? byPreset : !byPreset ? byMemory : std::min(byMemory, byPreset);
-            }
-            uint64_t largeImageBudget() override
-            {
-                if (const char *e = std::getenv("TF_HIRES_BUDGET_MB"); e && *e)
-                    return std::strtoull(e, nullptr, 10) << 20;
-                const uint64_t mb = memoryMB();
-                if (!mb)
-                    return UINT64_MAX;
-                return std::max<uint64_t>(384u, std::min<uint64_t>(mb > 1536u ? mb - 1536u : 0u, mb * 3u / 4u)) << 20;
-            }
             uint64_t largeImageBytes() override { return frame::g_largeBytes.load(std::memory_order_relaxed); }
-            uint64_t adapterMemoryMB() override { return memoryMB(); }
-            int qualityPreset() override
+            std::optional<uint64_t> adapterMemoryMB() override
             {
-                static std::atomic<int> kept{-1};
-                if (const int q = kept.load(std::memory_order_relaxed); q >= 0)
-                    return q;
-                const uint64_t mb = memoryMB();
-                const int q = presetFor(mb);
-                if (g.ready || std::getenv("TF_NATIVE_QUALITY") || std::getenv("TF_NATIVE_VRAM_MB"))
-                {
-                    int expected = -1;
-                    if (kept.compare_exchange_strong(expected, q))
-                    {
-                        static const char *kNames[4] = {"Low", "Medium", "High", "Ultra"};
-                        std::fprintf(stderr, "[native render] quality %s (Vulkan; %llu MB of video memory)\n", kNames[q], static_cast<unsigned long long>(mb));
-                    }
-                }
-                return q;
+                const int64_t mb = g_memoryMB.load(std::memory_order_acquire);
+                return mb < 0 ? std::nullopt : std::optional<uint64_t>(static_cast<uint64_t>(mb));
             }
 
             double gpuPictureMs() override { return g_gpuPictureMs.load(std::memory_order_relaxed); }
@@ -3485,7 +3975,7 @@ namespace nr::vulkan
             double cpuPictureMs() override { return 0.0; }
             double replayWaitMs() override { return 0.0; }
             double slotWaitMs() override { return g_slotWaitAll.load(std::memory_order_relaxed); }
-            double pacerDelayMs() override { return 0.0; }
+            double pacerDelayMs() override { return vk::window::on() && pace::mode() != 0 ? pacer().delayMs() : 0.0; }
         };
     }
 

@@ -1,0 +1,60 @@
+Subject: [PATCH] Runtime: a game can draw the native picture itself (ps2_host_display::setPictureDrawer)
+
+An upscaler of its own (FSR 1) in place of the window's plain stretch of the provider's picture; null keeps the stretch.
+
+--- a/ps2xRuntime/include/runtime/ps2_host_display.h
++++ b/ps2xRuntime/include/runtime/ps2_host_display.h
+@@ -114,6 +114,14 @@
+     using PictureProvider = bool (*)(unsigned int &texture, int &width, int &height);
+     void setPictureProvider(PictureProvider provider);
+     PictureProvider pictureProvider();
++    // The provider's picture drawn by the game itself (an upscaler of its own, in place of the window's plain stretch):
++    // called on the window's thread with its GL context current, with the texture, the part of it to show and the
++    // window's rectangle it goes to; true when it drew it, false to have the window stretch it as before. Null (the
++    // default): the stretch.
++    using PictureDrawer = bool (*)(unsigned int texture, int width, int height, float srcX, float srcY, float srcW, float srcH,
++                                   float dstX, float dstY, float dstW, float dstH);
++    void setPictureDrawer(PictureDrawer drawer);
++    PictureDrawer pictureDrawer();
+     // When the provider's pictures are shown (a game whose renderer paces its own pictures - each
+     // handed over at the moment it is to be on the screen, so that they reach it evenly): `wait`
+     // replaces the window's wait for a VBlank - it returns 1 when a new picture is to be shown now,
+--- a/ps2xRuntime/src/lib/ps2_host_display.cpp
++++ b/ps2xRuntime/src/lib/ps2_host_display.cpp
+@@ -703,6 +703,21 @@
+ 
+     namespace
+     {
++        std::atomic<PictureDrawer> g_pictureDrawer{nullptr};
++    }
++
++    void setPictureDrawer(PictureDrawer drawer)
++    {
++        g_pictureDrawer.store(drawer, std::memory_order_release);
++    }
++
++    PictureDrawer pictureDrawer()
++    {
++        return g_pictureDrawer.load(std::memory_order_acquire);
++    }
++
++    namespace
++    {
+         std::atomic<int (*)(Clock::time_point)> g_pacerWait{nullptr};
+         std::atomic<void (*)()> g_pacerPresented{nullptr};
+     }
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -3763,7 +3763,11 @@
+                 // The game's own renderer's picture (ps2_host_display::setPictureProvider).
+                 const Texture2D provided{providedTexture, providedWidth, providedHeight, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                 const Rectangle providedSource{0.0f, bandTop * static_cast<float>(providedHeight), static_cast<float>(providedWidth), band * static_cast<float>(providedHeight)};
+-                DrawTexturePro(provided, providedSource, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
++                // (The game may draw it itself - an upscaler of its own: ps2_host_display::setPictureDrawer.)
++                const ps2_host_display::PictureDrawer drawer = ps2_host_display::pictureDrawer();
++                if (!drawer || !drawer(providedTexture, providedWidth, providedHeight, providedSource.x, providedSource.y, providedSource.width,
++                                       providedSource.height, dstRect.x, dstRect.y, dstRect.width, dstRect.height))
++                    DrawTexturePro(provided, providedSource, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+             }
+             else if (ps2_gpu::viewActive() &&
+                 (byRefresh ? ps2_gpu::pictureFor(gpuPicture, showsNs, leewayNs) : ps2_gpu::picture(gpuPicture, pictureTick)))

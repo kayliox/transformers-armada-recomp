@@ -11,6 +11,12 @@ namespace nr
     std::string hdSetAside() { return {}; } // (no set here has upscaled/.made_on.json saying it was set aside)
 }
 
+namespace graphics_driver
+{
+    void writeGpuFile(const std::string &) {}
+    bool lowEnd() { return false; }
+}
+
 namespace
 {
     struct Set

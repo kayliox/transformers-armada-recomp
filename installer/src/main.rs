@@ -1457,13 +1457,36 @@ fn play_and_wait(repo: &Path) {
 // ------------------------------------------------------------------------------------------------
 // The window.
 
+/// (TODO 303) How often the window is drawn again while a step runs or the update check waits: the steps' texts, the
+/// seconds and the progress bar follow at this pace. (The mouse and the keys still draw it at once.)
+const TICK: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// (TODO 303) The running mark: a quarter arc moved an eighth of a turn each TICK. egui's Spinner asks for a new frame
+/// every frame (it turns smoothly), so the window was drawn at the screen's refresh rate for the whole build - about
+/// 14% of one core on a fast PC, for a few lines of text.
+fn ticking_spinner(ui: &egui::Ui, rect: egui::Rect, color: Color32) {
+    use std::f64::consts::TAU;
+    let c = rect.center();
+    let r = rect.width().min(rect.height()) * 0.5 - 1.5;
+    let p = ui.painter();
+    p.circle_stroke(c, r, Stroke::new(2.0, color.gamma_multiply(0.25)));
+    let start = (ui.input(|i| i.time) / TICK.as_secs_f64()).floor() * TAU / 8.0;
+    let points: Vec<egui::Pos2> = (0..=12)
+        .map(|k| {
+            let a = start + k as f64 * (TAU / 4.0) / 12.0;
+            c + Vec2::new(a.cos() as f32, a.sin() as f32) * r
+        })
+        .collect();
+    p.add(egui::Shape::line(points, Stroke::new(2.5, color)));
+}
+
 fn status_icon(ui: &mut egui::Ui, status: Status) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::hover());
     let c = rect.center();
     let p = ui.painter();
     match status {
         Status::Active => {
-            egui::Spinner::new().size(20.0).color(ACCENT).paint_at(ui, rect);
+            ticking_spinner(ui, rect, ACCENT);
         }
         Status::Done => {
             p.circle_stroke(c, 9.5, Stroke::new(2.0, GOOD));
@@ -1510,7 +1533,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll();
         if self.phase == Phase::Running || self.check_rx.is_some() {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+            ui.ctx().request_repaint_after(TICK); // (TODO 303: was every 100 ms, and every frame for the Spinner)
         }
         // (the game's own update, done: the game is starting - this window goes after a moment)
         if self.play && self.phase == Phase::Done(true) {
@@ -1574,7 +1597,8 @@ impl App {
         }
         if self.check_rx.is_some() {
             ui.horizontal(|ui| {
-                ui.add(egui::Spinner::new().size(16.0).color(ACCENT));
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
+                ticking_spinner(ui, rect, ACCENT);
                 ui.label(RichText::new("Checking for updates...").color(DIM));
             });
         } else if !c.error.is_empty() {

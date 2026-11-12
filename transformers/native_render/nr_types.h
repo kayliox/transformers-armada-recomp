@@ -62,6 +62,7 @@ namespace nr
         bool projective = false; // u, v are S, T and size is Q: divided per pixel, as the GS does (STQ)
         bool primitive = false;  // a microcode primitive's (vlMicrocodePrimitive: sprites the device builds itself), this frame's
         bool ocean = false;      // the FFT ocean's grid patch (vlxWaterEffect: its packet read from the list), this frame's
+        bool devicePrimitive = false; // (TODO 295) the render device's own primitive's strips (slot 29), this frame's
         uint32_t type = 0; // the batches' type (docs/RENDERER.md: 3 ST colour position, 4 ST normal position, ...)
         uint32_t prim = 0;  // the strips' GS PRIM, context 1's tag: bit 6 ABE (blending), bit 5 FGE (fog)
         uint32_t prim2 = 0; // context 2's tag (the lit meshes' base pass)
@@ -223,6 +224,7 @@ namespace nr
         // floats an instance); none: the draw does not move between frames. `turned`: the camera's turn of each picture
         // (the newest mouse and stick) applies to it - the scene's 3D.
         bool hasB = false, hasClipB = false, turned = false;
+        bool sceneMotion = false; // (TODO 299) the scene's 3D for the temporal upscaler: jittered, its motion written (poses::assign)
         uint8_t camera = 255; // (N9's turn for every picture: the camera matrices it was made with - view_turn.h's index)
         float matrixB[16] = {}, clipB[16] = {};
         std::vector<float> instB;
@@ -427,18 +429,11 @@ namespace nr
         void setWindowLines(int lines);
 #endif
 
-        // The large images' video memory policy (TODO 94), from the adapter's video memory (its dedicated
-        // memory; TF_NATIVE_VRAM_MB=<n> pretends another size): the longest side a large image is used at
-        // (0: as made; TF_HIRES_MAX=<n> sets it), the bytes they may hold on the GPU before the ones drawn
-        // least recently are let go of (TF_HIRES_BUDGET_MB=<n>), and what they hold now. Any thread.
-        uint32_t largeImageCap();
-        uint64_t largeImageBudget();
+        // The large images' bytes on the GPU now, and the adapter's video memory (its dedicated memory, MB; 0: not
+        // known) - the figure the video-memory policy (the quality preset, the large images' cap and budget: TODO 94,
+        // nr_policy.h) is made of. Any thread.
         uint64_t largeImageBytes();
         uint64_t adapterMemoryMB();
-        // The quality preset (TF_NATIVE_QUALITY = low / medium / high / ultra; unset or auto: from the adapter's video
-        // memory - under ~3 GB low, ~5 GB medium, ~10 GB high, else ultra): 0..3. Each part it sets yields to its own
-        // variable when that is set (TF_NATIVE_ANISO, TF_HIRES_MAX, TF_NATIVE_CLIPGS). Any thread; fixed at the start.
-        int qualityPreset();
 
         // The anti-aliasing pass (TF_NATIVE_AA, default FXAA): the 3D picture's edges smoothed before the
         // HUD, menus and text are drawn over it - 0 off, 1 FXAA, 2 SMAA 1x. Any thread, takes effect next frame.
@@ -557,6 +552,7 @@ namespace nr
         float clipM[4][4] = {}; // (TODO 101 a: halfway, as matrixM)
         float lightsB[3][4] = {}; // (N9 stage 3: p[8..10] - the lights and eye in the mesh's space, 0x21f0 - in that pose)
         bool turned = false;    // (N9 stage 3: the camera's turn of each picture applies - Draw::turned)
+        bool sceneMotion = false; // (TODO 299: Draw::sceneMotion)
     };
     void buildPasses(const Draw &draw, std::vector<Pass> &out);
     // (TODO 101 a) The pose halfway between a draw's two (16 floats, rows: the images of the model's axes and its origin):

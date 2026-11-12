@@ -10,6 +10,8 @@
 #include "nr_draw.h"
 #include "nr_device.h"
 #include "nr_occlusion.h"
+#include "nr_policy.h"
+#include "nr_taa.h"
 #include "view_turn.h"
 #include "runtime/ps2_host_display.h"
 
@@ -106,7 +108,7 @@ namespace nr::frame
     {
         using Constants = draw::Constants;               // (the layout the shaders read: nr_draw.h)
         using PictureConstants = draw::PictureConstants; // (a picture's: the shader's b1)
-        int qualityPreset() { return backend().qualityPreset(); } // (the backend in use: nr_backend.cpp)
+        int qualityPreset() { return policy::qualityPreset(); } // (the shared rules, from the backend's video memory: nr_policy.cpp)
         uint32_t writeMaskOf(uint32_t fbmsk) { return draw::writeMaskOf(fbmsk); } // (nr_draw.h)
 
         // A mesh as the frame builder keeps it: the device's mesh (its buffers), or where a mesh of this frame's alone went
@@ -156,8 +158,8 @@ namespace nr::frame
                 bool main = false;
             };
             std::unordered_map<uint32_t, Target> targets;
-            uint32_t scaleX = 2, scaleY = 2; // the targets' pixels a GS pixel
-            uint32_t scaleYField = 2;        // (N10) a field buffer's rows a GS row: its field fills the picture's height
+            float scaleX = 2.0f, scaleY = 2.0f; // the targets' pixels a GS pixel (whole numbers but for TF_NATIVE_FRACSCALE)
+            float scaleYField = 2.0f;           // (N10) a field buffer's rows a GS row: its field fills the picture's height
             uint32_t pictureW = 0, pictureH = 0; // (the frame builder's: the picture's size this frame)
             uint32_t aaW = 0, aaH = 0; // (the anti-aliasing pass's size this frame)
             uint64_t frameIndex = 0;
@@ -860,17 +862,22 @@ namespace nr::frame
         // ---- The frame builder's side (nr_frame.cpp from sub-step 3) ----
         // A render target for a GS frame buffer (twice its GS size), cleared to transparent black; a grown one
         // keeps its device target (new surfaces, the same views' places).
-        bool makeTarget(State::Target &t, float gsW, float gsH, uint32_t sx = 0u, uint32_t sy = 0u)
+        // A target's pixels along one side: its whole GS pixels times the scale (a whole number: exactly as before;
+        // TF_NATIVE_FRACSCALE's: rounded, at least 1).
+        uint32_t targetPixels(float gs, float scale)
+        {
+            return std::max(1u, static_cast<uint32_t>(std::lround(static_cast<float>(static_cast<uint32_t>(gs)) * scale)));
+        }
+        bool makeTarget(State::Target &t, float gsW, float gsH, float sx, float sy)
         {
             ++g_targetsMade;
-            sx = sx ? sx : g.scaleX;
-            sy = sy ? sy : g.scaleY;
             if (std::getenv("TF_NATIVE_TARGETLOG"))
-                std::fprintf(stderr, "[native render] target made %gx%g at %ux%u\n", gsW, gsH, sx, sy);
+                std::fprintf(stderr, "[native render] target made %gx%g at %gx%g\n", gsW, gsH, sx, sy);
             gfx::TargetDesc d;
-            d.width = static_cast<uint32_t>(gsW) * sx;
-            d.height = static_cast<uint32_t>(gsH) * sy;
+            d.width = targetPixels(gsW, sx);
+            d.height = targetPixels(gsH, sy);
             d.colour = gfx::Format::BGRA8;
+            d.motion = taa::wantsMotion(); // (TODO 299: each draw's motion beside its colour)
             gfx::Device &dev = gfx::device();
             bool made;
             if (t.id)
@@ -891,6 +898,185 @@ namespace nr::frame
             t.w = d.width;
             t.h = d.height;
             return true;
+        }
+
+        // (TODO 299) The temporal upscaler on the frame builder's side: once a frame, where the scene's target (the GS buffer that
+        // holds the 3D) is first read into the picture, the device's dispatch upscales it - its colour, depth and motion - into a
+        // target of the picture's resolution (the render scale undone), read in its place. The jitter this frame's 3D was drawn with
+        // (the pictures' constants, read when the frame's list runs) is the one handed to the dispatch.
+        namespace taaUp
+        {
+            float g_jitterClip[2] = {0.0f, 0.0f}; // (this frame's, in clip space: PictureConstants::jitter)
+            State::Target g_out;                  // the upscaled scene
+            uint64_t g_frame = ~0ull;             // the frame it was made in
+            uint64_t g_frames = 0;                // frames begun (frameStart)
+            uint32_t g_sceneKey = 0;              // the scene's GS buffer this frame (the most of its 3D draws: render)
+            bool g_sceneKnown = false;
+            bool g_ok = false;
+
+            void frameStart()
+            {
+                ++g_frames;
+                g_jitterClip[0] = g_jitterClip[1] = 0.0f;
+            }
+
+            // The scene's camera for FSR, from the game's own projection (a scene draw's matrix: output k = rows[k] x + rows[4 + k] y
+            // + rows[8 + k] z + rows[12 + k]). The depth target holds 16 x depthScale x z / w: with a perspective projection the z
+            // row is a times the w row plus b, so the depth is A + B / w (A = 16 ds a, B = 16 ds b) - FSR's reversed depth with
+            // near B / (1 - A) and far B / -A (A < 0), or an infinite one with near B (A >= 0), in w's units. w's units in metres:
+            // 1 / |the w row| (1 PS2 unit = 1 m; the median over the frame's draws - the level's at scale 1). The field of view:
+            // the y row across the w row, GS rows per unit of y / z, against the rows drawn.
+            struct CameraFit
+            {
+                uint64_t frame = ~0ull;
+                bool projected = false;
+                double depthA = 0.0, depthB = 0.0, rowsPerTan = 0.0;
+                float units[32];
+                uint32_t unitCount = 0;
+            };
+            CameraFit g_fit;      // this frame's
+            nr::taa::Camera g_cam; // the last good one (kept while a frame has no scene)
+
+            void sampleCamera(const float *r, float depthScale)
+            {
+                if (g_fit.frame != g_frames)
+                {
+                    g_fit = CameraFit{};
+                    g_fit.frame = g_frames;
+                }
+                if (g_fit.unitCount >= 32u && g_fit.projected)
+                    return;
+                const double wl[3] = {r[3], r[7], r[11]}, zl[3] = {r[2], r[6], r[10]}, yl[3] = {r[1], r[5], r[9]};
+                const auto dot = [](const double *u, const double *v) { return u[0] * v[0] + u[1] * v[1] + u[2] * v[2]; };
+                const double ww = dot(wl, wl);
+                if (!(ww > 1e-20))
+                    return;
+                if (g_fit.unitCount < 32u)
+                    g_fit.units[g_fit.unitCount++] = static_cast<float>(std::sqrt(ww));
+                if (g_fit.projected)
+                    return;
+                const double a = dot(zl, wl) / ww, b = static_cast<double>(r[14]) - a * r[15];
+                const double rz[3] = {zl[0] - a * wl[0], zl[1] - a * wl[1], zl[2] - a * wl[2]};
+                const double zz = dot(zl, zl);
+                if (zz > 1e-20 && dot(rz, rz) / zz > 1e-4)
+                    return; // (the z row not along the w row: not a perspective projection - another draw's)
+                const double ya = dot(yl, wl) / ww;
+                const double yp[3] = {yl[0] - ya * wl[0], yl[1] - ya * wl[1], yl[2] - ya * wl[2]};
+                g_fit.depthA = 16.0 * depthScale * a;
+                g_fit.depthB = 16.0 * depthScale * b;
+                g_fit.rowsPerTan = std::sqrt(dot(yp, yp) / ww);
+                g_fit.projected = g_fit.depthB > 0.0 && g_fit.rowsPerTan > 0.0;
+            }
+
+            // The camera for the frame's dispatch (`rows`: the GS rows the scene is drawn into - a field buffer's field A).
+            const nr::taa::Camera &camera(uint32_t rows)
+            {
+                if (g_fit.frame != g_frames || !g_fit.projected)
+                    return g_cam;
+                nr::taa::Camera c;
+                const double A = g_fit.depthA, B = g_fit.depthB;
+                c.infinite = !(A < -1e-9);
+                c.nearZ = static_cast<float>(c.infinite ? B : B / (1.0 - A));
+                c.farZ = c.infinite ? std::max(c.nearZ * 1.0e6f, 1.0e6f) : static_cast<float>(B / -A);
+                c.fovY = static_cast<float>(std::clamp(2.0 * std::atan(0.5 * static_cast<double>(rows) / g_fit.rowsPerTan), 0.2, 2.6));
+                if (g_fit.unitCount > 0u)
+                {
+                    float u[32];
+                    std::copy(g_fit.units, g_fit.units + g_fit.unitCount, u);
+                    std::nth_element(u, u + g_fit.unitCount / 2u, u + g_fit.unitCount);
+                    c.metersPerUnit = u[g_fit.unitCount / 2u] > 0.0f ? 1.0f / u[g_fit.unitCount / 2u] : 1.0f;
+                }
+                // (logged when it changes much: TF_TAA_LOG)
+                static const bool log = std::getenv("TF_TAA_LOG") != nullptr;
+                if (log && (std::fabs(c.nearZ - g_cam.nearZ) > 0.05f * g_cam.nearZ || c.infinite != g_cam.infinite || std::fabs(c.fovY - g_cam.fovY) > 0.02f))
+                    std::fprintf(stderr, "[taa] camera: depth %.6g + %.6g / w; near %.4g far %.4g%s, fov %.1f deg, %.4g m a unit\n", A, B, c.nearZ,
+                                 c.farZ, c.infinite ? " (infinite)" : "", c.fovY * 57.2958f, c.metersPerUnit);
+                g_cam = c;
+                return g_cam;
+            }
+
+            // FSR's own sharpening (its RCAS) from the Sharpening setting: Auto when the picture is enlarged, On always.
+            float sharpness(bool enlarged)
+            {
+                const int mode = sharpenMode();
+                return mode == 2 ? 0.5f : mode == 1 && enlarged ? 0.4f : 0.0f;
+            }
+
+            const State::Target *upscaledSource(gfx::Device &dev, const State::Target &source, const State::Target &tg, const Frame &input,
+                                                bool scene)
+            {
+                if (!nr::taa::upscalerOn() || !tg.main || source.main || !scene || !source.id || !g_sceneKnown)
+                    return &source;
+                // (the scene's own buffer only - not a reflection's or another 3D buffer read into the picture)
+                const auto sceneTarget = g.targets.find(g_sceneKey);
+                if (sceneTarget == g.targets.end() || &sceneTarget->second != &source)
+                    return &source;
+                if (g_frame == g_frames)
+                    return g_ok ? &g_out : &source;
+                g_frame = g_frames;
+                g_ok = false;
+                // (the size the scene's target would have at the picture's own resolution - the GS targets' scale for it, a field
+                // buffer's rows doubled as the frame builder makes them)
+                const uint32_t fullX = std::max(2u, (g.pictureW + 511u) / 512u), fullY = std::max(2u, (g.pictureH + 447u) / 448u);
+                const uint32_t fullField = std::max(fullY, std::min(18u, (g.pictureH + 223u) / 224u));
+                const bool field = g.scaleYField != g.scaleY && source.h == static_cast<uint32_t>(source.gsH) * g.scaleYField;
+                const uint32_t ow = static_cast<uint32_t>(source.gsW) * fullX, oh = static_cast<uint32_t>(source.gsH) * (field ? fullField : fullY);
+                // (a source larger than the picture's resolution - not FSR's to shrink; at render scale 100% FSR's anti-aliasing runs
+                // alone: native AA)
+                if (ow < source.w || oh < source.h)
+                    return &source;
+                bool reset = false;
+                if (!g_out.id || g_out.w != ow || g_out.h != oh)
+                {
+                    gfx::TargetDesc d;
+                    d.width = ow;
+                    d.height = oh;
+                    d.colour = gfx::Format::RGBA8;
+                    d.depth = false;
+                    d.storage = true;
+                    if (g_out.id && !dev.resizeTarget(g_out.id, d))
+                    {
+                        dev.releaseTarget(g_out.id);
+                        g_out.id = 0;
+                    }
+                    if (!g_out.id)
+                        g_out.id = dev.createTarget(d);
+                    if (!g_out.id)
+                        return &source;
+                    g_out.w = ow;
+                    g_out.h = oh;
+                    reset = true;
+                }
+                g_out.gsW = source.gsW;
+                g_out.gsH = source.gsH;
+                float jx = 0.0f, jy = 0.0f;
+                nr::taa::jitter(g_frames, static_cast<float>(source.w), static_cast<float>(ow), jx, jy);
+                gfx::Temporal t;
+                t.jitterX = jx;
+                t.jitterY = jy;
+                t.frameMs = input.periodNs > 0 ? static_cast<float>(static_cast<double>(input.periodNs) / 1.0e6) : 16.7f;
+                t.reset = reset;
+                // (a field buffer holds field A in its top half - GS rows 0-223 - and the 3D is drawn there alone; field B's copy
+                // is left out with one picture a frame, so only that half is upscaled)
+                if (field)
+                    t.rows = source.h / 2u;
+                const nr::taa::Camera &cam = camera(field ? static_cast<uint32_t>(source.gsH) / 2u : static_cast<uint32_t>(source.gsH));
+                t.nearZ = cam.nearZ;
+                t.farZ = cam.farZ;
+                t.infinite = cam.infinite;
+                t.fovY = cam.fovY;
+                t.metersPerUnit = cam.metersPerUnit;
+                t.sharpness = sharpness(ow > source.w);
+                g_ok = dev.temporalUpscale(source.id, g_out.id, t);
+                if (!g_ok)
+                    nr::taa::markFailed(); // (no context, or the device has no upscaler: the picture as without it from the next frame)
+                if (g_ok)
+                {
+                    g_jitterClip[0] = 2.0f * jx / static_cast<float>(source.w);
+                    g_jitterClip[1] = -2.0f * jy / static_cast<float>(source.h);
+                }
+                return g_ok ? &g_out : &source;
+            }
         }
 
         // A frame buffer's identity: its base and width (the same pages are another buffer at
@@ -1033,7 +1219,7 @@ namespace nr::frame
                 std::getenv("TF_NATIVE_AA_EDGE") ? static_cast<float>(std::atof(std::getenv("TF_NATIVE_AA_EDGE"))) : 0.125f,
                 std::getenv("TF_NATIVE_AA_EDGEMIN") ? static_cast<float>(std::atof(std::getenv("TF_NATIVE_AA_EDGEMIN"))) : 0.0625f};
             const float k[8] = {1.0f / static_cast<float>(g.aaW), 1.0f / static_cast<float>(g.aaH), static_cast<float>(g.aaW),
-                                static_cast<float>(g.aaH), tune[0], tune[1], tune[2], 0.0f};
+                                static_cast<float>(g.aaH), tune[0], tune[1], tune[2], sharpenAmount()}; // (w: TF_NATIVE_SHARPEN)
             std::memcpy(cs.cpu, k, sizeof(k));
             dev.bindDrawConstants(cs);
             dev.bindTextures(sourceView, gfx::kKeepTexture, gfx::kKeepTexture);
@@ -1706,6 +1892,21 @@ namespace nr::frame
 
     void render(const Frame &input, const std::string &shotPath)
     {
+        taaUp::frameStart(); // (TODO 299: no jitter until this frame's dispatch has run)
+        if (taa::upscalerOn())
+        {
+            // (TODO 299: the scene's GS buffer - the one most of the frame's 3D draws go to - the one the upscaler takes)
+            std::unordered_map<uint32_t, uint32_t> count;
+            uint32_t most = 0;
+            taaUp::g_sceneKnown = false;
+            for (const Draw &d : input.draws)
+                if (d.mesh && !d.mesh->immediate && ++count[targetKey(d.target)] > most)
+                {
+                    most = count[targetKey(d.target)];
+                    taaUp::g_sceneKey = targetKey(d.target);
+                    taaUp::g_sceneKnown = true;
+                }
+        }
         // (The texture cap's frame: what the last one put off, told now and then.)
         if (g_frameDeferred)
         {
@@ -1817,10 +2018,12 @@ namespace nr::frame
             return v && *v ? std::atoi(v) : 0;
         }();
         // (the render scale: that share of the window's size, the picture shown enlarged - setRenderScale; 100 unless set)
+        // (TODO 299: with the temporal upscaler the picture keeps the window's lines and the GS targets take the render scale -
+        // the upscaler brings the scene up to the picture's)
         const int scale = renderScale();
-        const int window = g_windowLines.load(std::memory_order_relaxed) * scale / 100;
+        const int window = g_windowLines.load(std::memory_order_relaxed) * (taa::upscalerOn() ? 100 : scale) / 100;
 #if defined(__linux__)
-        const int windowWidth = g_windowWidth.load(std::memory_order_relaxed) * scale / 100;
+        const int windowWidth = g_windowWidth.load(std::memory_order_relaxed) * (taa::upscalerOn() ? 100 : scale) / 100;
 #endif
         // (TODO 255) A movie shown as a band of the picture's rows (ps2_host_display::setPictureBand): the picture as
         // many lines taller as the band is short of it, so the band itself still has the window's lines.
@@ -1852,17 +2055,38 @@ namespace nr::frame
         }
         // (TF_NATIVE_SSAA=alt: on in every other TF_NATIVE_PROFILE window - an in-run A/B of its cost, scratchpad abpar.py.)
         static const bool ssaaAlt = std::getenv("TF_NATIVE_SSAA") && *std::getenv("TF_NATIVE_SSAA") == 'a';
-        const bool ssaa = ssaaAlt ? (g_profWindow & 1u) != 0u : g_ssaa.load(std::memory_order_relaxed) > 0;
-        const uint32_t ssW = ssaa ? (width * 3u + 1u) / 2u : width, ssH = ssaa ? (height * 3u + 1u) / 2u : height;
-        g.scaleX = std::max(2u, (ssW + 511u) / 512u);
-        g.scaleY = std::max(2u, (ssH + 447u) / 448u);
+        // (TODO 299: not with FSR 3 / 4 - its anti-aliasing in place of the supersampling)
+        const bool ssaa = !taa::upscalerOn() && (ssaaAlt ? (g_profWindow & 1u) != 0u : g_ssaa.load(std::memory_order_relaxed) > 0);
+        const uint32_t renderW = taa::upscalerOn() ? std::max(1u, width * static_cast<uint32_t>(renderScale()) / 100u) : width,
+                       renderH = taa::upscalerOn() ? std::max(1u, height * static_cast<uint32_t>(renderScale()) / 100u) : height;
+        const uint32_t ssW = ssaa ? (renderW * 3u + 1u) / 2u : renderW, ssH = ssaa ? (renderH * 3u + 1u) / 2u : renderH;
+        g.scaleX = static_cast<float>(std::max(2u, (ssW + 511u) / 512u));
+        g.scaleY = static_cast<float>(std::max(2u, (ssH + 447u) / 448u));
         // (Roadmap N10) The scene buffer's 3D is drawn once, into field A's 224 rows, and copied over the whole
         // picture: at the picture's scale (lines / 448) that field held half the picture's rows, enlarged x2 down by
         // the copy - every edge's steps two lines tall, the 3D softer up and down than across. A buffer a field copy
         // reads (SCANMSK) gets twice the rows: the field at the picture's own resolution, copied 1:1. (Kept under
         // 8192 rows.) TF_NATIVE_FIELDRES=0: as before.
         static const bool fieldResOff = std::getenv("TF_NATIVE_FIELDRES") && *std::getenv("TF_NATIVE_FIELDRES") == '0';
-        g.scaleYField = fieldResOff ? g.scaleY : std::max(g.scaleY, std::min(18u, (ssH + 223u) / 224u));
+        g.scaleYField = fieldResOff ? g.scaleY : std::max(g.scaleY, static_cast<float>(std::min(18u, (ssH + 223u) / 224u)));
+        // (TODO 295) Below a 100% render scale (TF_NATIVE_FRACSCALE=0: off, as before): the GS buffers at the picture's own scale, a
+        // fraction - a 512-wide buffer as wide as the picture, a frame's 448 rows (a field's 224) as tall - not the next
+        // whole number up with x2 at least. At 640x360 (50% of a 720p window) the buffers were 1024 x 896 a frame, four
+        // times the picture's pixels, and every full-screen pass (the glow, the lens filter, the tints) paid for them:
+        // the Intel laptops' largest cost that the render scale did not shrink. At 100% (and with supersampling) the
+        // whole-number scales stay, the picture as before. (=alt: by turns, a profile window each.)
+        {
+            static const char *fracEnv = std::getenv("TF_NATIVE_FRACSCALE");
+            const bool fracOn = !(fracEnv && *fracEnv && (*fracEnv == '0' || (*fracEnv == 'a' && !(g_profWindow & 1u))));
+            // (TODO 299: not with FSR 3 / 4 - its picture is at the window's size and its input at the whole-number scale of the
+            // render size above)
+            if (fracOn && renderScale() < 100 && !ssaa && !taa::upscalerOn())
+            {
+                g.scaleX = std::max(0.5f, static_cast<float>(width) / 512.0f);
+                g.scaleY = std::max(0.5f, static_cast<float>(height) / 448.0f);
+                g.scaleYField = fieldResOff ? g.scaleY : std::max(g.scaleY, static_cast<float>(height) / 224.0f);
+            }
+        }
         static const bool frameDoneSet = [] {
             gfx::device().setFrameDone(frameDone);
             return true;
@@ -2026,9 +2250,8 @@ namespace nr::frame
                 const auto ef = effect.find(e.first);
                 const bool unit = (ef != effect.end() && ef->second > 0) ||
                                   (topRead.count(e.first) && e.second.first <= 256.0f && e.second.second <= 256.0f);
-                const uint32_t sx = unit ? 1u : g.scaleX, sy = unit ? 1u : fieldRead.count(e.first) ? g.scaleYField : g.scaleY;
-                if (t.id && t.gsW >= e.second.first && t.gsH >= e.second.second && t.w == static_cast<uint32_t>(t.gsW) * sx &&
-                    t.h == static_cast<uint32_t>(t.gsH) * sy)
+                const float sx = unit ? 1.0f : g.scaleX, sy = unit ? 1.0f : fieldRead.count(e.first) ? g.scaleYField : g.scaleY;
+                if (t.id && t.gsW >= e.second.first && t.gsH >= e.second.second && t.w == targetPixels(t.gsW, sx) && t.h == targetPixels(t.gsH, sy))
                     continue;
                 makeTarget(t, std::max(e.second.first, t.gsW), std::max(e.second.second, t.gsH), sx, sy);
             }
@@ -3409,8 +3632,11 @@ namespace nr::frame
                 {
                     if (source->main)
                         ++g_pictureReads; // (TF_NATIVE_PROFILE: passes reading the picture itself)
-                    sourceSlot = dev.view(source->id);
-                    dev.use(source->id, gfx::UseFor::Sample);
+                    // (TODO 299) The temporal upscaler: the scene's target - the 3D, read into the picture - upscaled once a frame
+                    // into a target of the picture's resolution, read in its place (its UV the same: texScale is per GS pixel).
+                    const State::Target *read = taaUp::upscaledSource(dev, *source, tg, input, holds3D.count(source) != 0);
+                    sourceSlot = dev.view(read->id);
+                    dev.use(read->id, gfx::UseFor::Sample);
                 }
                 if (source)
                     ++fromTargets;
@@ -3633,6 +3859,12 @@ namespace nr::frame
                 }
                 if (pass.turned)
                     c.pose[0] = 1.0f; // (N9 stage 3: the camera's turn of each picture)
+                if (pass.sceneMotion)
+                {
+                    c.pose[3] = 1.0f; // (TODO 299: the scene's 3D - jittered, its motion written)
+                    if (taa::upscalerOn())
+                        taaUp::sampleCamera(c.rows, input.depthScale);
+                }
                 if (hasVertexB)
                     c.pose[1] = 1.0f; // (N9 stage 3: the vertices blended from the frame before's)
                 if (clips)
@@ -3674,6 +3906,20 @@ namespace nr::frame
                 }
                 const gfx::BlendState blend = draw::blendOf(pass.alpha, (pass.prim & 0x40u) != 0u);
                 c.dest[1] = static_cast<float>(blend.premultiply);
+                // (TODO 299) The reactive mask's kind (the shader's reactiveOf): none for the scene's opaque 3D, the fog, the scene's
+                // blended layers drawn over themselves (a lightmap, a detail pass: they move with the scene's motion) and the passes
+                // that read a target back (the glow, the copies: screen effects of the scene itself); the alpha for an additive draw
+                // (a glow, a beam, sparks, fire), a sprite (the particles) or a blended draw that is not the scene's; most for an
+                // overlay drawn into the scene.
+                if (taa::upscalerOn())
+                {
+                    const bool additive = blend.enabled && blend.dst == gfx::Blend::One;
+                    const bool loose = additive || pass.mode[3] > 0.5f || !pass.sceneMotion;
+                    // (an additive draw by the light it adds: 3 its colour times its alpha, 4 its colour - a faint shaft or haze then
+                    // leaves FSR's history alone, a bright spark does not)
+                    const float addKind = blend.src == gfx::Blend::SrcAlpha && blend.premultiply == 0 ? 3.0f : 4.0f;
+                    c.down[2] = tg.main ? -1.0f : fog || source ? 0.0f : blend.enabled ? (additive ? addKind : loose ? 1.0f : 0.0f) : pass.sceneMotion ? 0.0f : 2.0f;
+                }
                 c.dest[2] = static_cast<float>((pass.alpha >> 32) & 0xFFu) / 128.0f;
                 // (The GS-exact untextured colour: the glow's threshold - a constant subtracted from the
                 // shrunk picture - takes off what the GS's does, not twice that. TF_NATIVE_UNTEXTURED=0:
@@ -3818,6 +4064,10 @@ namespace nr::frame
                             pipe = defaultPipe;
                     }
                 }
+                // (TODO 299: the scene's 3D writes its motion; everything else drawn into the scene's buffer - the fog, the overlays
+                // over it, the 2D - leaves the motion as the 3D wrote it)
+                if (pass.sceneMotion)
+                    pipe.writeMask |= gfx::kWriteMotion;
                 if (!dev.setPipeline(pipe))
                 {
                     static const char *onePsoOn = std::getenv("TF_NATIVE_ONEPSO");
@@ -4031,6 +4281,34 @@ namespace nr::frame
                         const bool alt = std::strchr(skipEnv + (all ? 3 : 1), 'a') != nullptr;
                         skipThis = (all || std::atoi(skipEnv) == kindNow) && (!alt || (g_profWindow & 1u));
                     }
+                    // (TODO 295, a measuring aid: TF_NATIVE_SKIPTEX0=[/]<hex>[&<mask>][,...] - the draws whose TEX0 (its bits
+                    // in the mask, all by default) is one of these not drawn (their state still set); with a leading '/' in
+                    // every other profile window: one full-screen pass's whole-frame cost, which per-draw timestamps on an
+                    // Intel GPU overstate. The lens filter's palette address moves each frame: 665b20000&1fffffffff.)
+                    static const std::pair<std::vector<std::pair<uint64_t, uint64_t>>, bool> skipTex = [] {
+                        std::pair<std::vector<std::pair<uint64_t, uint64_t>>, bool> out{{}, false};
+                        if (const char *e = std::getenv("TF_NATIVE_SKIPTEX0"))
+                        {
+                            out.second = *e == '/';
+                            for (const char *k = e + (out.second ? 1 : 0); *k;)
+                            {
+                                char *end = nullptr;
+                                const unsigned long long v = std::strtoull(k, &end, 16);
+                                if (end == k)
+                                    break;
+                                unsigned long long mask = ~0ull;
+                                if (*end == '&')
+                                    mask = std::strtoull(end + 1, &end, 16);
+                                out.first.emplace_back(static_cast<uint64_t>(v & mask), static_cast<uint64_t>(mask));
+                                k = *end == ',' ? end + 1 : end;
+                            }
+                        }
+                        return out;
+                    }();
+                    if (!skipThis && !skipTex.first.empty() && (!skipTex.second || (g_profWindow & 1u)))
+                        for (const auto &v : skipTex.first)
+                            if ((pass.tex0 & v.second) == v.first)
+                                skipThis = true;
                 }
                 {
                     // (TODO 99, a check: TF_NATIVE_SIG=1 - on a saved frame, each pass drawn as a line in runs\sig_<tick>.txt: the
@@ -4456,12 +4734,25 @@ namespace nr::frame
                 pc.picture[0] = pic.s;
                 for (int i = 0; i < 4; ++i)
                     pc.turn[5 * i] = pc.turnClip[5 * i] = 1.0f;
+                pc.taa[1] = taa::wantsMotion() ? 1.0f : 0.0f; // (the motion target written)
+                pc.jitter[0] = taaUp::g_jitterClip[0];
+                pc.jitter[1] = taaUp::g_jitterClip[1];
+                if (taa::debugView() > 0.0f)
+                {
+                    pc.taa[0] = 1.0f;
+                    pc.taa[3] = taa::debugView();
+                }
+                // (TODO 299, TF_TAA_REACTIVEVIEW=1 with the upscaler on: the reactive mask shown in place of the colour)
+                static const bool reactiveView = std::getenv("TF_TAA_REACTIVEVIEW") && *std::getenv("TF_TAA_REACTIVEVIEW") == '1';
+                if (reactiveView && taa::upscalerOn())
+                    pc.taa[2] = 1.0f;
                 out.constants.assign(reinterpret_cast<const uint8_t *>(&pc), reinterpret_cast<const uint8_t *>(&pc) + sizeof(pc));
                 out.dueNs = pic.dueNs;
                 out.shot = pic.shot;
                 // (N9: the camera's turn of this picture - the mouse and stick since the frame's read, view_turn.h - written into
                 // its constants just before it is submitted: an extra picture may wait for the moment it is read at.)
-                if (input.turnCamera && input.turnMain >= 0)
+                // (TODO 299: not with the temporal upscaler - its motion has no room for a turn made after the frame was drawn)
+                if (input.turnCamera && input.turnMain >= 0 && !taa::upscalerOn())
                     out.beforeSubmit = [cam = input.turnCamera, main = input.turnMain, frameDue = input.dueNs, span = input.periodNs, due = pic.dueNs,
                                         s = pic.s, waits = input.turnWaits, set = input.turnLeadSet](uint8_t *constants, uint64_t id, bool extra) {
                         const double wait = extra && waits ? 25.0 : 0.0;
@@ -4500,6 +4791,7 @@ namespace nr::frame
                     std::fprintf(stderr, "[native render]   its textures made (%llu Ktexels): mips %.1f texture %.1f staging %.1f copy-in %.1f record %.1f ms\n",
                                  static_cast<unsigned long long>(g_mkTexels >> 10), g_mkMs[0], g_mkMs[1], g_mkMs[2], g_mkMs[3], g_mkMs[4]);
             }
+            dev.videoMemoryNote(ms); // (issue #20: past the cap of told ones too - its own limit, once in 5 s)
         }
         static const bool profile = std::getenv("TF_NATIVE_PROFILE") != nullptr;
         if (profile && ++prof::frames == 300u)

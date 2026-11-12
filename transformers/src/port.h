@@ -4,6 +4,8 @@
 
 #include <cstdint>
 
+class PS2Runtime;
+
 namespace tf::port
 {
     // The frame rate the PC port runs levels at: TF_FRAME_RATE, 60 by default (120, 144, ...).
@@ -40,6 +42,8 @@ namespace tf::port
     // The testing aids' tick (TF_INPUT, TF_GOTO, TF_PLACE): the console's VBlanks, 60 a second of game time at every
     // frame rate, as of the frame's input (overrides.cpp testTick).
     uint64_t testTickNow();
+    // (TODO 292) The mouse turns the view now: from its first travel taken until the pad's right stick moves (overrides.cpp).
+    bool mouseTurnsView();
     // Display lists kicked so far (0x25D2B0): VIF1 and VU1 work on the newest one's batches until
     // the next kick, which waits for them - so it numbers the frame a batch belongs to.
     uint64_t listsKicked();
@@ -64,6 +68,11 @@ namespace tf::port
     void vblankWaitBegins(uint32_t count);
     void vblankWaitEnds(uint32_t count);
     void idleSkipped(uint32_t cycles);
+    // (TODO 291) A frame of the main loop (0x295310) begins: the game's frames of TF_FPS's 1% low and of TF_HITCH_MS
+    // are timed from one to the next here, not by the display list's kick - the kick runs on a thread of its own,
+    // most frames at the next VBlank but now and then straight after the frame's drawing, which paired a 3 ms
+    // "frame" with a 30 ms one while the frames and the pictures were even.
+    void frameBegins(uint8_t *rdram, PS2Runtime *runtime);
 
     // The game's VU1 routines done natively (vu1_native.cpp, docs/RENDERER.md).
     void installVu1Native();

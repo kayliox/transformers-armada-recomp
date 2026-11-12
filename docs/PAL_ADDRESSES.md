@@ -27,3 +27,8 @@ Their code is the same except in two places, which shift the code after them (`t
 The private tree's mods (`overlay/`) use USA addresses that are not wrapped. The European disc is built without them:
 `build.ps1` leaves the overlay out for any disc other than the USA one, as `-Public` does. Mods on the European disc are
 out of scope for now.
+
+`check_pal_addresses.py` scans the overlay too, but only reports it: the addresses the overlay already had are listed
+in `overlay/pal_known_addresses.txt` and counted in one line, and an address beyond that list is printed as "NEW", so
+new mod code that would need `TF_GA` shows at once. The overlay never fails the check (the European build leaves it
+out). After a mod's addresses are reviewed and kept as they are (USA only), `--overlay-known` writes the list again.

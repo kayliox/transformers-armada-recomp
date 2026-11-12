@@ -28,10 +28,12 @@
 
 #include "photo_mode.h"
 
+#include "camera_mode.h"
 #include "game_config.h"
 #include "menu_mouse.h"
 #include "port_ext.h"
 #include "tuning.h"
+#include "view_turn.h"
 
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
@@ -227,6 +229,17 @@ namespace photo_mode
                 const uint32_t at = getRegU32(ctx, 5);
                 storeFloat(rdram, at + 8u, loadFloat(rdram, at + 8u) - 100000.0f);
             }
+            if (!g_on.load(std::memory_order_relaxed) && from == kSetPositionFromCamera)
+            {
+                // (TODO 300 a: the steady first-person eye, camera_mode.h)
+                const uint32_t at = getRegU32(ctx, 5);
+                float p[3] = {loadFloat(rdram, at), loadFloat(rdram, at + 4u), loadFloat(rdram, at + 8u)};
+                const float before[3] = {p[0], p[1], p[2]};
+                camera_mode::steadyEye(rdram, p);
+                for (int i = 0; i < 3; ++i)
+                    if (p[i] != before[i])
+                        storeFloat(rdram, at + 4u * i, p[i]);
+            }
             if (g_on.load(std::memory_order_relaxed) && from == kSetPositionFromCamera)
             {
                 const uint32_t at = getRegU32(ctx, 5);
@@ -243,6 +256,7 @@ namespace photo_mode
             }
             if (from == kSetPositionFromCamera)
             {
+                view_turn::noteViewNode(getRegU32(ctx, 4)); // (TODO 292 A: the view's node, for the pictures' turn)
                 const uint32_t at = getRegU32(ctx, 5);
                 std::lock_guard<std::mutex> guard(g_seenLock);
                 for (int i = 0; i < 3; ++i)
@@ -390,6 +404,36 @@ namespace photo_mode
             return false;
         std::memcpy(point, g_seen.crosshair, sizeof(g_seen.crosshair));
         return true;
+    }
+
+    bool viewPosition(float point[3])
+    {
+        std::lock_guard<std::mutex> guard(g_seenLock);
+        std::memcpy(point, g_seen.position, sizeof(g_seen.position));
+        return point[0] != 0.0f || point[1] != 0.0f || point[2] != 0.0f;
+    }
+
+    bool viewFrame(float ahead[3], float left[3], float up[3], float &tanUp)
+    {
+        Seen v;
+        {
+            std::lock_guard<std::mutex> guard(g_seenLock);
+            v = g_seen;
+        }
+        if (!(v.fov > 1.0f && v.fov < 179.0f))
+            return false;
+        const float w = v.turn[0], qx = v.turn[1], qy = v.turn[2], qz = v.turn[3];
+        const float a[3] = {1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy + w * qz), 2 * (qx * qz - w * qy)};
+        const float l[3] = {2 * (qx * qy - w * qz), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz + w * qx)};
+        const float u[3] = {2 * (qx * qz + w * qy), 2 * (qy * qz - w * qx), 1 - 2 * (qx * qx + qy * qy)};
+        for (int i = 0; i < 3; ++i)
+        {
+            ahead[i] = a[i];
+            left[i] = l[i];
+            up[i] = u[i];
+        }
+        tanUp = std::tan(v.fov * 0.5f * kPi / 180.0f) / (v.widescreen ? 16.0f / 9.0f : 4.0f / 3.0f);
+        return std::isfinite(tanUp) && tanUp > 0.0f;
     }
 
     bool project(const float point[3], float windowW, float windowH, float pictureAspect, float &x, float &y)

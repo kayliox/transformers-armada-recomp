@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -85,6 +86,18 @@ namespace nr
         };
     }
 
+    // (Milestone 3) A picture the backend shows in the game's window itself (Vulkan in SDL3's window): a texture of the
+    // window's platform (ps2_platform.h), for the window loop to draw with the overlays over it.
+    struct WindowPicture
+    {
+        unsigned int texture = 0u; // (ps2_platform's texture id: DrawTexturePro draws it)
+        int width = 0, height = 0;
+        uint64_t serial = 0;
+        bool has3D = false;
+        uint64_t tick = 0;
+        int64_t dueNs = 0, readyNs = 0;
+    };
+
     // The backend's calls (docs/RENDERER_BACKEND.md, section 2). Threads as there: the render thread records and submits,
     // the window's thread takes pictures, the settings may come from any thread.
     class Backend
@@ -119,6 +132,10 @@ namespace nr
         virtual void sharedHeld(int index) = 0;
         virtual bool waitPicture(uint64_t serial, int64_t untilNs, int64_t &lastNs) = 0;
         virtual int pacingMode() = 0;
+        // (Milestone 3) The backend presents the game's window itself: its pictures come through latestWindowPicture
+        // (the newest; each window picture asks), not as shared textures or CPU pixels. Direct3D 12: never.
+        virtual bool presentsWindow() { return false; }
+        virtual bool latestWindowPicture(WindowPicture &) { return false; }
 
         // ---- settings (any thread, from the next frame) ----
 #if defined(__linux__)
@@ -130,12 +147,16 @@ namespace nr
         virtual void setSupersampling(bool on) = 0;
         virtual void setSpeedupsForced(int on) = 0;
 
-        // ---- video memory and the quality preset (any thread) ----
-        virtual uint32_t largeImageCap() = 0;
-        virtual uint64_t largeImageBudget() = 0;
-        virtual uint64_t largeImageBytes() = 0;
-        virtual uint64_t adapterMemoryMB() = 0;
-        virtual int qualityPreset() = 0;
+        // ---- video memory (any thread): the backend's figures - the quality preset and the large images' cap and budget
+        // are made of them by the shared rules (nr_policy.h) ----
+        virtual uint64_t largeImageBytes() = 0; // the large images' bytes on the GPU now
+        // The graphics card's video memory, MB (Direct3D 12: its adapter's dedicated memory; Vulkan: its largest
+        // device-local heap); 0: none known; nothing: not known yet (the device's GPU not chosen yet).
+        virtual std::optional<uint64_t> adapterMemoryMB() = 0;
+        // (Issue #20) The large images' budget of the shared rules held to what the card has room for now (Direct3D 12:
+        // no more than Windows lets us have on it, less the rest of ours and a margin; TF_HIRES_BUDGET_WINDOWS=0 off).
+        // As it is by default (Vulkan).
+        virtual uint64_t largeImageRoom(uint64_t budget) { return budget; }
 
         // ---- timing figures (ms) for the pacer and the stats lines ----
         virtual double gpuPictureMs() = 0;

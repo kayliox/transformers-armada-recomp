@@ -1,0 +1,96 @@
+Subject: [PATCH] Runtime: no display - a clear message instead of an access violation (TODO 302)
+
+With no display (a monitor off or asleep after a reboot, a session without a screen) GLFW cannot make the
+window, and raylib 5.5 went on with the null one: GetCurrentMonitor's glfwGetWindowPos(NULL) crashed inside
+InitWindow, which also ignored InitPlatform's failure. Both now stop (raylib's window creation returns the failure,
+InitWindow returns without a window), and the runtime ends its start with "No display found: is a monitor
+connected and switched on?" in the log and a message box (not in a hidden run: it would wait for a click).
+PS2X_TEST_NO_WINDOW=1: as if the window had failed (tests).
+
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -167,6 +167,39 @@ static int ps2xJoysticksOnThread(void)
+                 file(WRITE "${_ps2x_rcore}" "${_ps2x_rcore_new}")
+             endif()
+         endif()
++        # (TODO 302) No display (a monitor off or asleep after a reboot, a session without a screen): GLFW cannot make
++        # the window, and raylib 5.5 went on with the null one - GetCurrentMonitor's glfwGetWindowPos(NULL), an access
++        # violation inside InitWindow - and InitWindow ignored InitPlatform's failure (rlglInit without an OpenGL
++        # context). Both stop instead: InitWindow returns without a window, and the runtime says why (ps2_runtime.cpp).
++        file(READ "${_ps2x_rcore}" _ps2x_rcore_text)
++        if(NOT _ps2x_rcore_text MATCHES "PS2X_NO_DISPLAY")
++            set(_ps2x_nd_anchor "        // After the window was created, determine the monitor that the window manager assigned.")
++            string(FIND "${_ps2x_rcore_text}" "${_ps2x_nd_anchor}" _ps2x_nd_at)
++            if(_ps2x_nd_at EQUAL -1)
++                message(WARNING "raylib's window creation not found: no display still crashes in InitWindow (TODO 302)")
++            else()
++                string(REPLACE "${_ps2x_nd_anchor}"
++                    "        if (!platform.handle) { glfwTerminate(); TRACELOG(LOG_WARNING, \"GLFW: Failed to initialize Window\"); return -1; } /* PS2X_NO_DISPLAY: PS2Recomp, TODO 302 */\n${_ps2x_nd_anchor}"
++                    _ps2x_rcore_new "${_ps2x_rcore_text}")
++                file(WRITE "${_ps2x_rcore}" "${_ps2x_rcore_new}")
++            endif()
++        endif()
++        set(_ps2x_rcorec "${raylib_SOURCE_DIR}/src/rcore.c")
++        if(EXISTS "${_ps2x_rcorec}")
++            file(READ "${_ps2x_rcorec}" _ps2x_rcorec_text)
++            if(NOT _ps2x_rcorec_text MATCHES "PS2X_NO_DISPLAY")
++                set(_ps2x_ip_anchor "    InitPlatform();\n")
++                string(FIND "${_ps2x_rcorec_text}" "${_ps2x_ip_anchor}" _ps2x_ip_at)
++                if(_ps2x_ip_at EQUAL -1)
++                    message(WARNING "raylib's InitWindow not found: it goes on without a window (TODO 302)")
++                else()
++                    string(REPLACE "${_ps2x_ip_anchor}"
++                        "    if (InitPlatform() != 0) { TRACELOG(LOG_WARNING, \"SYSTEM: Failed to initialize platform\"); return; } /* PS2X_NO_DISPLAY: PS2Recomp, TODO 302 */\n"
++                        _ps2x_rcorec_new "${_ps2x_rcorec_text}")
++                    file(WRITE "${_ps2x_rcorec}" "${_ps2x_rcorec_new}")
++                endif()
++            endif()
++        endif()
+     endif()
+ 
+     if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_ANDROID)
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 3cbfa55..aa9c97b 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -39,6 +39,15 @@
+ #include <cstdlib>
+ #include <sstream>
+ 
++#if defined(_WIN32)
++// (user32's MessageBoxA, declared here: windows.h's names clash with raylib's - CloseWindow, ShowCursor, ...)
++extern "C" __declspec(dllimport) int __stdcall MessageBoxA(void *window, const char *text, const char *caption, unsigned int type);
++static int ps2x_MessageBoxA(void *window, const char *text, const char *caption, unsigned int type)
++{
++    return MessageBoxA(window, text, caption, type);
++}
++#endif
++
+ namespace ps2_stubs
+ {
+     void resetSifState();
+@@ -1256,6 +1265,24 @@ bool PS2Runtime::initialize(const char *title)
+         const bool hiddenWindow = std::getenv("PS2X_WINDOW_HIDDEN") && *std::getenv("PS2X_WINDOW_HIDDEN") == '1';
+         SetConfigFlags(FLAG_WINDOW_RESIZABLE | (hiddenWindow ? FLAG_WINDOW_HIDDEN : 0u));
+         InitWindow(HOST_WINDOW_WIDTH, HOST_WINDOW_HEIGHT, title);
++        // No window (no display: a PC whose monitor is off or asleep after a reboot, a session without a screen):
++        // raylib returns without one, and what came next touched the null window - an access violation in
++        // GetCurrentMonitor. The game stops here with the reason in the log and a message box (not when the window was
++        // meant to be hidden: an unattended run must never wait for a click). PS2X_TEST_NO_WINDOW=1 (tests): as if it
++        // had failed.
++        const bool noWindowTest = std::getenv("PS2X_TEST_NO_WINDOW") && *std::getenv("PS2X_TEST_NO_WINDOW") == '1';
++        if (noWindowTest || !IsWindowReady())
++        {
++            const char *reason = "No display found: is a monitor connected and switched on? (the game's window could not be made)";
++            std::cerr << "[window] " << reason << std::endl;
++#if defined(_WIN32)
++            if (!hiddenWindow)
++                ps2x_MessageBoxA(nullptr, reason, title, 0x10u /* MB_ICONERROR */);
++#endif
++            if (IsWindowReady())
++                CloseWindow();
++            return false;
++        }
+         // PS2X_PRESENT=dxgi: the window's pictures through a DXGI swap chain (ps2_host_present.h),
+         // started before full screen, which is the screen's exact size with it.
+         ps2_host_present::start(GetWindowHandle());

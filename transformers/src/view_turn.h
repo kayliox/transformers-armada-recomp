@@ -35,6 +35,9 @@ namespace view_turn
     void noteTurned(const uint8_t *rdram, uint32_t control, float mouseYaw, float mousePitch, float frameSeconds);
     // The camera object and its transform (the listener update's 0x1AFD40 call, overrides.cpp).
     void noteCameraObject(uint32_t camera, uint32_t transform);
+    // (TODO 292 A) The view's camera node as the camera manager places it (photo_mode's SetPosition hook): its transform
+    // (+0x14) stands in where the sound listener's camera is not seen (Antarctica).
+    void noteViewNode(uint32_t node);
     // A model-to-screen matrix sent (0x221DB0): the camera matrices it was made with (scratchpad 0x6A0 camera to screen,
     // 0x6E0 camera to the clipping space, 0xEC0 world to camera). The index of them for the draws made now.
     void noteMatrixSent(const uint8_t *rdram, const float *sent);

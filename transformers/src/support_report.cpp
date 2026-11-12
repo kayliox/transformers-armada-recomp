@@ -224,8 +224,15 @@ namespace support_report
                 {
                     DXGI_ADAPTER_DESC1 d{};
                     if (SUCCEEDED(adapter->GetDesc1(&d)) && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE))
+                    {
+                        // (Issue #20: two lines of the same name - one card listed twice, or two - told apart by the
+                        // card's id (LUID, changes at each boot) and its PCI ids.)
+                        char ids[96];
+                        std::snprintf(ids, sizeof ids, " (id %08lX-%08lX, PCI %04X:%04X rev %02X)", static_cast<unsigned long>(d.AdapterLuid.HighPart),
+                                      static_cast<unsigned long>(d.AdapterLuid.LowPart), d.VendorId, d.DeviceId, d.Revision);
                         t += "Graphics card " + std::to_string(i) + ": " + narrow(d.Description) + ", " +
-                             std::to_string(static_cast<unsigned long long>(d.DedicatedVideoMemory >> 20)) + " MB\n";
+                             std::to_string(static_cast<unsigned long long>(d.DedicatedVideoMemory >> 20)) + " MB" + ids + "\n";
+                    }
                     adapter->Release();
                 }
                 factory->Release();

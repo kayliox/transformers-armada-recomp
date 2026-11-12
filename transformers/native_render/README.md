@@ -424,7 +424,7 @@ and interfaces (their names and addresses are the game's).
    The paced hand-over (2026-10-30, N9 / TODO 95; `TF_PACING`): a picture used to go to the window when the render
    thread began the frame after next and found its GPU work done (finishSlot), and the window showed the newest at
    each VBlank - with the in-between pictures two VBlanks a frame, the second a copy - so each picture stayed up for
-   one, two or three VBlanks. Now a thread of its own (`pace::` in nr_d3d.cpp) waits for each picture's fence, then
+   one, two or three VBlanks. Now a thread of its own (the pacer: nr_pace.cpp) waits for each picture's fence, then
    hands it over at its frame's moment (`Frame::dueNs`, the VBlank it was handed over at) plus a steady delay (the
    98th percentile of the last 2 s of readiness + 1 ms; whole VBlanks when they are timed by the screen's refresh),
    and the window shows it at once (`ps2_host_display::setPicturePacer`, PS2Recomp patch 0047). The pictures waiting
@@ -803,12 +803,13 @@ and interfaces (their names and addresses are the game's).
    contexts' TFX), each a large image and a GPU copy of its own: the HQ held 13.6 GB of them. Now shared by
    name + size + texels (`TF_HIRES_SHARE=0`: as before). (b) BC7 (`ext/bc7enc`, mode 6, ~31 Mtexels a second a
    loader thread; `TF_HIRES_BC=0`: RGBA), a quarter of RGBA's memory and bandwidth. (c) A cap from the adapter's
-   video memory (`d3d::largeImageCap`: under ~5 GB 2048 a side, under ~3 GB 1024; `TF_HIRES_MAX=<n>`;
+   video memory (`policy::largeImageCap`: under ~5 GB 2048 a side, under ~3 GB 1024; `TF_HIRES_MAX=<n>`;
    `TF_NATIVE_VRAM_MB=<n>` pretends another card) - the chain read from the level of that size. (d) A disk cache
    of the compressed chains beside the upscaled tree (`<upscaled>/../upscaled_bc7_cache`, `TF_HIRES_CACHE=<dir>`,
    `=0` none; per machine, keyed by the PNG's size and time): the first run decodes and compresses on the
    loaders (the game's own textures drawn meanwhile), later runs read ~5 ms an image. (e) Eviction: over the
-   budget (`d3d::largeImageBudget`: the video memory less 1.5 GB; `TF_HIRES_BUDGET_MB`) the large images drawn
+   budget (`policy::largeImageBudget`: the video memory less 1.5 GB, and on Direct3D 12 no more than the room Windows gives
+   us on the card now less the rest of ours and 512 MB - issue #20, `TF_HIRES_BUDGET_WINDOWS=0` off; `TF_HIRES_BUDGET_MB`) the large images drawn
    least recently (none for `TF_HIRES_IDLE` s, default 5) are let go of, their game textures drawn, asked for
    again when next drawn. `TF_NATIVE_PROFILE` prints the large images' MB, the targets' MB and the cache's counts.
 10. Quality presets (TODO 94, 2026-10-30): Graphics -> "Quality (native renderer)", `TF_NATIVE_QUALITY` =
@@ -1161,6 +1162,8 @@ read-back from GS memory again instead of the native depth - nr_occlusion.cpp).
 - `nr_capture.cpp`: the wrappers on the game's render calls (game thread, guest memory).
 - `nr_d3d.cpp`: the Direct3D 12 side (D3D12 for ray tracing, the upscalers' frame generation, more headroom).
 - `nr_backend.cpp`: which backend is in use, chosen once at start (`TF_GFX_API`: `d3d12`, the default, or `vulkan`).
+- `nr_policy.cpp`: the video-memory policy (TODO 94) - the quality preset, its anisotropy and the large images' cap and
+  budget - for every backend, from the video memory figure the backend gives.
 - `vulkan/nr_vulkan.cpp`: the Vulkan backend with its own SDL3 window and swapchain (in development; built with
   `TF_VULKAN` as the library `tf_vulkan_backend`). `vulkan/nr_vulkan_shaders.h`: its SPIR-V, built into the game - the
   build's own program `vulkan/bake_spirv.cpp` (with `vulkan/nr_vulkan_dxc.cpp`, DXC's library) compiles every shader and
@@ -1170,6 +1173,8 @@ read-back from GS memory again instead of the native depth - nr_occlusion.cpp).
 - `nr_thread.cpp`: the render thread (the frame's list read, grass, D3D12 recording).
 - `nr_present.cpp`: the live picture's hand-over to the window (stage 4); `nr_glshare.cpp`: its shared
   texture on the GL side.
+- `nr_pace.cpp`: the paced hand-over (N9, `TF_PACING`) - the steady delay after the frames' moments and the thread that
+  hands each picture over at its time - for every backend; the backend gives its fence and the hand-over itself.
 - `nr_vif.cpp`, `nr_shader.cpp`, `nr_gif.cpp`: our own VIF interpreter, the VU image and shader
   snapshots, the GIF reader (the 2D).
 - `nr_warp.cpp`: the warp tunnel of a load drawn natively (stage 15): the tunnel's VU1 program left out, its work done from

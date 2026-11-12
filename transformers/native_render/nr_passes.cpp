@@ -15,6 +15,8 @@
 #include "nr_types.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -64,6 +66,7 @@ namespace nr
             std::memcpy(p.matrix, d.matrix, sizeof(p.matrix));
             std::memcpy(p.matrixB, d.hasB ? d.matrixB : d.matrix, sizeof(p.matrixB)); // (N9 stage 3: the frame before's pose)
             p.turned = d.turned;
+            p.sceneMotion = d.sceneMotion;
             p.texture = d.texture;
             p.fogPalette = d.fogPalette;
             p.topPalette = d.topPalette;
@@ -380,6 +383,25 @@ namespace nr
                 p.mode[0] = 6.0f;
                 for (int q = 0; q < 7; ++q)
                     copy(p.p[q], b[q]);
+                {
+                    // (TODO 108 S2, a measuring aid: TF_NATIVE_LIGHTLOG=1 - at most every 2 s, a lit mesh's two lights (q5 = L1,
+                    // q1 = L2), its eye (q0) and its matrix: where the game's light comes from, for the contact shadows.)
+                    static const bool lightLog = std::getenv("TF_NATIVE_LIGHTLOG") && *std::getenv("TF_NATIVE_LIGHTLOG") == '1';
+                    static int64_t lastNs = 0;
+                    const int64_t nowNs = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                   std::chrono::steady_clock::now().time_since_epoch())
+                                                                   .count());
+                    if (lightLog && nowNs - lastNs > 2000000000ll)
+                    {
+                        lastNs = nowNs;
+                        const float *m = d.matrix;
+                        std::fprintf(stderr,
+                                     "[native render] light: L1 %.3f %.3f %.3f %.3f L2 %.3f %.3f %.3f %.3f eye %.1f %.1f %.1f | matrix %.3f %.3f %.3f %.3f / %.3f "
+                                     "%.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.1f %.1f %.1f %.1f\n",
+                                     b[5].v[0], b[5].v[1], b[5].v[2], b[5].v[3], b[1].v[0], b[1].v[1], b[1].v[2], b[1].v[3], b[0].v[0], b[0].v[1],
+                                     b[0].v[2], m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
+                    }
+                }
                 // The lights (q5 = L1, q1 = L2) and the eye (q0) in the mesh's space.
                 toMesh(d.matrix, b[5].v, false, p.p[8]);
                 normalize(p.p[8]);

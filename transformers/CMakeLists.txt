@@ -238,13 +238,18 @@ if(TF_VULKAN)
         GIT_TAG v3.4.0
         GIT_SHALLOW TRUE
         SOURCE_SUBDIR not-a-cmake-project)
-    FetchContent_MakeAvailable(tf_vulkan_headers tf_volk tf_sdl3 tf_vma)
+    FetchContent_MakeAvailable(tf_vulkan_headers tf_volk tf_vma)
+    if(NOT TARGET SDL3::SDL3-static) # (the runtime's SDL3 platform has it already: PS2X_SDL3)
+        FetchContent_MakeAvailable(tf_sdl3)
+    endif()
     # The shader compiler for SPIR-V, used by the build only: DXC's release (its dxcompiler.dll, loaded by the bake below;
     # the same HLSL as Direct3D 12's). The Windows SDK's DXC has no SPIR-V; this one does. Nothing of it ships.
     if(WIN32)
+        set(TF_DXC_URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/dxc_2026_09_29.zip)
+        set(TF_DXC_SHA256 ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1)
         FetchContent_Declare(tf_dxc
-            URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/dxc_2026_09_29.zip
-            URL_HASH SHA256=ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1
+            URL ${TF_DXC_URL}
+            URL_HASH SHA256=${TF_DXC_SHA256}
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
             SOURCE_SUBDIR not-a-cmake-project)
         FetchContent_MakeAvailable(tf_dxc)
@@ -279,9 +284,21 @@ if(TF_VULKAN)
         # (its own folder: not beside the game)
         set_target_properties(tf_vulkan_bake PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tf_vulkan_bake")
         add_dependencies(tf_vulkan_bake tf_vulkan_hlsl)
+        # (The bake runs again when the DXC release changes too: its dxcompiler.dll, and a stamp naming the release - the
+        # archive's files keep their own dates, so a later release can bring an older one; the stamp is written only when
+        # the release named above changes.)
+        set(TF_DXC_STAMP "${TF_VK_GEN}/dxc_release.txt")
+        set(TF_DXC_NAMED "${TF_DXC_URL} ${TF_DXC_SHA256}\n")
+        set(TF_DXC_WAS "")
+        if(EXISTS "${TF_DXC_STAMP}")
+            file(READ "${TF_DXC_STAMP}" TF_DXC_WAS)
+        endif()
+        if(NOT TF_DXC_WAS STREQUAL TF_DXC_NAMED)
+            file(WRITE "${TF_DXC_STAMP}" "${TF_DXC_NAMED}")
+        endif()
         add_custom_command(OUTPUT "${TF_VK_BAKED}"
             COMMAND tf_vulkan_bake "${tf_dxc_SOURCE_DIR}/bin/x64/dxcompiler.dll" "${TF_VK_BAKED}"
-            DEPENDS tf_vulkan_bake
+            DEPENDS tf_vulkan_bake "${tf_dxc_SOURCE_DIR}/bin/x64/dxcompiler.dll" "${TF_DXC_STAMP}"
             COMMENT "Vulkan backend: its shaders compiled to SPIR-V (every variant)")
     elseif(NOT EXISTS "${TF_VK_BAKED}")
         file(WRITE "${TF_VK_BAKED}" "// No SPIR-V: no shader compiler for this system yet (transformers/CMakeLists.txt).
@@ -300,8 +317,18 @@ namespace nr::vulkan::shaders
     add_library(tf_vulkan_backend STATIC
         "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/nr_vulkan.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/nr_vulkan_vma.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/nr_vulkan_window.cpp"
         "${TF_VK_BAKED}")
     add_dependencies(tf_vulkan_backend tf_vulkan_hlsl)
+    # (Milestone 3) The game's window presented by Vulkan under SDL3's platform (PS2X_SDL3): its overlays drawn with
+    # ImGui's Vulkan renderer, built here with volk's functions.
+    if(PS2X_SDL3)
+        FetchContent_GetProperties(imgui)
+        target_sources(tf_vulkan_backend PRIVATE "${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp")
+        target_include_directories(tf_vulkan_backend PRIVATE "${imgui_SOURCE_DIR}" "${PS2RECOMP_DIR}/ps2xRuntime/include")
+        target_compile_definitions(tf_vulkan_backend PRIVATE IMGUI_IMPL_VULKAN_USE_VOLK TF_VK_GAME_WINDOW=1)
+        target_link_libraries(tf_vulkan_backend PRIVATE imgui)
+    endif()
     target_include_directories(tf_vulkan_backend PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/native_render"
                                "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan" "${tf_volk_SOURCE_DIR}"
                                "${tf_vulkan_headers_SOURCE_DIR}/include" "${tf_vma_SOURCE_DIR}/include" "${TF_VK_GEN}")
@@ -350,8 +377,10 @@ target_precompile_headers(TransformersRecomp PRIVATE
 )
 
 if(PS2X_ENABLE_DEBUG_UI)
-    target_sources(TransformersRecomp PRIVATE "${PS2RECOMP_DIR}/ps2xRuntime/src/lib/ps2_debug_panel.cpp")
+    target_sources(TransformersRecomp PRIVATE "${PS2RECOMP_DIR}/ps2xRuntime/src/lib/ps2_debug_panel.cpp"
+                                              "${PS2RECOMP_DIR}/ps2xRuntime/src/lib/ps2_overlay.cpp")
     set_source_files_properties("${PS2RECOMP_DIR}/ps2xRuntime/src/lib/ps2_debug_panel.cpp"
+                                "${PS2RECOMP_DIR}/ps2xRuntime/src/lib/ps2_overlay.cpp"
         PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
     target_link_libraries(TransformersRecomp PRIVATE rlImGui imgui)
     target_compile_definitions(TransformersRecomp PRIVATE PS2X_ENABLE_DEBUG_UI=1)
@@ -412,4 +441,33 @@ if(MSVC AND TF_LTCG)
     endif()
 endif()
 ps2x_stage_ffmpeg_runtime_dlls(TransformersRecomp)
+
+# (TODO 299, the temporal upscaler) AMD's FidelityFX SDK: the API's headers are vendored (native_render/ext/fidelityfx, MIT);
+# its two signed DLLs (the loader and the upscaler, FSR 3.1 / FSR 4) are AMD's own binary licence - never committed, fetched
+# here at a pinned release with their SHA-256 only when TF_FSR_SDK is on, and put next to the game. Without them the
+# temporal upscaler is not offered (the game loads the loader at run time).
+option(TF_FSR_SDK "Fetch AMD's FidelityFX SDK DLLs (FSR 3.1 / FSR 4) next to the game" OFF)
+if(TF_FSR_SDK AND WIN32)
+    set(TF_FFX_TAG "v2.4.0")
+    set(TF_FFX_DIR "${CMAKE_BINARY_DIR}/ThirdParty/fidelityfx-${TF_FFX_TAG}")
+    set(TF_FFX_FILES
+        "amd_fidelityfx_loader_dx12.dll|e2191d3c0828be45eb8affd4e3ec0378f2293adc345b772a7170edcf3b021ecb"
+        "amd_fidelityfx_upscaler_dx12.dll|aad4fccccb29084a655f9a4f9f613bd22c8c03fb4a0f8840148cc6543b4ccace")
+    foreach(entry IN LISTS TF_FFX_FILES)
+        string(REPLACE "|" ";" parts "${entry}")
+        list(GET parts 0 name)
+        list(GET parts 1 hash)
+        if(NOT EXISTS "${TF_FFX_DIR}/${name}")
+            message(STATUS "FidelityFX SDK ${TF_FFX_TAG}: fetching ${name}")
+            file(DOWNLOAD "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/raw/${TF_FFX_TAG}/Kits/FidelityFX/signedbin/${name}"
+                 "${TF_FFX_DIR}/${name}" EXPECTED_HASH SHA256=${hash} TLS_VERIFY ON STATUS fetched)
+            list(GET fetched 0 code)
+            if(NOT code EQUAL 0)
+                message(FATAL_ERROR "FidelityFX SDK: ${name} could not be fetched (${fetched})")
+            endif()
+        endif()
+        add_custom_command(TARGET TransformersRecomp POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TF_FFX_DIR}/${name}" "$<TARGET_FILE_DIR:TransformersRecomp>/${name}")
+    endforeach()
+endif()
 

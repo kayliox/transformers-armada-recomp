@@ -13,6 +13,7 @@
 #include "nr_types.h"
 #include "nr_backend.h"
 #include "nr_install.h"
+#include "nr_policy.h"
 #include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 #include "hd_progress.h"
 #include "nr_frame_texture_policy.h"
@@ -26,6 +27,7 @@
 #include "nr_rain.h"
 #include "nr_n5.h"
 #include "nr_frame.h" // (frame::setBloom: the modern bloom's setting, TODO 108)
+#include "nr_taa.h"   // (TODO 299: the Upscaler setting's FSR 3 / 4)
 
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
@@ -988,7 +990,7 @@ namespace nr
             }
         }
 
-        // Large images over the video memory's budget (d3d::largeImageBudget, TODO 94): the ones drawn least
+        // Large images over the video memory's budget (policy::largeImageBudget, TODO 94): the ones drawn least
         // recently (none in the last TF_HIRES_IDLE seconds, default 5) let go of - their game textures drawn
         // again, the large image asked for again when next drawn (from the compressed cache: milliseconds).
         void evictLarge(uint64_t tick)
@@ -996,7 +998,7 @@ namespace nr
             static uint64_t lastScan = 0;
             if (tick < lastScan + 30u)
                 return;
-            const uint64_t budget = backend().largeImageBudget(), used = backend().largeImageBytes();
+            const uint64_t budget = policy::largeImageBudget(), used = backend().largeImageBytes();
             if (budget == UINT64_MAX || used <= budget)
                 return;
             lastScan = tick;
@@ -2383,6 +2385,15 @@ namespace nr
         {
             g_stateBlock = getRegU32(ctx, 5);
             g_blockWrite = ++g_writeSequence;
+            {
+                static int blockLog = std::getenv("TF_NATIVE_PRIMENDLOG") ? std::atoi(std::getenv("TF_NATIVE_PRIMENDLOG")) : 0;
+                if (blockLog > 0)
+                {
+                    --blockLog;
+                    std::fprintf(stderr, "[native render] stateblock %08x at %08x (ra %08x, draw %zu)\n", g_stateBlock, word(rdram, kPacketPointer),
+                                 getRegU32(ctx, 31), g_frame.draws.size());
+                }
+            }
             streamStateBlock(rdram, g_stateBlock);
             if (framesDeferred() && n5::deviceNative(n5::Device::ApplyStateBlock))
             {
@@ -4185,6 +4196,18 @@ namespace nr
         // packet pointer past its words) - drawn as primitiveEnd draws the sprites'.
         constexpr uint32_t kPrimitiveEndStrips = 0x00220350u;
         PS2Runtime::RecompiledFunction g_primitiveEndStrips = nullptr;
+        // (TODO 270: a primitive's end drawn as one or more draws - splitStripsAtState below)
+        struct PrimitivePiece
+        {
+            std::shared_ptr<Mesh> mesh;
+            uint32_t end; // the list position its stretch ends at (the packet pointer's value there)
+        };
+        std::vector<PrimitivePiece> pieces;
+        bool splitStripsAtState(const uint8_t *rdram, uint32_t from, uint32_t to, const std::vector<uint32_t> &words,
+                                const std::vector<std::pair<uint32_t, uint32_t>> &positions, const Mesh &whole, std::vector<PrimitivePiece> &out);
+        void emitPrimitivePieces(uint8_t *rdram);
+        size_t vifLengthAny(const uint32_t *w, uint32_t cycle);
+        void slot29TakenIn(uint32_t from, uint32_t to);
         void primitiveEndImpl(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, PS2Runtime::RecompiledFunction original, uint32_t function,
                               std::vector<OpenCall> &open);
         void primitiveEnd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) { primitiveEndImpl(rdram, ctx, runtime, g_primitiveEnd, kPrimitiveEnd, g_openPrimitiveEnds); }
@@ -4198,8 +4221,11 @@ namespace nr
         {
             // (TODO 127: an end that stopped part-way - in its padding loop - is finished where it is entered again: OpenCall.)
             OpenCall call;
+            static int endLog0 = std::getenv("TF_NATIVE_PRIMENDLOG") ? std::atoi(std::getenv("TF_NATIVE_PRIMENDLOG")) : 0;
             if (!openCall(ctx, function, 0u, open, call))
             {
+                if (endLog0 > 0 && endLog0--)
+                    std::fprintf(stderr, "[native render] primend fn %08x: entered at %08x with no record\n", function, ctx->pc);
                 original(rdram, ctx, runtime);
                 return;
             }
@@ -4211,7 +4237,11 @@ namespace nr
             forceStop(ctx, runtime, function, 8u);
             original(rdram, ctx, runtime);
             if (!closeCall(ctx, open, call))
+            {
+                if (endLog0 > 0 && endLog0--)
+                    std::fprintf(stderr, "[native render] primend fn %08x: stopped part-way\n", function);
                 return;
+            }
             const uint32_t self = call.a0;
             const uint32_t from = call.packet;
             auto it = g_primitives.find(self);
@@ -4230,9 +4260,12 @@ namespace nr
                     return;
                 const uint32_t to = word(rdram, kPacketPointer);
                 thread_local std::vector<uint32_t> words;
+                thread_local std::vector<std::pair<uint32_t, uint32_t>> positions; // (its tags: where a split can start)
                 words.clear();
-                if (!gatherList(rdram, from, to, words))
+                positions.clear();
+                if (!gatherList(rdram, from, to, words, &positions))
                     return;
+                slot29TakenIn(from, to);
                 auto strips = std::make_shared<Mesh>();
                 // (TF_NATIVE_STRIPLOG=<count>[,<from tick>]: the first strip primitives' words decoded, from that VBlank on.)
                 static int stripLog = std::getenv("TF_NATIVE_STRIPLOG") ? std::atoi(std::getenv("TF_NATIVE_STRIPLOG")) : 0;
@@ -4249,38 +4282,186 @@ namespace nr
                     std::fprintf(stderr, "[native render] strip primitive %08x: list %08x..%08x, %zu words\n", self, from, to, words.size());
                 }
                 decodePrimitiveStrips(words.data(), words.size(), *strips, dump);
+                {
+                    static int endLog = std::getenv("TF_NATIVE_PRIMENDLOG") ? std::atoi(std::getenv("TF_NATIVE_PRIMENDLOG")) : 0;
+                    if (endLog > 0)
+                    {
+                        --endLog;
+                        size_t natives = 0;
+                        for (const Frame::NativeWrite &w : g_frame.nativeRegs)
+                            natives += (w.at >= (from & 0x1FFFFFFFu) && w.at < (to & 0x1FFFFFFFu)) ? 1u : 0u;
+                        std::fprintf(stderr, "[native render] primend %08x (fn %08x, tick %llu, draw %zu): list %08x..%08x, %zu words, %zu indices, %zu natives inside\n",
+                                     self, function, static_cast<unsigned long long>(g_curTick), g_frame.draws.size(), from, to, words.size(),
+                                     strips->indices.size(), natives);
+                    }
+                }
                 if (strips->indices.empty())
                     return;
                 strips->hasUv = true;
+                if (splitStripsAtState(rdram, from, to, words, positions, *strips, pieces))
+                {
+                    emitPrimitivePieces(rdram);
+                    return;
+                }
                 mesh = std::move(strips);
             }
+            pieces.clear();
+            pieces.push_back({std::move(mesh), word(rdram, kPacketPointer)});
+            emitPrimitivePieces(rdram);
+        }
+
+        // (TODO 270) A microcode primitive's strips as the GS draws them: each with the state it was kicked with.
+        // The strips' end (0x220350) reads the list from where the draws before stopped (g_packetEnd) to its own end, so
+        // any strip packets other code wrote into the list in between - with no end of their own (Deep Amazon's temple
+        // torch: its eight flame quads, written by 0x4B1C90's caller with a state block applied before each, then the
+        // sparks' quad through 0x220350 with the sparks' block) - came out as one draw with the state the list held at
+        // the end: the flame quads drawn with the sparks' texture (the white starburst: the flickering white blocks).
+        // Here the stretch is cut where the state changes inside it - a native function's register write
+        // (Frame::nativeRegs: its `at`) or a GIF packet of the list's own (VIF DIRECT, a state block's REF with the native
+        // device functions off) - each part that has strips its own draw, its own stretch of the list before it, and the
+        // native writes from that place on moved to come before the draws after it. Only when the parts' strips add up to
+        // the whole's, vertex for vertex (else the one draw, as before). TF_NATIVE_STRIPSPLIT=0: the one draw, as before;
+        // TF_NATIVE_STRIPSPLITLOG=<n>: the first n splits logged.
+        bool sameVertices(const std::vector<Vertex> &a, size_t at, const std::vector<Vertex> &b)
+        {
+            if (at + b.size() > a.size())
+                return false;
+            for (size_t i = 0; i < b.size(); ++i)
+            {
+                const Vertex &p = a[at + i], &q = b[i];
+                if (p.x != q.x || p.y != q.y || p.z != q.z || p.colour != q.colour || p.u != q.u || p.v != q.v)
+                    return false;
+            }
+            return true;
+        }
+
+        bool splitStripsAtState(const uint8_t *rdram, uint32_t from, uint32_t to, const std::vector<uint32_t> &words,
+                                const std::vector<std::pair<uint32_t, uint32_t>> &positions, const Mesh &whole, std::vector<PrimitivePiece> &out)
+        {
+            static const bool off = std::getenv("TF_NATIVE_STRIPSPLIT") && *std::getenv("TF_NATIVE_STRIPSPLIT") == '0';
+            if (off || positions.size() < 2u)
+                return false;
+            constexpr uint32_t kMask = 0x1FFFFFFFu;
+            const uint32_t lo = from & kMask, hi = to & kMask;
+            // Where the state changes inside the stretch: the native writes made since the last draw...
+            thread_local std::vector<uint32_t> cuts;
+            cuts.clear();
+            const uint32_t before = static_cast<uint32_t>(g_frame.draws.size());
+            for (size_t i = g_frame.nativeRegs.size(); i-- > 0 && g_frame.nativeRegs[i].before == before;)
+                if (g_frame.nativeRegs[i].at > lo && g_frame.nativeRegs[i].at < hi)
+                    cuts.push_back(g_frame.nativeRegs[i].at);
+            // ...and the list's own GIF packets (DIRECT / DIRECTHL), at the tag they come under.
+            uint32_t cycle = 0x0103u; // (CL 3, WL 1: as decodePrimitiveStrips takes the cycle the game leaves set)
+            size_t p = 0;
+            for (size_t i = 0; i < words.size();)
+            {
+                const uint32_t code = words[i], cmd = (code >> 24) & 0x7Fu;
+                if (cmd == 0x01u)
+                    cycle = code & 0xFFFFu;
+                else if (cmd == 0x50u || cmd == 0x51u)
+                {
+                    while (p + 1u < positions.size() && positions[p + 1u].first <= i)
+                        ++p;
+                    const uint32_t tag = positions[p].second & kMask;
+                    if (tag > lo && tag < hi)
+                        cuts.push_back(tag);
+                }
+                i += std::max<size_t>(1u, vifLengthAny(words.data() + i, cycle));
+            }
+            if (cuts.empty())
+                return false;
+            std::sort(cuts.begin(), cuts.end());
+            cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
+            // Each cut must be a tag of the list's own level (where a gather can start), its address as the list has it.
+            thread_local std::vector<uint32_t> starts;
+            starts.clear();
+            starts.push_back(from);
+            for (const uint32_t c : cuts)
+            {
+                auto it = std::find_if(positions.begin(), positions.end(), [&](const std::pair<uint32_t, uint32_t> &q) { return (q.second & kMask) == c; });
+                if (it == positions.end())
+                    return false;
+                starts.push_back(it->second);
+            }
+            // The parts, decoded alone; their vertices must be the whole's, in order.
+            out.clear();
+            size_t vertices = 0, indices = 0;
+            for (size_t s = 0; s < starts.size(); ++s)
+            {
+                const uint32_t end = s + 1u < starts.size() ? starts[s + 1u] : to;
+                thread_local std::vector<uint32_t> partWords;
+                partWords.clear();
+                if (!gatherList(rdram, starts[s], end, partWords))
+                    return false;
+                auto part = std::make_shared<Mesh>();
+                decodePrimitiveStrips(partWords.data(), partWords.size(), *part, nullptr);
+                if (!sameVertices(whole.vertices, vertices, part->vertices))
+                    return false;
+                vertices += part->vertices.size();
+                indices += part->indices.size();
+                if (part->indices.empty())
+                    continue; // (no strips of its own: its stretch goes with the next part's)
+                part->hasUv = true;
+                out.push_back({std::move(part), end});
+            }
+            if (vertices != whole.vertices.size() || indices != whole.indices.size() || out.size() < 2u)
+                return false;
+            static int log = std::getenv("TF_NATIVE_STRIPSPLITLOG") ? std::atoi(std::getenv("TF_NATIVE_STRIPSPLITLOG")) : 0;
+            if (log > 0)
+            {
+                --log;
+                std::fprintf(stderr, "[native render] strips %08x..%08x (tick %llu, draw %u): %zu draws at %zu state changes\n", from, to,
+                             static_cast<unsigned long long>(g_curTick), before, out.size(), cuts.size());
+            }
+            return true;
+        }
+
+        // The pieces as draws, in order: each after the list up to its end (its own packet goes through the VU image - the
+        // routine's data, the table - as the GS's draws of it come after); the native writes made inside a later piece's
+        // stretch moved to come before that piece's draw.
+        void emitPrimitivePieces(uint8_t *rdram)
+        {
             CaptureTimer timer;
-            mesh->id = g_nextId++;
-            // The list up to the primitive's end: its own packet goes through the VU image (the
-            // routine's data, the table), as the GS's draws of it come after.
-            const uint32_t after = word(rdram, kPacketPointer);
-            trackUpTo(rdram, after);
-            g_packetEnd = after;
-            Draw d;
-            d.mesh = mesh;
-            d.fromList = true;
-            if (framesDeferred() || !fieldAMatrix(d.matrix))
-                std::memcpy(d.matrix, g_matrix, sizeof(g_matrix));
-            d.camera = view_turn::cameraIndex();
-            if (framesDeferred())
+            const uint32_t first = static_cast<uint32_t>(g_frame.draws.size());
+            thread_local std::vector<uint32_t> ends; // (the pieces drawn: where their stretches end)
+            ends.clear();
+            for (PrimitivePiece &piece : pieces)
             {
-                d.needsShader = true;
-                d.listEnd = static_cast<uint32_t>(g_frame.list.size());
+                piece.mesh->id = g_nextId++;
+                trackUpTo(rdram, piece.end);
+                g_packetEnd = piece.end;
+                Draw d;
+                d.mesh = std::move(piece.mesh);
+                d.fromList = true;
+                if (framesDeferred() || !fieldAMatrix(d.matrix))
+                    std::memcpy(d.matrix, g_matrix, sizeof(g_matrix));
+                d.camera = view_turn::cameraIndex();
+                if (framesDeferred())
+                {
+                    d.needsShader = true;
+                    d.listEnd = static_cast<uint32_t>(g_frame.list.size());
+                }
+                else
+                {
+                    snapshotShader(d.shader);
+                    applyListState(rdram, d);
+                    finishDrawImpl(d);
+                    if (!d.mesh)
+                        continue;
+                }
+                g_frame.draws.push_back(std::move(d));
+                ends.push_back(piece.end & 0x1FFFFFFFu);
             }
-            else
-            {
-                snapshotShader(d.shader);
-                applyListState(rdram, d);
-                finishDrawImpl(d);
-                if (!d.mesh)
-                    return;
-            }
-            g_frame.draws.push_back(std::move(d));
+            pieces.clear();
+            if (ends.size() > 1u)
+                for (size_t i = g_frame.nativeRegs.size(); i-- > 0 && g_frame.nativeRegs[i].before == first;)
+                {
+                    Frame::NativeWrite &w = g_frame.nativeRegs[i];
+                    uint32_t passed = 0; // (the pieces whose stretches end at or before it: it comes after their draws)
+                    while (passed < ends.size() && ends[passed] <= w.at)
+                        ++passed;
+                    w.before = first + passed;
+                }
         }
 
         // The FFT ocean (vlxWaterEffect::Render, Pacific Island and Mid-Atlantic): never a geometry set
@@ -4683,6 +4864,105 @@ namespace nr
             g_textureDestructor(rdram, ctx, runtime);
         }
 
+        // (TODO 295) The render device's own primitive (slot 29, vlRenderDevicePS2 0x00256280: device, type 0-11, data,
+        // count) - the effects' animated quads (FXB "Animated Quad": Deep Amazon's temple torch flames) - writes its VU1
+        // packet into the list itself (the shaders' contexts, the strips' UNPACKs and MSCNT into the routine the table
+        // holds) with no microcode primitive's end: the native renderer drew such quads only where a strips end that
+        // followed in the same stretch took them in (TODO 270: splitStripsAtState), else never. Here each call's own words
+        // (the packet pointer before -> after) are read as a microcode primitive's strips are and drawn as one draw of
+        // their own (after the list up to its end: the state blocks the caller applied before it, the list's GS state);
+        // a call whose words are no strips draws nothing, as before. Stopped part-way: finished where it is entered again
+        // (OpenCall). TF_NATIVE_DEVICEPRIM=0: not drawn (as before - the split then takes in what a strips end follows).
+        // (Debug: TF_NATIVE_SLOT29LOG=<frames>: per frame, the calls that wrote words, how many were drawn - their own or
+        // taken in by a strips end - how many no draw read, and how many decode as strips.)
+        constexpr uint32_t kDevicePrimitive = 0x00256280u, kDevicePrimitiveEnd = 0x00256AB4u, kDevicePrimitiveFrame = 0x300u;
+        PS2Runtime::RecompiledFunction g_slot29 = nullptr;
+        std::vector<OpenCall> g_openDevicePrimitives;
+        std::vector<std::pair<uint32_t, uint32_t>> g_slot29Spans; // (this frame's: where each call's words begin, 1 = drawn)
+        int g_slot29Log = 0;
+        uint64_t g_slot29Decoded = 0, g_slot29Tris = 0, g_slot29Draws = 0;
+        bool devicePrimitivesDrawn()
+        {
+            static const bool off = std::getenv("TF_NATIVE_DEVICEPRIM") && *std::getenv("TF_NATIVE_DEVICEPRIM") == '0';
+            return !off;
+        }
+        void slot29(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            OpenCall call;
+            if (!openCall(ctx, kDevicePrimitive, kDevicePrimitiveFrame, g_openDevicePrimitives, call))
+            {
+                g_slot29(rdram, ctx, runtime);
+                return;
+            }
+            if (ctx->pc == kDevicePrimitive)
+            {
+                resolveListStart(rdram);
+                call.packet = word(rdram, kPacketPointer); // (where its own words begin)
+            }
+            g_slot29(rdram, ctx, runtime);
+            if (!closeCall(ctx, g_openDevicePrimitives, call))
+                return;
+            const uint32_t from = call.packet, to = word(rdram, kPacketPointer);
+            if (!from || (to & 0x1FFFFFFFu) == (from & 0x1FFFFFFFu))
+                return;
+            const bool logged = g_slot29Log > 0;
+            if (logged)
+                g_slot29Spans.push_back({from & 0x1FFFFFFFu, 0u});
+            if (!logged && !devicePrimitivesDrawn())
+                return;
+            thread_local std::vector<uint32_t> words;
+            thread_local std::vector<std::pair<uint32_t, uint32_t>> positions;
+            words.clear();
+            positions.clear();
+            if (!gatherList(rdram, from, to, words, &positions))
+                return;
+            auto strips = std::make_shared<Mesh>();
+            decodePrimitiveStrips(words.data(), words.size(), *strips, nullptr);
+            if (strips->indices.empty())
+                return;
+            g_slot29Decoded += 1u;
+            g_slot29Tris += strips->indices.size() / 3u;
+            if (!devicePrimitivesDrawn())
+                return;
+            strips->hasUv = true;
+            strips->devicePrimitive = true;
+            if (!splitStripsAtState(rdram, from, to, words, positions, *strips, pieces))
+            {
+                pieces.clear();
+                pieces.push_back({std::move(strips), to});
+            }
+            for (PrimitivePiece &p : pieces)
+                p.mesh->devicePrimitive = true;
+            g_slot29Draws += pieces.size();
+            emitPrimitivePieces(rdram);
+            if (logged)
+                g_slot29Spans.back().second = 1u;
+        }
+        void slot29TakenIn(uint32_t from, uint32_t to)
+        {
+            for (auto &s : g_slot29Spans)
+                if (s.first >= (from & 0x1FFFFFFFu) && s.first < (to & 0x1FFFFFFFu))
+                    s.second = 1u;
+        }
+        void slot29EndFrame(uint64_t tick)
+        {
+            if (g_slot29Log <= 0 || !g_slot29)
+                return;
+            if (!g_slot29Spans.empty())
+            {
+                --g_slot29Log;
+                size_t taken = 0;
+                for (const auto &s : g_slot29Spans)
+                    taken += s.second;
+                std::fprintf(stderr, "[native render] slot 29 (tick %llu): %zu calls wrote words, %zu drawn (%llu draws of their own, or taken in by a "
+                                     "strips end), %zu drawn by nothing; %llu decode as strips (%llu triangles)\n",
+                             static_cast<unsigned long long>(tick), g_slot29Spans.size(), taken, static_cast<unsigned long long>(g_slot29Draws),
+                             g_slot29Spans.size() - taken, static_cast<unsigned long long>(g_slot29Decoded), static_cast<unsigned long long>(g_slot29Tris));
+            }
+            g_slot29Spans.clear();
+            g_slot29Decoded = g_slot29Tris = g_slot29Draws = 0;
+        }
+
         // TF_NATIVE_COUNT=1: how often the device's other drawing functions run (calls a frame).
         struct Counted
         {
@@ -4872,9 +5152,31 @@ namespace nr
                 trackUpTo(rdram, word(rdram, kPacketPointer));
             }
             g_packetEnd = 0u;
+            slot29EndFrame(runtime ? runtime->eeScheduler().currentVSyncTick() : 0u);
             g_endFrame(rdram, ctx, runtime);
             // (N9: the frame's camera, for the camera's turn of each of its pictures - view_turn.h)
             g_frame.turnCamera = view_turn::endFrame(rdram, runtime ? runtime->eeScheduler().currentVSyncTick() : 0u);
+            {
+                // (TODO 108 S2, a measuring aid: TF_NATIVE_SUNLOG=<ticks> - every that many VBlanks the direction to the sun as the
+                // game keeps it (taVisualEnvironmentState::GetSunDirection, 0x4C8010: [0x6CFA40] + 0x60 when set, else the sky
+                // [0x6CFA68] + 0x30), in the world. Measured: Amazon 0.227 -0.785 0.576, Deep Amazon 0.187 -0.913 0.362,
+                // Antarctica 0 0 1, the HQ 0 -0.707 0.707, constant over a level. The lit meshes get it in the screen
+                // transform's space as their light L1 (TF_NATIVE_LIGHTLOG).)
+                static const uint64_t sunLog = std::getenv("TF_NATIVE_SUNLOG") ? std::strtoull(std::getenv("TF_NATIVE_SUNLOG"), nullptr, 10) : 0u;
+                static uint64_t sunLast = 0u;
+                const uint64_t tickNow = runtime ? runtime->eeScheduler().currentVSyncTick() : 0u;
+                if (sunLog && tickNow >= sunLast + sunLog)
+                {
+                    sunLast = tickNow;
+                    const uint32_t env = word(rdram, 0x006CFA40u), sky = word(rdram, 0x006CFA68u);
+                    const uint32_t at = env ? env + 0x60u : sky ? sky + 0x30u : 0u;
+                    float dir[4] = {};
+                    if (const uint8_t *pd = at ? getConstMemPtr(rdram, at) : nullptr)
+                        std::memcpy(dir, pd, sizeof(dir));
+                    std::fprintf(stderr, "[native render] sun at tick %llu: world %.3f %.3f %.3f (from %s %08x)\n", static_cast<unsigned long long>(tickNow),
+                                 dir[0], dir[1], dir[2], env ? "env" : "sky", at);
+                }
+            }
             // (Debug: TF_NATIVE_GSDUMP=<tick>,<tbp hex>,<tbw>,<psm hex>,<w>,<h>: that region of GS memory as
             // gsdump_<tick>.ppm at the end of the frames from <tick> to <tick> + 3.)
             static const std::array<uint32_t, 6> gsDump = [] {
@@ -5539,6 +5841,9 @@ namespace nr
         // and the DMA chain of any that does not read.)
         static const uint64_t rangeLog = std::getenv("TF_NATIVE_RANGELOG") ? std::strtoull(std::getenv("TF_NATIVE_RANGELOG"), nullptr, 10) : 0u;
         const bool logRanges = rangeLog && frame.tick >= rangeLog && frame.tick < rangeLog + 2u;
+        static const uint64_t ordLogTick = std::getenv("TF_NATIVE_ORDLOG") ? std::strtoull(std::getenv("TF_NATIVE_ORDLOG"), nullptr, 10) : 0u;
+        const bool ordWindow = ordLogTick && frame.tick >= ordLogTick && frame.tick < ordLogTick + 3u;
+        gif::t_logWindow = !ordLogTick || ordWindow;
         // (N5.3) The native functions' registers (Frame::nativeRegs): applied to the list's state where their packet would
         // have been - before the first of the list's own tags at or after the place the function ran (`at`), and at the
         // latest before the draw they come before.
@@ -5551,6 +5856,10 @@ namespace nr
             while (nw < frame.nativeRegs.size() && frame.nativeRegs[nw].before <= beforeDraw && frame.nativeRegs[nw].at <= upToAt)
             {
                 const Frame::NativeWrite &w = frame.nativeRegs[nw++];
+                if (ordWindow)
+                    std::fprintf(stderr, "[native render] order: native %zu reg %02x value %016llx before %u at %08x - applied at %08x / draw %u (writes %llu)\n",
+                                 nw - 1u, w.reg, static_cast<unsigned long long>(w.value), w.before, w.at, upToAt, beforeDraw,
+                                 static_cast<unsigned long long>(g_gif.writes));
                 if (w.reg == kNativeBlock)
                 {
                     // (a state block applied natively: its GIF packet, from guest memory as the list's REF of it was read)
@@ -5805,6 +6114,9 @@ namespace nr
                     // (N5.3: the native functions' registers before them too - the state the pipelines' packets draw with)
                     if (nw < frame.nativeRegs.size() && t_kickWord)
                         applyNative(listAt(t_kickWord), readingBefore);
+                    if (ordWindow)
+                        std::fprintf(stderr, "[native render] order: particle kick under tag %08x, %zu qwords (writes %llu)\n",
+                                     t_kickWord ? listAt(t_kickWord) : 0u, qwords, static_cast<unsigned long long>(g_gif.writes));
                     gif::t_offList = true; // (TF_NATIVE_TEX0LOG: the particle pipelines' own packets)
                     struct OffList { ~OffList() { gif::t_offList = false; } } offList;
                     gif::run(g_gif, w, qwords, [&](const gif::Primitives &p) {
@@ -5990,9 +6302,16 @@ namespace nr
                     // (Debug, TODO 270: TF_NATIVE_DRAWTBP=<tbp hex>, with TF_NATIVE_ORDLOG: the draws whose TEX0 has that TBP)
                     static const uint64_t ordTick = std::getenv("TF_NATIVE_ORDLOG") ? std::strtoull(std::getenv("TF_NATIVE_ORDLOG"), nullptr, 10) : 0u;
                     static const uint32_t drawTbp = std::getenv("TF_NATIVE_DRAWTBP") ? static_cast<uint32_t>(std::strtoul(std::getenv("TF_NATIVE_DRAWTBP"), nullptr, 16)) : 0xFFFFFFFFu;
-                    if (ordTick && frame.tick >= ordTick && frame.tick < ordTick + 3u && (static_cast<uint32_t>(d.tex0) & 0x3FFFu) == drawTbp)
-                        std::fprintf(stderr, "[native render] order: draw %zu tick %llu tex0 %016llx (writes %llu)\n", k, static_cast<unsigned long long>(frame.tick),
-                                     static_cast<unsigned long long>(d.tex0), static_cast<unsigned long long>(regs.writes));
+                    static const uint32_t drawTbp2 = [] {
+                        const char *e = std::getenv("TF_NATIVE_DRAWTBP");
+                        const char *comma = e ? std::strchr(e, ',') : nullptr;
+                        return comma ? static_cast<uint32_t>(std::strtoul(comma + 1, nullptr, 16)) : 0xFFFFFFFFu;
+                    }();
+                    const uint32_t tbp = static_cast<uint32_t>(d.tex0) & 0x3FFFu;
+                    if (ordTick && frame.tick >= ordTick && frame.tick < ordTick + 3u && (tbp == drawTbp || tbp == drawTbp2))
+                        std::fprintf(stderr, "[native render] order: draw %zu tick %llu tex0 %016llx alpha %llx%s (writes %llu)\n", k, static_cast<unsigned long long>(frame.tick),
+                                     static_cast<unsigned long long>(d.tex0), static_cast<unsigned long long>(d.alpha),
+                                     d.mesh && d.mesh->primitive ? " primitive" : "", static_cast<unsigned long long>(regs.writes));
                 }
                 // The dash's after-image (0x2220, TODO 69): the game writes TEX0_1, ALPHA_1 (0x44, the
                 // usual blend) and TEST_1 (0x7001b) into the list itself (VIF DIRECT, after the set's state
@@ -6017,8 +6336,47 @@ namespace nr
                 else if (!d.fromList)
                     listOverrides(d, regsWritesBefore, regs);
                 t_logPrimitives = logRanges;
+                const bool devicePrimitive = d.mesh && d.mesh->devicePrimitive;
                 finishDrawImpl(d);
                 t_logPrimitives = false;
+                {
+                    // (Debug, TODO 295: TF_NATIVE_DEVPRIMLOG=<n>[,<from tick>]: the first n draws of the render device's own
+                    // primitive - their state, routines and where their vertices land)
+                    static int devLog = std::getenv("TF_NATIVE_DEVPRIMLOG") ? std::atoi(std::getenv("TF_NATIVE_DEVPRIMLOG")) : 0;
+                    static const uint64_t devFrom = [] {
+                        const char *e = std::getenv("TF_NATIVE_DEVPRIMLOG");
+                        const char *comma = e ? std::strchr(e, ',') : nullptr;
+                        return comma ? std::strtoull(comma + 1, nullptr, 10) : 0ull;
+                    }();
+                    if (devicePrimitive && devLog > 0 && frame.tick >= devFrom)
+                    {
+                        --devLog;
+                        float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f, w0 = 1e9f;
+                        uint32_t aMax = 0u;
+                        float replayed[16];
+                        static const bool useReplayed = std::getenv("TF_NATIVE_DEVPRIMLOG_REPLAYED") != nullptr;
+                        const bool haveReplayed = fieldAMatrix(replayed);
+                        if (d.mesh)
+                            for (const Vertex &v : d.mesh->vertices)
+                            {
+                                const float *m = useReplayed && haveReplayed ? replayed : d.matrix;
+                                float sc[4];
+                                for (int r4 = 0; r4 < 4; ++r4)
+                                    sc[r4] = m[r4] * v.x + m[4 + r4] * v.y + m[8 + r4] * v.z + m[12 + r4];
+                                w0 = std::min(w0, sc[3]);
+                                if (sc[3] != 0.0f)
+                                    x0 = std::min(x0, sc[0] / sc[3]), x1 = std::max(x1, sc[0] / sc[3]), y0 = std::min(y0, sc[1] / sc[3]), y1 = std::max(y1, sc[1] / sc[3]);
+                                aMax = std::max(aMax, v.colour >> 24);
+                            }
+                        std::fprintf(stderr, "[native render] device primitive draw %zu (tick %llu): %s, %zu vertices, prim %x, routines %u (%04x %d), target %08x "
+                                             "tex0 %016llx alpha %llx test %llx texture %d, gs x %g..%g y %g..%g min w %g, vertex alpha max %u; origin %g,%g scissor %g..%g x %g..%g\n",
+                                     k, static_cast<unsigned long long>(frame.tick), d.mesh ? "drawn" : "LEFT OUT", d.mesh ? d.mesh->vertices.size() : 0u,
+                                     d.mesh ? d.mesh->prim : 0u, d.shader.count, d.shader.count ? d.shader.address[0] : 0u,
+                                     d.shader.count ? static_cast<int>(d.shader.routine[0]) : -1, d.target, static_cast<unsigned long long>(d.tex0),
+                                     static_cast<unsigned long long>(d.alpha), static_cast<unsigned long long>(d.test), d.texture != nullptr, x0, x1, y0,
+                                     y1, w0, aMax, d.originX, d.originY, d.scissor[0], d.scissor[2], d.scissor[1], d.scissor[3]);
+                    }
+                }
                 if (!d.mesh)
                     continue; // (a microcode primitive this renderer does not draw)
             }
@@ -6323,7 +6681,9 @@ namespace nr
             const std::string chosen = ps2_settings::choice("TF_RENDERER");
             if (chosen == "native" && !std::getenv("TF_NATIVE_RENDER"))
             {
-                const char *vars[][2] = {{"TF_NATIVE_RENDER", "1"}, {"TF_NATIVE_LIVE", "1"}, {"TF_NATIVE_ONLY", "1"}};
+                // (TF_NATIVE_FROM_SETTINGS: these four are the settings' - a process started again from this one makes them
+                // anew, main.cpp, TODO 294)
+                const char *vars[][2] = {{"TF_NATIVE_RENDER", "1"}, {"TF_NATIVE_LIVE", "1"}, {"TF_NATIVE_ONLY", "1"}, {"TF_NATIVE_FROM_SETTINGS", "1"}};
                 for (const auto &v : vars)
                     if (!std::getenv(v[0]))
                     {
@@ -6335,6 +6695,30 @@ namespace nr
                     }
                 std::fprintf(stderr, "[native render] the settings choose the native renderer\n");
             }
+        }
+        // (TODO 287) How the native renderer hands its pictures to the window (TF_PACING, nr_pace.cpp; takes a restart): Off
+        // (paced, the default) holds each picture to a steady delay after its frame's moment, so they come evenly; On (ready)
+        // shows each as soon as it is drawn - measured riding the jet bike at forest x4: 5 to 13 ms less delay, the pictures'
+        // spacing less even (1% low about 40% lower).
+        {
+            ps2_settings::Setting s;
+            s.key = "TF_PACING";
+            s.section = "Display";
+            s.label = "Low-latency pacing";
+            s.order = 26;
+            s.help = "Native renderer: shows each picture as soon as it is drawn instead of holding it for an even rhythm. "
+                     "The game answers your controls a little sooner (5 to 13 ms in a busy scene), but the pictures come "
+                     "less evenly, so it can look less smooth, most of all when the frame rate is below your screen's "
+                     "refresh. Best with a FreeSync or G-Sync screen. Takes a restart.";
+            s.choices = {{"paced", "Off"}, {"ready", "On"}};
+            s.defaultValue = "paced";
+            s.apply = [](const std::string &) { return false; }; // (takes a restart: nr::pace::mode reads it once)
+            s.available = []() {
+                const char *on = std::getenv("TF_NATIVE_RENDER");
+                return ps2_settings::choice("TF_RENDERER") == "native" || (on && *on && *on != '0');
+            };
+            s.unavailableHelp = "Only for the native renderer (Display: Renderer).";
+            ps2_settings::add(s);
         }
         // Its anti-aliasing (TF_NATIVE_AA, live): FXAA over the 3D before the HUD and menus are drawn.
         {
@@ -6354,9 +6738,9 @@ namespace nr
             };
             s.available = []() {
                 const char *on = std::getenv("TF_NATIVE_RENDER");
-                return ps2_settings::choice("TF_RENDERER") == "native" || (on && *on && *on != '0');
+                return (ps2_settings::choice("TF_RENDERER") == "native" || (on && *on && *on != '0')) && !taa::upscalerOn();
             };
-            s.unavailableHelp = "Only for the native renderer (Display: Renderer).";
+            s.unavailableHelp = "Only for the native renderer (Display: Renderer). With the Upscaler on FSR 3 / 4, FSR smooths the edges itself.";
             ps2_settings::add(s);
         }
         // (TODO 108) Its modern bloom (TF_NATIVE_BLOOM, live, off by default - the game's own glow is the faithful look).
@@ -6501,9 +6885,9 @@ namespace nr
             };
             s.available = []() {
                 const char *on = std::getenv("TF_NATIVE_RENDER");
-                return ps2_settings::choice("TF_RENDERER") == "native" || (on && *on && *on != '0');
+                return (ps2_settings::choice("TF_RENDERER") == "native" || (on && *on && *on != '0')) && !taa::upscalerOn();
             };
-            s.unavailableHelp = "Only for the native renderer (Display: Renderer).";
+            s.unavailableHelp = "Only for the native renderer (Display: Renderer). Not with the Upscaler on FSR 3 / 4.";
             ps2_settings::add(s);
         }
         // Its render scale (TF_NATIVE_RENDER_SCALE, live, 100% by default): fewer lines than the window's, shown enlarged.
@@ -6522,6 +6906,68 @@ namespace nr
             s.defaultValue = "100";
             s.apply = [](const std::string &value) {
                 frame::setRenderScale(std::atoi(value.c_str()));
+                return true;
+            };
+            s.available = []() {
+                const char *on = std::getenv("TF_NATIVE_RENDER");
+                return ps2_settings::choice("TF_RENDERER") == "native" || (on && *on && *on != '0');
+            };
+            s.unavailableHelp = "Only for the native renderer (Display: Renderer).";
+            ps2_settings::add(s);
+        }
+        // Its upscaler (TF_NATIVE_UPSCALER, live; TODO 295): how the window enlarges a picture drawn at a render scale under
+        // 100% - FSR 1 (AMD FidelityFX, MIT: EASU + RCAS, nr_present.cpp) or the plain stretch. Nothing changes at 100%.
+        // (TODO 299) FSR 3 / 4 too, where the FidelityFX SDK's DLLs are beside the game (a build with TF_FSR_SDK): the temporal
+        // upscaler (nr_taa.h) - under 100% it upscales, at 100% its anti-aliasing alone. Takes a restart either way.
+        {
+            ps2_settings::Setting s;
+            s.key = "TF_NATIVE_UPSCALER";
+            s.section = "Graphics";
+            s.label = "Upscaler (native renderer)";
+            s.order = 56;
+            s.help = "Native renderer: how a render scale under 100% is enlarged to the window. FSR 1 (AMD FidelityFX) keeps "
+                     "edges and detail sharper than the plain stretch, at a small cost (more on slow processors). Auto: FSR 1 "
+                     "whenever the render scale is under 100%. Bilinear: the plain stretch (the default).";
+            s.choices = {{"auto", "Auto"}, {"bilinear", "Bilinear"}, {"fsr1", "FSR 1"}};
+            s.makeChoices = []() {
+                std::vector<ps2_settings::Choice> c = {{"auto", "Auto"}, {"bilinear", "Bilinear"}, {"fsr1", "FSR 1"}};
+                if (taa::sdkPresent())
+                    c.push_back({"fsr", "FSR 3 / 4"});
+                return c;
+            };
+            s.defaultValue = "bilinear";
+            if (taa::sdkPresent())
+                s.help += " FSR 3 / 4 (AMD FidelityFX, temporal: FSR 4 on Radeon RX 9000, FSR 3 elsewhere): the sharpest picture "
+                          "from a render scale under 100%, and at 100% the best edge smoothing (it replaces Smooth edges). Costs "
+                          "GPU time: for graphics cards, not built-in graphics (there FSR 1 is the better choice). Takes a restart.";
+            s.apply = [](const std::string &value) {
+                // (FSR 3 / 4 sizes the picture and the GS targets at the start: a restart, on or off)
+                if (value == "fsr" || taa::upscalerOn())
+                    return false;
+                frame::setUpscaler(value == "bilinear" ? 0 : value == "auto" ? 1 : 2);
+                return true;
+            };
+            s.available = []() {
+                const char *on = std::getenv("TF_NATIVE_RENDER");
+                return ps2_settings::choice("TF_RENDERER") == "native" || (on && *on && *on != '0');
+            };
+            s.unavailableHelp = "Only for the native renderer (Display: Renderer).";
+            ps2_settings::add(s);
+        }
+        // Its sharpening (TF_NATIVE_SHARPEN, live): Auto sharpens only below render scale 100%, where the enlarged picture
+        // comes out soft - nothing changes at 100%. Drawn in the FXAA pass (the edge filter's default).
+        {
+            ps2_settings::Setting s;
+            s.key = "TF_NATIVE_SHARPEN";
+            s.section = "Graphics";
+            s.label = "Sharpening (native renderer)";
+            s.order = 56;
+            s.help = "Native renderer: brings back the detail a render scale under 100% softens, at almost no cost. "
+                     "Auto: only below 100%. Works with the FXAA edge filter.";
+            s.choices = {{"auto", "Auto"}, {"0", "Off"}, {"1", "On"}};
+            s.defaultValue = "auto";
+            s.apply = [](const std::string &value) {
+                frame::setSharpen(value == "0" ? 0 : value == "auto" ? 1 : 2);
                 return true;
             };
             s.available = []() {
@@ -6661,6 +7107,18 @@ namespace nr
                 g_slotOriginal[i] = wrap(runtime, a, table[static_cast<size_t>(i)]);
                 if (!g_slotOriginal[i])
                     g_slotAddress[i] = 0u;
+            }
+        }
+        {
+            // (TODO 295: the render device's own primitive drawn - slot29)
+            if (const char *e = std::getenv("TF_NATIVE_SLOT29LOG"); e && std::atoi(e) > 0)
+                g_slot29Log = std::atoi(e);
+            if (devicePrimitivesDrawn() || g_slot29Log > 0)
+            {
+                g_slot29 = wrap(runtime, kDevicePrimitive, slot29);
+                static const bool resumeOff = std::getenv("TF_NATIVE_RESUMEWRAP") && *std::getenv("TF_NATIVE_RESUMEWRAP") == '0';
+                if (!resumeOff)
+                    wrapResumePoints(runtime, kDevicePrimitive, kDevicePrimitiveEnd, g_slot29, slot29);
             }
         }
         if (const char *count = std::getenv("TF_NATIVE_COUNT"); count && *count == '1')

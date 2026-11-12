@@ -19,6 +19,8 @@ It uses the components below. Each keeps its own licence.
 | [xxHash](https://github.com/Cyan4973/xxHash) | Yann Collet | BSD-2-Clause | Fast hashing (in a PS2Recomp patch) |
 | [bc7enc](https://github.com/richgel999/bc7enc) | Rich Geldreich | MIT or public domain | Texture compression (`transformers/native_render/ext/bc7enc`) |
 | [SMAA](https://github.com/iryoku/smaa) | Jorge Jimenez and others | MIT-style (see its `LICENSE.txt`) | Anti-aliasing (`transformers/native_render/ext/smaa`) |
+| [FidelityFX CAS](https://github.com/GPUOpen-Effects/FidelityFX-CAS) | Advanced Micro Devices, Inc. | MIT | The sharpening's contrast-adaptive weights, written after it (`aaSharpen` in `transformers/native_render/nr_d3d.cpp`) |
+| [FidelityFX Super Resolution 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) | Advanced Micro Devices, Inc. | MIT | The window's upscaler at render scales under 100% - EASU and RCAS, ported to GLSL (`fsr::kEasu`, `fsr::kRcas` in `transformers/native_render/nr_present.cpp`) |
 | [FFmpeg](https://ffmpeg.org/) | The FFmpeg developers | LGPL-2.1 or later | Movie playback. Shared libraries (DLLs) downloaded during the build and placed beside the game. Source: <https://ffmpeg.org/download.html> |
 
 ## Built into the game with the Vulkan backend
@@ -32,6 +34,16 @@ development.
 | [volk](https://github.com/zeux/volk) | Arseny Kapoulkine | MIT | Loads the system's Vulkan at run time (`vulkan-sdk-1.4.363.0`, fetched) |
 | [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) | The Khronos Group | Apache-2.0 or MIT | The Vulkan API's headers (`vulkan-sdk-1.4.363.0`, fetched) |
 | [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) | Advanced Micro Devices | MIT | Video memory sub-allocation (`v3.4.0`, header only, fetched) |
+
+## Built into the game with the FidelityFX SDK (temporal upscaler, in development)
+
+Only in a build made with `build.ps1 -FsrSdk` (`-DTF_FSR_SDK=ON`); off by default and in every release while the
+temporal upscaler (TODO 299) is in development.
+
+| Component | Author | Licence | How it is used |
+|---|---|---|---|
+| [FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) API headers | Advanced Micro Devices, Inc. | MIT | The SDK's API (`transformers/native_render/ext/fidelityfx`) |
+| FidelityFX SDK signed DLLs (`amd_fidelityfx_loader_dx12.dll`, `amd_fidelityfx_upscaler_dx12.dll`: FSR 3.1 / FSR 4) | Advanced Micro Devices, Inc. | AMD's binary licence (`Kits/FidelityFX/docs/license.md` in the SDK: redistribution in binary form, no reverse engineering, its notices kept) | Downloaded during the build (release v2.4.0, SHA-256 checked) and placed beside the game; never in this repository |
 
 ## Build tools
 

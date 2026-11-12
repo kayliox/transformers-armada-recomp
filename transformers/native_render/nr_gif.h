@@ -13,6 +13,8 @@ namespace nr::gif
     // (Debug, TODO 270) Set while the renderer's thread applies a write that does not come from the list's own words (the
     // native device functions' registers, the particle pipelines' packets): TF_NATIVE_TEX0LOG tells them apart.
     extern thread_local bool t_offList;
+    // (Debug, TODO 270) False outside TF_NATIVE_ORDLOG's frames when that is set: TF_NATIVE_TEX0LOG logs those frames only.
+    extern thread_local bool t_logWindow;
     // Triangles (three vertices each, GS pixels, Z / 16) drawn with one state.
     struct Primitives
     {

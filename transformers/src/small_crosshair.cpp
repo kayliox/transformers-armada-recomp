@@ -124,10 +124,12 @@ namespace small_crosshair
                                  ps2_host_display::displayAspect(), x, y))
             return;
         // TF_XHAIR_LOG=1 (tests): where the cross is, once a second, as a share of the window
-        if (static const bool log = std::getenv("TF_XHAIR_LOG") != nullptr; log)
+        // (TODO 292 B: TF_XHAIR_LOG=<ms> that often instead)
+        if (static const double every = std::getenv("TF_XHAIR_LOG") ? (std::atof(std::getenv("TF_XHAIR_LOG")) > 1.0 ? std::atof(std::getenv("TF_XHAIR_LOG")) / 1000.0 : 1.0) : -1.0;
+            every > 0.0)
         {
             static double last = 0.0;
-            if (GetTime() - last >= 1.0)
+            if (GetTime() - last >= every)
             {
                 last = GetTime();
                 std::fprintf(stderr, "[crosshair] at %.3f, %.3f of the window\n", x / static_cast<float>(GetScreenWidth()),

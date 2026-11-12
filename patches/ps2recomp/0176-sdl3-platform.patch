@@ -1,0 +1,2164 @@
+Subject: [PATCH] Runtime: SDL3 as the window and its input, chosen at run time (PS2X_PLATFORM=sdl3)
+
+The window, the keyboard, the mouse and the controllers through SDL3 instead of raylib's GLFW, with raylib staying the
+default: PS2X_PLATFORM=sdl3 (environment or settings.ini; F5 > Display > Window system) in a build with PS2X_SDL3
+(CMake option, off by default: nothing more is fetched or built). The Vulkan track's milestone 5 (the plan's P2), built
+together with milestone 3 (Vulkan presenting the window) since a window without raylib needs its input.
+
+The runtime and the game call raylib for the window, input and the overlays' 2D drawing about 440 times; none of
+those calls change. In a build with PS2X_SDL3, raylib's own definitions of those calls (ps2_raylib_calls.h: the
+window, the monitors, the cursor, keys, mouse, gamepads, the clock, BeginDrawing / EndDrawing, the 2D shapes, text,
+fonts and textures) are compiled as rl_<name> - a forced include on raylib's rcore.c, rshapes.c, rtextures.c and
+rtext.c - and ps2_platform.cpp defines the calls: raylib's own by default, SDL3's under PS2X_PLATFORM=sdl3. The
+linker keeps the two lists in step (a name in one and not the other is defined twice or not at all).
+
+Under SDL3:
+- The window is SDL's, made and pumped on the main thread; raylib's input semantics kept (pressed against the last
+  poll, the queues emptied each poll, the wheel per poll, the exit key, a minimised window's loop waiting).
+- Keys by place (SDL scancodes as raylib's key codes, which name places too); the mouse, relative while captured.
+- Gamepads are SDL_Gamepad (SDL's controller database, Steam Input's virtual pads), read as raylib's (the same buttons
+  by place, triggers as GLFW's -1..1 and as buttons past a tenth). The game's vibration goes to SDL_RumbleGamepad on
+  the pad the game reads (ps2_xinput_rumble.cpp: under SDL3 its motors are SDL's, renewed while they run); the light
+  bar from PS2X_SONYPAD_LIGHTBAR; ps2_platform::gamepadType / gamepadTriggerRumble / gamepadLed for a game's own use.
+  The native DualSense / DualShock 4 code keeps Sony pads' HID unless PS2X_GAMEPAD_BACKEND=glfw (SDL is then told to
+  leave their HID alone, so the two never both write their output reports).
+- No OpenGL: each window picture is one ImGui frame from BeginDrawing to EndDrawing - the picture (DrawTexturePro) and
+  the 2D overlays (text, rectangles, circles, triangles, lines, scissors; raylib's default font is ImGui's default
+  font, a font from LoadFontEx is ImGui's from the same file) in its background draw list, the ImGui panels over them.
+  The overlay host (patch 0175) is SDL3's: imgui_impl_sdl3 feeds ImGui every event, so the game's rlImGui input
+  workarounds stay off.
+- A presenter draws the frame: SDL's renderer by default (it picks Direct3D 11 / 12, Vulkan, Metal or OpenGL; its
+  VSync follows the VSync setting), or one a graphics backend sets before the window is made (ps2_platform::
+  setPresenter: Vulkan presenting the window itself). Textures are the presenter's.
+- The GS's GPU renderer (OpenGL) does not start, nor does the DXGI present (GL interop): the GS's software picture
+  shows what the native renderer does not draw. A native renderer's picture reaches the window as CPU pixels.
+- LoadImageFromScreen gives the last picture presented (PS2X_SHOT_KEEP=1 keeps each one from the start; otherwise
+  from the first request on) - the test shots work in a hidden window.
+- ps2_platform::windowScreenHz(): the refresh rate of the window's screen from SDL's display mode, for pacing where
+  the system gives no vertical blank timing (a Linux host: the linux-port fork's monitor-refresh cap, from the window).
+
+Not changed: a build without PS2X_SDL3 (ps2_platform.cpp then only answers "raylib"), and PS2X_PLATFORM unset in a
+build with it (every call raylib's own).
+
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index c35858e..7ce09b0 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -149,6 +149,47 @@ else()
+         target_link_libraries(rlImGui PUBLIC raylib imgui)
+     endif()
+ 
++    # (The Vulkan track's milestone 3) SDL3 as the window and its input, chosen at run time: PS2X_PLATFORM=sdl3
++    # (ps2_platform.h). Off by default: nothing more is fetched or built. With it, raylib's window, input and 2D calls
++    # are compiled into raylib as rl_<name> (ps2_raylib_calls.h, a forced include on raylib's own sources) and the
++    # runtime answers them (ps2_platform.cpp): raylib's own by default, SDL3's under PS2X_PLATFORM=sdl3.
++    option(PS2X_SDL3 "SDL3 as the window and its input at run time (PS2X_PLATFORM=sdl3)" OFF)
++    if(PS2X_SDL3)
++        if(NOT PS2X_ENABLE_DEBUG_UI OR PS2X_IS_ANDROID)
++            message(FATAL_ERROR "PS2X_SDL3 draws its overlays with the debug UI's ImGui: it needs PS2X_ENABLE_DEBUG_UI")
++        endif()
++        if(NOT TARGET SDL3::SDL3-static)
++            set(SDL_SHARED OFF)
++            set(SDL_STATIC ON)
++            set(SDL_TEST_LIBRARY OFF)
++            set(SDL_TESTS OFF)
++            set(SDL_EXAMPLES OFF)
++            set(SDL_INSTALL OFF)
++            FetchContent_Declare(ps2x_sdl3
++                GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
++                GIT_TAG release-3.4.18
++                GIT_SHALLOW TRUE)
++            FetchContent_MakeAvailable(ps2x_sdl3)
++        endif()
++        add_library(ps2x_imgui_sdl3 STATIC
++            "${PS2X_IMGUI_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp"
++            "${PS2X_IMGUI_SOURCE_DIR}/backends/imgui_impl_sdlrenderer3.cpp")
++        target_include_directories(ps2x_imgui_sdl3 PUBLIC "${PS2X_IMGUI_SOURCE_DIR}")
++        target_link_libraries(ps2x_imgui_sdl3 PUBLIC imgui SDL3::SDL3-static)
++        set(_ps2x_raylib_calls "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/ps2_raylib_calls.h")
++        foreach(_ps2x_rl rcore.c rshapes.c rtextures.c rtext.c)
++            set_property(SOURCE "${raylib_SOURCE_DIR}/src/${_ps2x_rl}" DIRECTORY "${raylib_SOURCE_DIR}/src"
++                APPEND PROPERTY COMPILE_DEFINITIONS PS2X_RAYLIB_RENAME=1)
++            if(MSVC)
++                set_property(SOURCE "${raylib_SOURCE_DIR}/src/${_ps2x_rl}" DIRECTORY "${raylib_SOURCE_DIR}/src"
++                    APPEND PROPERTY COMPILE_OPTIONS "/FI${_ps2x_raylib_calls}")
++            else()
++                set_property(SOURCE "${raylib_SOURCE_DIR}/src/${_ps2x_rl}" DIRECTORY "${raylib_SOURCE_DIR}/src"
++                    APPEND PROPERTY COMPILE_OPTIONS "-include" "${_ps2x_raylib_calls}")
++            endif()
++        endforeach()
++    endif()
++
+     # xbyak (header-only x86-64 assembler) for the VU1 JIT.
+     if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64|amd64)$" AND NOT PS2X_IS_ANDROID)
+         FetchContent_Declare(
+@@ -447,6 +488,7 @@ add_library(ps2_runtime STATIC
+     src/lib/ps2_iop_host.cpp
+     src/lib/ps2_memory.cpp
+     src/lib/ps2_pad.cpp
++    src/lib/ps2_platform.cpp
+     src/lib/ps2_sony_pad.cpp
+     src/lib/ps2_sony_pad_host.cpp
+     src/lib/ps2_xinput_rumble.cpp
+@@ -498,6 +540,11 @@ endif()
+ target_compile_definitions(ps2_runtime PRIVATE
+     PS2X_HAS_FFMPEG=$<BOOL:${PS2X_ENABLE_FFMPEG}>
+ )
++if(PS2X_SDL3)
++    # (only ps2_platform.cpp knows SDL3: the rest of the runtime keeps its command lines)
++    set_source_files_properties(src/lib/ps2_platform.cpp PROPERTIES COMPILE_DEFINITIONS PS2X_HAS_SDL3=1)
++    target_link_libraries(ps2_runtime PRIVATE ps2x_imgui_sdl3 SDL3::SDL3-static imgui)
++endif()
+ 
+ file(GLOB_RECURSE KERNEL_SRC_FILES CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/Kernel/*.cpp"
+diff --git a/ps2xRuntime/include/runtime/ps2_platform.h b/ps2xRuntime/include/runtime/ps2_platform.h
+new file mode 100644
+index 0000000..0e89e03
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_platform.h
+@@ -0,0 +1,89 @@
++#pragma once
++
++// The window and its input: raylib's (GLFW, the default) or SDL3's (PS2X_PLATFORM=sdl3, in a build with PS2X_SDL3).
++//
++// The runtime and a game call raylib for the window, the keyboard, the mouse, the gamepads and the overlays' 2D drawing,
++// as before. In a build with SDL3 the runtime answers those calls itself (ps2_platform.cpp; the list is
++// ps2_raylib_calls.h): raylib's own definitions are compiled as rl_<name>, and each call goes to raylib's or, under
++// PS2X_PLATFORM=sdl3, to SDL3's window and input and to the overlays' ImGui drawing. With PS2X_PLATFORM unset (or
++// raylib) every call is raylib's own; a build without PS2X_SDL3 has none of this. raylib's other calls (images, files,
++// audio) are raylib's under both.
++//
++// Under SDL3 there is no OpenGL. Each window picture is one ImGui frame from BeginDrawing to EndDrawing: the picture
++// (DrawTexturePro) and the 2D overlays (DrawText, the rectangles...) go into its background draw list, the ImGui panels
++// over them (the overlay host is SDL3's: ps2_overlay.h). A presenter draws the frame into the window: SDL's 2D renderer
++// by default (it picks Direct3D 11 or 12, Vulkan, Metal or OpenGL for the system), or one a graphics backend sets
++// (setPresenter: the native renderer's Vulkan backend presents into the window's own swapchain). The GS's GPU renderer
++// (OpenGL) does not start; the GS's software picture shows what the native renderer does not draw.
++//
++// Controllers: SDL's gamepads (its controller database; Steam Input's virtual pads; Xbox, PlayStation, Switch and
++// others), read as raylib's gamepads (the same buttons and axes). The game's vibration goes to SDL_RumbleGamepad. A
++// Sony pad that the native DualSense / DualShock 4 code (ps2_sony_pad.h) takes stays its own: SDL then leaves Sony pads'
++// HID to it (PS2X_GAMEPAD_BACKEND auto or sony); with glfw (Steam Input, DS4Windows) SDL takes them too, its light bar
++// from PS2X_SONYPAD_LIGHTBAR.
++//
++//   PS2X_PLATFORM=raylib | sdl3   read once, when the window is made (settings.ini too)
++//   PS2X_SDL_LOG=1                the window's and the gamepads' events in the log
++#include <cstdint>
++
++namespace ps2_platform
++{
++    bool sdl3();         // the window is SDL3's (PS2X_PLATFORM=sdl3 in a build with it)
++    const char *name();  // "raylib" or "sdl3"
++    void *sdlWindow();   // the SDL_Window, under SDL3 (else null)
++    // The settings panel's choice of the two (F5 > Display, a restart): in a build with SDL3 only.
++    void addSetting();
++
++    // ---- under SDL3: what draws the window's pictures ----------------------------------------------------------
++    // Textures (LoadTextureFromImage's, a backend's own pictures) are the presenter's: ImGui draws them by its
++    // ImTextureID. Every call on the window's thread (the main thread).
++    struct Presenter
++    {
++        const char *name = "";
++        // Before the window is made: the SDL window flags it needs (SDL_WINDOW_VULKAN...).
++        uint64_t windowFlags = 0u;
++        // The window exists: set up (ImGui's renderer backend too). False: this presenter cannot draw here.
++        bool (*open)(void *sdlWindow) = nullptr;
++        void (*close)() = nullptr;
++        // Before ImGui's frame of a picture (the renderer backend's NewFrame): false when it cannot draw one now (its
++        // device not made yet, the window hidden...) - that picture is then left out.
++        bool (*newFrame)() = nullptr;
++        // The picture's ImGui draw data (ImDrawData*) drawn over black, and presented.
++        void (*present)(void *imDrawData) = nullptr;
++        // Textures, RGBA8: made (`linear`: bilinear filtering, else nearest), their pixels replaced (rows of
++        // `pitch` bytes), let go. A texture 0 is none.
++        uint64_t (*makeTexture)(int width, int height, bool linear) = nullptr;
++        void (*updateTexture)(uint64_t texture, const void *pixels, int pitch) = nullptr;
++        void (*setTextureFilter)(uint64_t texture, bool linear) = nullptr;
++        void (*dropTexture)(uint64_t texture) = nullptr;
++        // A texture as ImGui's ImTextureID, when it is drawn (null: the same value). 0: not drawable now.
++        uint64_t (*imguiTexture)(uint64_t texture) = nullptr;
++        // The last picture presented, as RGBA8 rows (LoadImageFromScreen: a test's or the player's shot). Optional.
++        bool (*readLastPicture)(void *rgba, int width, int height) = nullptr;
++    };
++    // Before the window is made (a graphics backend that presents itself). The default: SDL's 2D renderer.
++    void setPresenter(const Presenter &presenter);
++    const char *presenterName();
++    // A texture of the presenter's own (a backend's picture) as a raylib texture id, for the window's loop to draw
++    // with DrawTexturePro; updateExternalTexture when it is another one or another size. 0: none.
++    unsigned int registerExternalTexture(uint64_t texture, int width, int height);
++    void updateExternalTexture(unsigned int id, uint64_t texture, int width, int height);
++    void dropExternalTexture(unsigned int id);
++
++    // ---- under SDL3: the controllers -----------------------------------------------------------------------
++    // The game's vibration on the gamepad it reads (raylib's gamepad index, -1: the first one): low and high frequency
++    // motors, 0..65535.
++    // False when there is no such SDL gamepad (raylib's platform: XInput does it, ps2_xinput_rumble.cpp).
++    bool gamepadRumble(int gamepad, uint16_t low, uint16_t high);
++    // The trigger motors (Xbox One and later; SDL_RumbleGamepadTriggers), 0..65535: false where there are none.
++    bool gamepadTriggerRumble(int gamepad, uint16_t left, uint16_t right);
++    // The light bar or LED (DualSense, DualShock 4, Switch's home light...): false where there is none.
++    bool gamepadLed(int gamepad, uint8_t red, uint8_t green, uint8_t blue);
++    // SDL's kind of pad: "xbox360", "xboxone", "ps3", "ps4", "ps5", "switchpro", "joyconpair", "gamecube", "steam"...,
++    // or "" (raylib's platform, or no such gamepad).
++    const char *gamepadType(int gamepad);
++
++    // ---- the screen's refresh (kayliox's Linux note: there may be no vertical blank timing) ---------------------
++    // The refresh rate of the screen the window is on (SDL's display mode), 0 when not known.
++    float windowScreenHz();
++}
+diff --git a/ps2xRuntime/src/lib/gs/gs_gpu.cpp b/ps2xRuntime/src/lib/gs/gs_gpu.cpp
+index e1661f6..607604a 100644
+--- a/ps2xRuntime/src/lib/gs/gs_gpu.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_gpu.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/gs/gs_gpu.h"
++#include "runtime/ps2_platform.h"
+ 
+ #include "runtime/ps2_host_display.h"
+ #include "runtime/ps2_host_input.h"
+@@ -228,7 +229,8 @@ namespace
+ 
+ bool ps2_gpu::requested()
+ {
+-    static const bool enabled = envFlag("PS2X_GPU", true);
++    // (SDL3's window has no OpenGL context to share: the GS's software picture there - ps2_platform.h)
++    static const bool enabled = envFlag("PS2X_GPU", true) && !ps2_platform::sdl3();
+     return enabled;
+ }
+ 
+diff --git a/ps2xRuntime/src/lib/ps2_host_present.cpp b/ps2xRuntime/src/lib/ps2_host_present.cpp
+index 6513d47..f622018 100644
+--- a/ps2xRuntime/src/lib/ps2_host_present.cpp
++++ b/ps2xRuntime/src/lib/ps2_host_present.cpp
+@@ -2,6 +2,7 @@
+ // (ps2_host_present.h). This side is raylib's; the Direct3D side is ps2_host_present_dxgi.cpp
+ // (raylib's names and windows.h's do not mix in one file).
+ #include "runtime/ps2_host_present.h"
++#include "runtime/ps2_platform.h"
+ 
+ #include "raylib.h"
+ 
+@@ -33,7 +34,8 @@ namespace ps2_host_present
+         bool requested()
+         {
+             const char *env = std::getenv("PS2X_PRESENT");
+-            return !(env && std::strcmp(env, "gl") == 0);
++            // (SDL3's window has no OpenGL: its presenter shows the pictures - ps2_platform.h)
++            return !(env && std::strcmp(env, "gl") == 0) && !ps2_platform::sdl3();
+         }
+     }
+ 
+diff --git a/ps2xRuntime/src/lib/ps2_platform.cpp b/ps2xRuntime/src/lib/ps2_platform.cpp
+new file mode 100644
+index 0000000..8a009cc
+--- /dev/null
++++ b/ps2xRuntime/src/lib/ps2_platform.cpp
+@@ -0,0 +1,1671 @@
++// The window and its input, raylib's or SDL3's (ps2_platform.h). In a build with SDL3 (PS2X_HAS_SDL3) this file
++// defines raylib's window, input and 2D calls (ps2_raylib_calls.h) and forwards each one to raylib's own (rl_<name>)
++// or, under PS2X_PLATFORM=sdl3, answers it from SDL3 and the overlays' ImGui drawing.
++#include "runtime/ps2_platform.h"
++
++#include <algorithm>
++#include <atomic>
++#include <cctype>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++
++namespace ps2_platform
++{
++    namespace
++    {
++        bool fromEnvironment()
++        {
++#if defined(PS2X_HAS_SDL3)
++            const char *v = std::getenv("PS2X_PLATFORM");
++            if (!v)
++                return false;
++            std::string s = v;
++            for (char &c : s)
++                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
++            if (s == "sdl3" || s == "sdl")
++                return true;
++            if (!s.empty() && s != "raylib")
++                std::fprintf(stderr, "[platform] PS2X_PLATFORM=%s is not one of raylib, sdl3: raylib\n", v);
++            return false;
++#else
++            if (const char *v = std::getenv("PS2X_PLATFORM"); v && (std::strcmp(v, "sdl3") == 0 || std::strcmp(v, "sdl") == 0))
++                std::fprintf(stderr, "[platform] PS2X_PLATFORM=%s: this build has no SDL3 (PS2X_SDL3): raylib\n", v);
++            return false;
++#endif
++        }
++    }
++
++    bool sdl3()
++    {
++        static const bool on = fromEnvironment();
++        return on;
++    }
++
++    const char *name()
++    {
++        return sdl3() ? "sdl3" : "raylib";
++    }
++}
++
++#if !defined(PS2X_HAS_SDL3)
++// A build without SDL3: raylib alone, nothing to forward.
++namespace ps2_platform
++{
++    void *sdlWindow() { return nullptr; }
++    void addSetting() {}
++    void setPresenter(const Presenter &) {}
++    const char *presenterName() { return ""; }
++    unsigned int registerExternalTexture(uint64_t, int, int) { return 0u; }
++    void updateExternalTexture(unsigned int, uint64_t, int, int) {}
++    void dropExternalTexture(unsigned int) {}
++    bool gamepadRumble(int, uint16_t, uint16_t) { return false; }
++    bool gamepadTriggerRumble(int, uint16_t, uint16_t) { return false; }
++    bool gamepadLed(int, uint8_t, uint8_t, uint8_t) { return false; }
++    const char *gamepadType(int) { return ""; }
++    float windowScreenHz() { return 0.0f; }
++}
++#else
++
++#include "raylib.h"
++#include "rlgl.h"
++#include "ps2_raylib_calls.h"
++
++#include "runtime/ps2_host_present.h"
++#include "runtime/ps2_overlay.h"
++#include "runtime/ps2_settings.h"
++
++#include "imgui.h"
++#include "backends/imgui_impl_sdl3.h"
++#include "backends/imgui_impl_sdlrenderer3.h"
++
++#include <SDL3/SDL.h>
++
++#include <chrono>
++#include <cmath>
++#include <mutex>
++#include <vector>
++
++// raylib's own definitions, renamed when raylib was compiled (ps2_raylib_calls.h): the same types as raylib.h's.
++extern "C"
++{
++#define PS2X_DECLARE_RAYLIB_OWN(name) decltype(::name) rl_##name;
++    PS2X_RAYLIB_PLATFORM_CALLS(PS2X_DECLARE_RAYLIB_OWN)
++#undef PS2X_DECLARE_RAYLIB_OWN
++}
++
++namespace
++{
++    bool on() { return ps2_platform::sdl3(); }
++
++    bool logOn()
++    {
++        static const bool v = [] { const char *e = std::getenv("PS2X_SDL_LOG"); return e && *e && *e != '0'; }();
++        return v;
++    }
++
++    void unsupported(const char *what)
++    {
++        static std::mutex m;
++        static std::vector<std::string> told;
++        std::lock_guard<std::mutex> lock(m);
++        if (std::find(told.begin(), told.end(), what) != told.end())
++            return;
++        told.emplace_back(what);
++        std::fprintf(stderr, "[platform] %s is not available with SDL3 (no OpenGL): left out\n", what);
++    }
++
++    ImU32 col(Color c) { return IM_COL32(c.r, c.g, c.b, c.a); }
++
++    // ---- SDL's 2D renderer: the default presenter ---------------------------------------------------------------
++    namespace sdlr
++    {
++        SDL_Renderer *g_renderer = nullptr;
++        int g_vsync = -99;
++        bool g_keep = false;            // the last picture kept for LoadImageFromScreen
++        std::vector<uint8_t> g_last;    // (RGBA rows)
++        int g_lastW = 0, g_lastH = 0;
++
++        bool open(void *window)
++        {
++            g_renderer = SDL_CreateRenderer(static_cast<SDL_Window *>(window), nullptr);
++            if (!g_renderer)
++            {
++                std::fprintf(stderr, "[platform] SDL could not make a renderer for the window: %s\n", SDL_GetError());
++                return false;
++            }
++            std::fprintf(stderr, "[platform] SDL's renderer draws the window (%s)\n", SDL_GetRendererName(g_renderer));
++            ImGui_ImplSDLRenderer3_Init(g_renderer);
++            const char *keep = std::getenv("PS2X_SHOT_KEEP");
++            g_keep = keep && *keep == '1';
++            return true;
++        }
++
++        void close()
++        {
++            if (!g_renderer)
++                return;
++            ImGui_ImplSDLRenderer3_Shutdown();
++            SDL_DestroyRenderer(g_renderer);
++            g_renderer = nullptr;
++        }
++
++        bool newFrame()
++        {
++            ImGui_ImplSDLRenderer3_NewFrame();
++            return true;
++        }
++
++        void present(void *drawData)
++        {
++            if (!g_renderer)
++                return;
++            // (VSync, the settings': ps2_host_present::sync - 1 always, 0 never, -1 by the screen)
++            if (const int want = ps2_host_present::sync(); want != g_vsync)
++            {
++                g_vsync = want;
++                const int mode = want == 1 ? 1 : want == 0 ? SDL_RENDERER_VSYNC_DISABLED : SDL_RENDERER_VSYNC_ADAPTIVE;
++                if (!SDL_SetRenderVSync(g_renderer, mode) && mode == SDL_RENDERER_VSYNC_ADAPTIVE)
++                    SDL_SetRenderVSync(g_renderer, 1);
++            }
++            SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
++            SDL_RenderClear(g_renderer);
++            ImGui_ImplSDLRenderer3_RenderDrawData(static_cast<ImDrawData *>(drawData), g_renderer);
++            if (g_keep)
++            {
++                if (SDL_Surface *s = SDL_RenderReadPixels(g_renderer, nullptr))
++                {
++                    if (SDL_Surface *rgba = SDL_ConvertSurface(s, SDL_PIXELFORMAT_RGBA32))
++                    {
++                        g_lastW = rgba->w;
++                        g_lastH = rgba->h;
++                        g_last.resize(static_cast<size_t>(g_lastW) * g_lastH * 4u);
++                        for (int y = 0; y < g_lastH; ++y)
++                            std::memcpy(g_last.data() + static_cast<size_t>(y) * g_lastW * 4u,
++                                        static_cast<const uint8_t *>(rgba->pixels) + static_cast<size_t>(y) * rgba->pitch,
++                                        static_cast<size_t>(g_lastW) * 4u);
++                        SDL_DestroySurface(rgba);
++                    }
++                    SDL_DestroySurface(s);
++                }
++            }
++            SDL_RenderPresent(g_renderer);
++        }
++
++        uint64_t makeTexture(int width, int height, bool linear)
++        {
++            if (!g_renderer)
++                return 0u;
++            SDL_Texture *t = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, width, height);
++            if (!t)
++            {
++                std::fprintf(stderr, "[platform] SDL could not make a %dx%d texture: %s\n", width, height, SDL_GetError());
++                return 0u;
++            }
++            SDL_SetTextureScaleMode(t, linear ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
++            SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
++            return reinterpret_cast<uint64_t>(t);
++        }
++
++        void updateTexture(uint64_t texture, const void *pixels, int pitch)
++        {
++            if (texture)
++                SDL_UpdateTexture(reinterpret_cast<SDL_Texture *>(texture), nullptr, pixels, pitch);
++        }
++
++        void setTextureFilter(uint64_t texture, bool linear)
++        {
++            if (texture)
++                SDL_SetTextureScaleMode(reinterpret_cast<SDL_Texture *>(texture), linear ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
++        }
++
++        void dropTexture(uint64_t texture)
++        {
++            if (texture)
++                SDL_DestroyTexture(reinterpret_cast<SDL_Texture *>(texture));
++        }
++
++        bool readLastPicture(void *rgba, int width, int height)
++        {
++            if (!g_keep)
++            {
++                g_keep = true; // (from now on: this first one is black - PS2X_SHOT_KEEP=1 keeps every picture)
++                std::fprintf(stderr, "[platform] a shot of the window: SDL's renderer keeps each picture from now on (PS2X_SHOT_KEEP=1 from the start)\n");
++            }
++            if (g_last.empty() || g_lastW != width || g_lastH != height)
++                return false;
++            std::memcpy(rgba, g_last.data(), g_last.size());
++            return true;
++        }
++
++        ps2_platform::Presenter presenter()
++        {
++            ps2_platform::Presenter p;
++            p.name = "SDL renderer";
++            p.open = open;
++            p.close = close;
++            p.newFrame = newFrame;
++            p.present = present;
++            p.makeTexture = makeTexture;
++            p.updateTexture = updateTexture;
++            p.setTextureFilter = setTextureFilter;
++            p.dropTexture = dropTexture;
++            p.readLastPicture = readLastPicture;
++            return p;
++        }
++    }
++
++    // ---- SDL3's window, input and drawing state ----------------------------------------------------------------
++    constexpr int kKeys = 512, kMouseButtons = 8, kPads = 4, kPadButtons = 32, kPadAxes = 6;
++    constexpr unsigned int kDefaultFontId = 0x7F000001u; // (fonts' "texture" ids: never a texture's)
++    constexpr unsigned int kFontIdBase = 0x7F000010u;
++
++    struct Pad
++    {
++        SDL_Gamepad *gamepad = nullptr;
++        SDL_JoystickID id = 0;
++        std::string name;
++        uint8_t current[kPadButtons] = {}, previous[kPadButtons] = {};
++        float axis[kPadAxes] = {0.0f, 0.0f, 0.0f, 0.0f, -1.0f, -1.0f};
++    };
++
++    struct PlatformTexture
++    {
++        uint64_t handle = 0u;
++        int width = 0, height = 0;
++        bool external = false, live = false;
++    };
++
++    struct State
++    {
++        ps2_platform::Presenter presenter = sdlr::presenter();
++        bool presenterOpen = false;
++        SDL_Window *window = nullptr;
++        unsigned int config = 0u;
++        bool ready = false, shouldClose = false, focused = false, cursorOnScreen = false, resized = false;
++        bool cursorHidden = false, cursorCaptured = false, exclusive = false, borderless = false;
++        int exitKey = KEY_ESCAPE, targetFps = 0;
++        uint64_t startNs = 0u, frameStartNs = 0u;
++        double frameTime = 0.0;
++        // keyboard (raylib's key codes), mouse (raylib's buttons)
++        uint8_t keyCurrent[kKeys] = {}, keyPrevious[kKeys] = {}, keyRepeat[kKeys] = {};
++        std::vector<int> keyQueue, charQueue;
++        uint8_t mouseCurrent[kMouseButtons] = {}, mousePrevious[kMouseButtons] = {};
++        Vector2 mouse{0.0f, 0.0f}, mousePrev{0.0f, 0.0f}, wheel{0.0f, 0.0f};
++        Pad pads[kPads];
++        // drawing
++        bool inFrame = false;
++        int scissors = 0;
++        std::vector<PlatformTexture> textures; // (id = index + 1)
++        std::vector<ImFont *> fonts;   // (id = kFontIdBase + index)
++        ImFont *defaultFont = nullptr;
++        bool sonyToNative = false, imguiReady = false;
++        std::atomic<void *> made{nullptr}; // (the window, once made: for other threads - a graphics device's)
++        // (the window's size and pixels, taken at each poll: read from any thread)
++        std::atomic<int> width{0}, height{0}, pixelWidth{0}, pixelHeight{0};
++        std::atomic<float> screenHz{0.0f};
++        uint64_t hzCheckedNs = 0u;
++    };
++    State &S()
++    {
++        static State s;
++        return s;
++    }
++
++    uint64_t nowNs() { return SDL_GetTicksNS(); }
++
++    // SDL's scancodes (where a key is: what GLFW's key codes name too, US layout) as raylib's key codes.
++    int keyOf(SDL_Scancode sc)
++    {
++        if (sc >= SDL_SCANCODE_A && sc <= SDL_SCANCODE_Z)
++            return KEY_A + (sc - SDL_SCANCODE_A);
++        if (sc >= SDL_SCANCODE_1 && sc <= SDL_SCANCODE_9)
++            return KEY_ONE + (sc - SDL_SCANCODE_1);
++        if (sc >= SDL_SCANCODE_F1 && sc <= SDL_SCANCODE_F12)
++            return KEY_F1 + (sc - SDL_SCANCODE_F1);
++        if (sc >= SDL_SCANCODE_KP_1 && sc <= SDL_SCANCODE_KP_9)
++            return KEY_KP_1 + (sc - SDL_SCANCODE_KP_1);
++        switch (sc)
++        {
++        case SDL_SCANCODE_0: return KEY_ZERO;
++        case SDL_SCANCODE_RETURN: return KEY_ENTER;
++        case SDL_SCANCODE_ESCAPE: return KEY_ESCAPE;
++        case SDL_SCANCODE_BACKSPACE: return KEY_BACKSPACE;
++        case SDL_SCANCODE_TAB: return KEY_TAB;
++        case SDL_SCANCODE_SPACE: return KEY_SPACE;
++        case SDL_SCANCODE_MINUS: return KEY_MINUS;
++        case SDL_SCANCODE_EQUALS: return KEY_EQUAL;
++        case SDL_SCANCODE_LEFTBRACKET: return KEY_LEFT_BRACKET;
++        case SDL_SCANCODE_RIGHTBRACKET: return KEY_RIGHT_BRACKET;
++        case SDL_SCANCODE_BACKSLASH: return KEY_BACKSLASH;
++        case SDL_SCANCODE_SEMICOLON: return KEY_SEMICOLON;
++        case SDL_SCANCODE_APOSTROPHE: return KEY_APOSTROPHE;
++        case SDL_SCANCODE_GRAVE: return KEY_GRAVE;
++        case SDL_SCANCODE_COMMA: return KEY_COMMA;
++        case SDL_SCANCODE_PERIOD: return KEY_PERIOD;
++        case SDL_SCANCODE_SLASH: return KEY_SLASH;
++        case SDL_SCANCODE_CAPSLOCK: return KEY_CAPS_LOCK;
++        case SDL_SCANCODE_PRINTSCREEN: return KEY_PRINT_SCREEN;
++        case SDL_SCANCODE_SCROLLLOCK: return KEY_SCROLL_LOCK;
++        case SDL_SCANCODE_PAUSE: return KEY_PAUSE;
++        case SDL_SCANCODE_INSERT: return KEY_INSERT;
++        case SDL_SCANCODE_HOME: return KEY_HOME;
++        case SDL_SCANCODE_PAGEUP: return KEY_PAGE_UP;
++        case SDL_SCANCODE_DELETE: return KEY_DELETE;
++        case SDL_SCANCODE_END: return KEY_END;
++        case SDL_SCANCODE_PAGEDOWN: return KEY_PAGE_DOWN;
++        case SDL_SCANCODE_RIGHT: return KEY_RIGHT;
++        case SDL_SCANCODE_LEFT: return KEY_LEFT;
++        case SDL_SCANCODE_DOWN: return KEY_DOWN;
++        case SDL_SCANCODE_UP: return KEY_UP;
++        case SDL_SCANCODE_NUMLOCKCLEAR: return KEY_NUM_LOCK;
++        case SDL_SCANCODE_KP_DIVIDE: return KEY_KP_DIVIDE;
++        case SDL_SCANCODE_KP_MULTIPLY: return KEY_KP_MULTIPLY;
++        case SDL_SCANCODE_KP_MINUS: return KEY_KP_SUBTRACT;
++        case SDL_SCANCODE_KP_PLUS: return KEY_KP_ADD;
++        case SDL_SCANCODE_KP_ENTER: return KEY_KP_ENTER;
++        case SDL_SCANCODE_KP_0: return KEY_KP_0;
++        case SDL_SCANCODE_KP_PERIOD: return KEY_KP_DECIMAL;
++        case SDL_SCANCODE_KP_EQUALS: return KEY_KP_EQUAL;
++        case SDL_SCANCODE_APPLICATION: return KEY_KB_MENU;
++        case SDL_SCANCODE_LCTRL: return KEY_LEFT_CONTROL;
++        case SDL_SCANCODE_LSHIFT: return KEY_LEFT_SHIFT;
++        case SDL_SCANCODE_LALT: return KEY_LEFT_ALT;
++        case SDL_SCANCODE_LGUI: return KEY_LEFT_SUPER;
++        case SDL_SCANCODE_RCTRL: return KEY_RIGHT_CONTROL;
++        case SDL_SCANCODE_RSHIFT: return KEY_RIGHT_SHIFT;
++        case SDL_SCANCODE_RALT: return KEY_RIGHT_ALT;
++        case SDL_SCANCODE_RGUI: return KEY_RIGHT_SUPER;
++        default: return 0;
++        }
++    }
++
++    int mouseButtonOf(uint8_t b)
++    {
++        switch (b)
++        {
++        case SDL_BUTTON_LEFT: return MOUSE_BUTTON_LEFT;
++        case SDL_BUTTON_RIGHT: return MOUSE_BUTTON_RIGHT;
++        case SDL_BUTTON_MIDDLE: return MOUSE_BUTTON_MIDDLE;
++        case SDL_BUTTON_X1: return MOUSE_BUTTON_SIDE;
++        case SDL_BUTTON_X2: return MOUSE_BUTTON_EXTRA;
++        default: return -1;
++        }
++    }
++
++    // raylib's gamepad buttons from SDL's (raylib's GLFW platform's mapping: by place, A = the bottom face button).
++    void readPad(Pad &p)
++    {
++        static const struct { SDL_GamepadButton sdl; int raylib; } kMap[] = {
++            {SDL_GAMEPAD_BUTTON_NORTH, GAMEPAD_BUTTON_RIGHT_FACE_UP}, {SDL_GAMEPAD_BUTTON_EAST, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT},
++            {SDL_GAMEPAD_BUTTON_SOUTH, GAMEPAD_BUTTON_RIGHT_FACE_DOWN}, {SDL_GAMEPAD_BUTTON_WEST, GAMEPAD_BUTTON_RIGHT_FACE_LEFT},
++            {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, GAMEPAD_BUTTON_LEFT_TRIGGER_1}, {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, GAMEPAD_BUTTON_RIGHT_TRIGGER_1},
++            {SDL_GAMEPAD_BUTTON_BACK, GAMEPAD_BUTTON_MIDDLE_LEFT}, {SDL_GAMEPAD_BUTTON_GUIDE, GAMEPAD_BUTTON_MIDDLE},
++            {SDL_GAMEPAD_BUTTON_START, GAMEPAD_BUTTON_MIDDLE_RIGHT}, {SDL_GAMEPAD_BUTTON_DPAD_UP, GAMEPAD_BUTTON_LEFT_FACE_UP},
++            {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, GAMEPAD_BUTTON_LEFT_FACE_RIGHT}, {SDL_GAMEPAD_BUTTON_DPAD_DOWN, GAMEPAD_BUTTON_LEFT_FACE_DOWN},
++            {SDL_GAMEPAD_BUTTON_DPAD_LEFT, GAMEPAD_BUTTON_LEFT_FACE_LEFT}, {SDL_GAMEPAD_BUTTON_LEFT_STICK, GAMEPAD_BUTTON_LEFT_THUMB},
++            {SDL_GAMEPAD_BUTTON_RIGHT_STICK, GAMEPAD_BUTTON_RIGHT_THUMB},
++        };
++        for (const auto &m : kMap)
++            p.current[m.raylib] = SDL_GetGamepadButton(p.gamepad, m.sdl) ? 1u : 0u;
++        const auto stick = [&](SDL_GamepadAxis a) { return std::clamp(static_cast<float>(SDL_GetGamepadAxis(p.gamepad, a)) / 32767.0f, -1.0f, 1.0f); };
++        // (triggers as GLFW has them: -1 released .. 1 pressed)
++        const auto trigger = [&](SDL_GamepadAxis a) { return std::clamp(static_cast<float>(SDL_GetGamepadAxis(p.gamepad, a)) / 32767.0f, 0.0f, 1.0f) * 2.0f - 1.0f; };
++        p.axis[GAMEPAD_AXIS_LEFT_X] = stick(SDL_GAMEPAD_AXIS_LEFTX);
++        p.axis[GAMEPAD_AXIS_LEFT_Y] = stick(SDL_GAMEPAD_AXIS_LEFTY);
++        p.axis[GAMEPAD_AXIS_RIGHT_X] = stick(SDL_GAMEPAD_AXIS_RIGHTX);
++        p.axis[GAMEPAD_AXIS_RIGHT_Y] = stick(SDL_GAMEPAD_AXIS_RIGHTY);
++        p.axis[GAMEPAD_AXIS_LEFT_TRIGGER] = trigger(SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
++        p.axis[GAMEPAD_AXIS_RIGHT_TRIGGER] = trigger(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
++        // (raylib: the second triggers count as buttons past a tenth)
++        p.current[GAMEPAD_BUTTON_LEFT_TRIGGER_2] = p.axis[GAMEPAD_AXIS_LEFT_TRIGGER] > 0.1f ? 1u : 0u;
++        p.current[GAMEPAD_BUTTON_RIGHT_TRIGGER_2] = p.axis[GAMEPAD_AXIS_RIGHT_TRIGGER] > 0.1f ? 1u : 0u;
++    }
++
++    bool parseRgb(const char *v, uint8_t &r, uint8_t &g, uint8_t &b)
++    {
++        if (!v || std::strlen(v) != 6)
++            return false;
++        char *end = nullptr;
++        const unsigned long x = std::strtoul(v, &end, 16);
++        if (!end || *end)
++            return false;
++        r = static_cast<uint8_t>(x >> 16);
++        g = static_cast<uint8_t>(x >> 8);
++        b = static_cast<uint8_t>(x);
++        return true;
++    }
++
++    void padAdded(SDL_JoystickID id)
++    {
++        State &s = S();
++        for (const Pad &p : s.pads)
++            if (p.gamepad && p.id == id)
++                return;
++        for (int i = 0; i < kPads; ++i)
++        {
++            Pad &p = s.pads[i];
++            if (p.gamepad)
++                continue;
++            p = Pad{};
++            p.gamepad = SDL_OpenGamepad(id);
++            if (!p.gamepad)
++            {
++                std::fprintf(stderr, "[platform] SDL could not open gamepad %u: %s\n", static_cast<unsigned>(id), SDL_GetError());
++                return;
++            }
++            p.id = id;
++            const char *n = SDL_GetGamepadName(p.gamepad);
++            p.name = n ? n : "Gamepad";
++            const SDL_GamepadType type = SDL_GetGamepadType(p.gamepad);
++            std::fprintf(stderr, "[platform] gamepad %d: %s (%s)%s%s\n", i, p.name.c_str(), SDL_GetGamepadStringForType(type),
++                         SDL_GetBooleanProperty(SDL_GetGamepadProperties(p.gamepad), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false) ? ", rumble" : "",
++                         SDL_GetBooleanProperty(SDL_GetGamepadProperties(p.gamepad), SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false) ? ", light" : "");
++            uint8_t r, g, b;
++            if (parseRgb(std::getenv("PS2X_SONYPAD_LIGHTBAR"), r, g, b))
++                SDL_SetGamepadLED(p.gamepad, r, g, b);
++            readPad(p);
++            std::memcpy(p.previous, p.current, sizeof(p.current));
++            return;
++        }
++        std::fprintf(stderr, "[platform] a fifth gamepad (%u) is not read\n", static_cast<unsigned>(id));
++    }
++
++    void padRemoved(SDL_JoystickID id)
++    {
++        for (int i = 0; i < kPads; ++i)
++        {
++            Pad &p = S().pads[i];
++            if (p.gamepad && p.id == id)
++            {
++                std::fprintf(stderr, "[platform] gamepad %d gone: %s\n", i, p.name.c_str());
++                SDL_CloseGamepad(p.gamepad);
++                p = Pad{};
++            }
++        }
++    }
++
++    void handle(const SDL_Event &e)
++    {
++        State &s = S();
++        switch (e.type)
++        {
++        case SDL_EVENT_QUIT:
++        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
++            s.shouldClose = true;
++            break;
++        case SDL_EVENT_KEY_DOWN:
++            if (const int k = keyOf(e.key.scancode); k > 0 && k < kKeys)
++            {
++                if (e.key.repeat)
++                    s.keyRepeat[k] = 1u;
++                else
++                {
++                    s.keyCurrent[k] = 1u;
++                    if (s.keyQueue.size() < 16u)
++                        s.keyQueue.push_back(k);
++                    if (k == s.exitKey)
++                        s.shouldClose = true;
++                }
++            }
++            break;
++        case SDL_EVENT_KEY_UP:
++            if (const int k = keyOf(e.key.scancode); k > 0 && k < kKeys)
++                s.keyCurrent[k] = 0u;
++            break;
++        case SDL_EVENT_TEXT_INPUT:
++            for (const unsigned char *t = reinterpret_cast<const unsigned char *>(e.text.text); t && *t;)
++            {
++                // (UTF-8 to code points)
++                int c = *t, n = 0;
++                if (c < 0x80) n = 0;
++                else if ((c & 0xE0) == 0xC0) { c &= 0x1F; n = 1; }
++                else if ((c & 0xF0) == 0xE0) { c &= 0x0F; n = 2; }
++                else { c &= 0x07; n = 3; }
++                ++t;
++                for (; n > 0 && *t; --n, ++t)
++                    c = (c << 6) | (*t & 0x3F);
++                if (s.charQueue.size() < 16u)
++                    s.charQueue.push_back(c);
++            }
++            break;
++        case SDL_EVENT_MOUSE_MOTION:
++            if (s.cursorCaptured)
++            {
++                s.mouse.x += e.motion.xrel;
++                s.mouse.y += e.motion.yrel;
++            }
++            else
++                s.mouse = Vector2{e.motion.x, e.motion.y};
++            break;
++        case SDL_EVENT_MOUSE_BUTTON_DOWN:
++        case SDL_EVENT_MOUSE_BUTTON_UP:
++            if (const int b = mouseButtonOf(e.button.button); b >= 0)
++                s.mouseCurrent[b] = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ? 1u : 0u;
++            break;
++        case SDL_EVENT_MOUSE_WHEEL:
++        {
++            const float flip = e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1.0f : 1.0f;
++            s.wheel.x += e.wheel.x * flip;
++            s.wheel.y += e.wheel.y * flip;
++            break;
++        }
++        case SDL_EVENT_WINDOW_MOUSE_ENTER: s.cursorOnScreen = true; break;
++        case SDL_EVENT_WINDOW_MOUSE_LEAVE: s.cursorOnScreen = false; break;
++        case SDL_EVENT_WINDOW_FOCUS_GAINED: s.focused = true; break;
++        case SDL_EVENT_WINDOW_FOCUS_LOST: s.focused = false; break;
++        case SDL_EVENT_WINDOW_RESIZED:
++        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
++            s.resized = true;
++            break;
++        case SDL_EVENT_GAMEPAD_ADDED: padAdded(e.gdevice.which); break;
++        case SDL_EVENT_GAMEPAD_REMOVED: padRemoved(e.gdevice.which); break;
++        default: break;
++        }
++        if (logOn() && (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED || e.type == SDL_EVENT_WINDOW_FOCUS_LOST || e.type == SDL_EVENT_WINDOW_RESIZED ||
++                        e.type == SDL_EVENT_WINDOW_MINIMIZED || e.type == SDL_EVENT_WINDOW_RESTORED || e.type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN ||
++                        e.type == SDL_EVENT_WINDOW_LEAVE_FULLSCREEN || e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED))
++            std::fprintf(stderr, "[platform] window event 0x%x\n", static_cast<unsigned>(e.type));
++    }
++
++    void noteSize()
++    {
++        State &s = S();
++        int w = 0, h = 0, pw = 0, ph = 0;
++        if (s.window)
++        {
++            SDL_GetWindowSize(s.window, &w, &h);
++            SDL_GetWindowSizeInPixels(s.window, &pw, &ph);
++        }
++        s.width.store(w, std::memory_order_relaxed);
++        s.height.store(h, std::memory_order_relaxed);
++        s.pixelWidth.store(pw, std::memory_order_relaxed);
++        s.pixelHeight.store(ph, std::memory_order_relaxed);
++    }
++
++    void noteScreenHz(bool force)
++    {
++        State &s = S();
++        const uint64_t now = nowNs();
++        if (!force && now - s.hzCheckedNs < 1000000000ull)
++            return;
++        s.hzCheckedNs = now;
++        float hz = 0.0f;
++        if (s.window)
++            if (const SDL_DisplayMode *m = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(s.window)))
++                hz = m->refresh_rate;
++        s.screenHz.store(hz, std::memory_order_relaxed);
++    }
++
++    // raylib's PollInputEvents: this poll's presses only (the queues, the wheel and "pressed" against the last poll).
++    void pump()
++    {
++        State &s = S();
++        if (!s.window)
++            return;
++        s.keyQueue.clear();
++        s.charQueue.clear();
++        std::memcpy(s.keyPrevious, s.keyCurrent, sizeof(s.keyCurrent));
++        std::memset(s.keyRepeat, 0, sizeof(s.keyRepeat));
++        std::memcpy(s.mousePrevious, s.mouseCurrent, sizeof(s.mouseCurrent));
++        s.wheel = Vector2{0.0f, 0.0f};
++        s.mousePrev = s.mouse;
++        s.resized = false;
++        for (Pad &p : s.pads)
++            std::memcpy(p.previous, p.current, sizeof(p.current));
++        const bool imgui = s.imguiReady && ImGui::GetCurrentContext() != nullptr;
++        SDL_Event e;
++        while (SDL_PollEvent(&e))
++        {
++            if (imgui)
++                ImGui_ImplSDL3_ProcessEvent(&e);
++            handle(e);
++        }
++        // (raylib: a minimised window's loop waits for it to come back, unless FLAG_WINDOW_ALWAYS_RUN)
++        while ((SDL_GetWindowFlags(s.window) & SDL_WINDOW_MINIMIZED) && !(s.config & FLAG_WINDOW_ALWAYS_RUN) && !s.shouldClose)
++            if (SDL_WaitEventTimeout(&e, 100))
++            {
++                if (imgui)
++                    ImGui_ImplSDL3_ProcessEvent(&e);
++                handle(e);
++            }
++        for (Pad &p : s.pads)
++            if (p.gamepad)
++                readPad(p);
++        noteSize();
++        noteScreenHz(false);
++    }
++
++    Pad *pad(int i)
++    {
++        if (i < 0) // (the first one: the one the pad code reads)
++            for (Pad &p : S().pads)
++                if (p.gamepad)
++                    return &p;
++        return i >= 0 && i < kPads && S().pads[i].gamepad ? &S().pads[i] : nullptr;
++    }
++
++    // ---- the window ------------------------------------------------------------------------------------------
++    void imguiHost();
++
++    bool makeWindow(int width, int height, const char *title)
++    {
++        State &s = S();
++        // Gamepads read while another window has the focus (as GLFW's: the pad code asks about the focus itself).
++        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
++        // The native DualSense / DualShock 4 code (ps2_sony_pad.h) owns Sony pads' HID unless PS2X_GAMEPAD_BACKEND=glfw
++        // (Steam Input, DS4Windows): SDL then leaves their HID alone (it would write their output reports too).
++        {
++            const char *b = std::getenv("PS2X_GAMEPAD_BACKEND");
++            s.sonyToNative = !(b && (std::strcmp(b, "glfw") == 0 || std::strcmp(b, "sdl") == 0));
++#if defined(_WIN32)
++            if (s.sonyToNative)
++            {
++                SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4, "0");
++                SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "0");
++            }
++#endif
++        }
++        if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD))
++        {
++            std::fprintf(stderr, "[platform] SDL could not start: %s\n", SDL_GetError());
++            return false;
++        }
++        SDL_WindowFlags flags = static_cast<SDL_WindowFlags>(s.presenter.windowFlags);
++        if (s.config & FLAG_WINDOW_RESIZABLE) flags |= SDL_WINDOW_RESIZABLE;
++        if (s.config & FLAG_WINDOW_HIDDEN) flags |= SDL_WINDOW_HIDDEN;
++        if (s.config & FLAG_WINDOW_UNDECORATED) flags |= SDL_WINDOW_BORDERLESS;
++        if (s.config & FLAG_WINDOW_TOPMOST) flags |= SDL_WINDOW_ALWAYS_ON_TOP;
++        if (s.config & (FLAG_WINDOW_HIDDEN | FLAG_WINDOW_UNFOCUSED))
++            SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0"); // (shown later without taking the focus from the desktop)
++        s.window = SDL_CreateWindow(title ? title : "", width, height, flags);
++        if (!s.window)
++        {
++            std::fprintf(stderr, "[platform] SDL could not make the window: %s\n", SDL_GetError());
++            return false;
++        }
++        s.focused = (SDL_GetWindowFlags(s.window) & SDL_WINDOW_INPUT_FOCUS) != 0;
++        s.startNs = s.frameStartNs = nowNs();
++        // ImGui: the overlays' context (the debugger's and a game's menus) and the 2D drawing's.
++        if (!ImGui::GetCurrentContext())
++            ImGui::CreateContext();
++        s.defaultFont = ImGui::GetIO().Fonts->AddFontDefault();
++        s.imguiReady = ImGui_ImplSDL3_InitForOther(s.window);
++        noteSize();
++        s.presenterOpen = s.presenter.open && s.presenter.open(s.window);
++        if (!s.presenterOpen)
++            std::fprintf(stderr, "[platform] %s cannot draw this window: no pictures\n", s.presenter.name);
++        imguiHost();
++        s.ready = true;
++        s.made.store(s.window, std::memory_order_release);
++        noteScreenHz(true);
++        int pw = 0, ph = 0;
++        SDL_GetWindowSizeInPixels(s.window, &pw, &ph);
++        std::fprintf(stderr, "[platform] SDL3 %d.%d.%d window %dx%d (%dx%d pixels) on %s, drawn by %s; screen %.2f Hz\n",
++                     SDL_VERSIONNUM_MAJOR(SDL_GetVersion()), SDL_VERSIONNUM_MINOR(SDL_GetVersion()), SDL_VERSIONNUM_MICRO(SDL_GetVersion()),
++                     width, height, pw, ph, SDL_GetCurrentVideoDriver(), s.presenter.name, static_cast<double>(S().screenHz.load()));
++        return true;
++    }
++
++    void closeWindow()
++    {
++        State &s = S();
++        if (!s.window)
++            return;
++        for (Pad &p : s.pads)
++            if (p.gamepad)
++            {
++                SDL_RumbleGamepad(p.gamepad, 0, 0, 0);
++                SDL_CloseGamepad(p.gamepad);
++                p = Pad{};
++            }
++        for (PlatformTexture &t : s.textures)
++            if (t.live && !t.external && s.presenter.dropTexture)
++                s.presenter.dropTexture(t.handle);
++        s.textures.clear();
++        if (s.presenterOpen && s.presenter.close)
++            s.presenter.close();
++        s.presenterOpen = false;
++        if (s.imguiReady && ImGui::GetCurrentContext())
++            ImGui_ImplSDL3_Shutdown(); // (the context stays: a game's code may still ask ImGui on its way out)
++        s.imguiReady = false;
++        s.made.store(nullptr, std::memory_order_release);
++        SDL_DestroyWindow(s.window);
++        s.window = nullptr;
++        s.ready = false;
++        SDL_Quit();
++    }
++
++    // Exclusive full screen at the window's size now (raylib's ToggleFullscreen), the desktop's refresh.
++    void setExclusive(bool want)
++    {
++        State &s = S();
++        if (want == s.exclusive || !s.window)
++            return;
++        if (want)
++        {
++            int w = 0, h = 0;
++            SDL_GetWindowSize(s.window, &w, &h);
++            const SDL_DisplayID d = SDL_GetDisplayForWindow(s.window);
++            const SDL_DisplayMode *desk = SDL_GetDesktopDisplayMode(d);
++            SDL_DisplayMode mode{};
++            if (SDL_GetClosestFullscreenDisplayMode(d, w, h, desk ? desk->refresh_rate : 0.0f, false, &mode))
++                SDL_SetWindowFullscreenMode(s.window, &mode);
++            else
++                SDL_SetWindowFullscreenMode(s.window, desk);
++            SDL_SetWindowFullscreen(s.window, true);
++            s.borderless = false;
++        }
++        else
++            SDL_SetWindowFullscreen(s.window, false);
++        s.exclusive = want;
++        SDL_SyncWindow(s.window);
++        noteSize();
++    }
++
++    // Borderless full screen (raylib's ToggleBorderlessWindowed): SDL's full screen at the desktop's mode.
++    void setBorderless(bool want)
++    {
++        State &s = S();
++        if (want == s.borderless || !s.window)
++            return;
++        if (want)
++        {
++            SDL_SetWindowFullscreenMode(s.window, nullptr);
++            SDL_SetWindowFullscreen(s.window, true);
++            s.exclusive = false;
++        }
++        else
++            SDL_SetWindowFullscreen(s.window, false);
++        s.borderless = want;
++        SDL_SyncWindow(s.window);
++        noteSize();
++    }
++
++    unsigned int windowStateNow()
++    {
++        State &s = S();
++        unsigned int f = s.config & (FLAG_VSYNC_HINT | FLAG_WINDOW_ALWAYS_RUN | FLAG_MSAA_4X_HINT | FLAG_INTERLACED_HINT);
++        if (!s.window)
++            return f;
++        const SDL_WindowFlags w = SDL_GetWindowFlags(s.window);
++        if (w & SDL_WINDOW_HIDDEN) f |= FLAG_WINDOW_HIDDEN;
++        if (w & SDL_WINDOW_MINIMIZED) f |= FLAG_WINDOW_MINIMIZED;
++        if (w & SDL_WINDOW_MAXIMIZED) f |= FLAG_WINDOW_MAXIMIZED;
++        if (!(w & SDL_WINDOW_INPUT_FOCUS)) f |= FLAG_WINDOW_UNFOCUSED;
++        if (w & SDL_WINDOW_ALWAYS_ON_TOP) f |= FLAG_WINDOW_TOPMOST;
++        if (w & SDL_WINDOW_BORDERLESS) f |= FLAG_WINDOW_UNDECORATED;
++        if (w & SDL_WINDOW_RESIZABLE) f |= FLAG_WINDOW_RESIZABLE;
++        if (s.exclusive) f |= FLAG_FULLSCREEN_MODE;
++        if (s.borderless) f |= FLAG_BORDERLESS_WINDOWED_MODE;
++        return f;
++    }
++
++    void applyWindowState(unsigned int flags, bool set)
++    {
++        State &s = S();
++        s.config = set ? (s.config | flags) : (s.config & ~flags);
++        if (!s.window)
++            return;
++        if (flags & FLAG_WINDOW_UNDECORATED) SDL_SetWindowBordered(s.window, !set);
++        if (flags & FLAG_WINDOW_TOPMOST) SDL_SetWindowAlwaysOnTop(s.window, set);
++        if (flags & FLAG_WINDOW_RESIZABLE) SDL_SetWindowResizable(s.window, set);
++        if (flags & FLAG_WINDOW_HIDDEN) set ? SDL_HideWindow(s.window) : SDL_ShowWindow(s.window);
++        if (flags & FLAG_WINDOW_MINIMIZED) set ? SDL_MinimizeWindow(s.window) : SDL_RestoreWindow(s.window);
++        if (flags & FLAG_WINDOW_MAXIMIZED) set ? SDL_MaximizeWindow(s.window) : SDL_RestoreWindow(s.window);
++        if (flags & FLAG_FULLSCREEN_MODE) setExclusive(set);
++        if (flags & FLAG_BORDERLESS_WINDOWED_MODE) setBorderless(set);
++    }
++
++    SDL_DisplayID displayAt(int monitor)
++    {
++        int n = 0;
++        SDL_DisplayID *ids = SDL_GetDisplays(&n);
++        const SDL_DisplayID d = ids && monitor >= 0 && monitor < n ? ids[monitor] : 0;
++        SDL_free(ids);
++        return d;
++    }
++
++    // ---- the drawing: one ImGui frame a picture ------------------------------------------------------------
++    ImDrawList *list()
++    {
++        return S().inFrame ? ImGui::GetBackgroundDrawList() : nullptr;
++    }
++
++    void beginPicture()
++    {
++        State &s = S();
++        const uint64_t now = nowNs();
++        s.frameTime = static_cast<double>(now - s.frameStartNs) / 1.0e9;
++        s.frameStartNs = now;
++        if (s.inFrame || !s.presenterOpen || !s.imguiReady || !ImGui::GetCurrentContext())
++            return;
++        if (s.presenter.newFrame && !s.presenter.newFrame())
++            return;
++        ImGui_ImplSDL3_NewFrame();
++        ImGui::NewFrame();
++        s.inFrame = true;
++        s.scissors = 0;
++    }
++
++    void endPicture()
++    {
++        State &s = S();
++        if (s.inFrame)
++        {
++            if (ImDrawList *dl = list())
++                for (; s.scissors > 0; --s.scissors)
++                    dl->PopClipRect();
++            ImGui::Render();
++            s.inFrame = false;
++            if (s.presenter.present)
++                s.presenter.present(ImGui::GetDrawData());
++        }
++        if (s.targetFps > 0)
++        {
++            const uint64_t want = 1000000000ull / static_cast<uint64_t>(s.targetFps), spent = nowNs() - s.frameStartNs;
++            if (spent < want)
++                SDL_DelayPrecise(want - spent);
++        }
++        pump();
++    }
++
++    ImFont *fontOf(const Font &f)
++    {
++        State &s = S();
++        const unsigned int id = f.texture.id;
++        if (id >= kFontIdBase && id - kFontIdBase < s.fonts.size() && s.fonts[id - kFontIdBase])
++            return s.fonts[id - kFontIdBase];
++        return s.defaultFont;
++    }
++
++    PlatformTexture *textureOf(unsigned int id)
++    {
++        State &s = S();
++        return id >= 1u && id <= s.textures.size() && s.textures[id - 1u].live ? &s.textures[id - 1u] : nullptr;
++    }
++
++    unsigned int newTextureSlot(const PlatformTexture &t)
++    {
++        State &s = S();
++        for (size_t i = 0; i < s.textures.size(); ++i)
++            if (!s.textures[i].live)
++            {
++                s.textures[i] = t;
++                return static_cast<unsigned int>(i + 1u);
++            }
++        s.textures.push_back(t);
++        return static_cast<unsigned int>(s.textures.size());
++    }
++
++    // The overlays' ImGui frames are this picture's: the host only styles ImGui (its frames are BeginDrawing's).
++    void imguiHost()
++    {
++        ps2_overlay::Host h;
++        h.name = "SDL3";
++        h.feedsInput = true;
++        h.setup = [](bool dark) { dark ? ImGui::StyleColorsDark() : ImGui::StyleColorsLight(); };
++        h.shutdown = [] {};
++        h.begin = [] {};
++        h.end = [] {};
++        ps2_overlay::setHost(h);
++    }
++
++    // The game's cursor shown or hidden: ImGui leaves the cursor alone while the game has it hidden.
++    void cursorToImGui()
++    {
++        if (!ImGui::GetCurrentContext())
++            return;
++        ImGuiIO &io = ImGui::GetIO();
++        if (S().cursorHidden || S().cursorCaptured)
++            io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
++        else
++            io.ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
++    }
++}
++
++namespace ps2_platform
++{
++    void *sdlWindow() { return on() ? S().made.load(std::memory_order_acquire) : nullptr; }
++
++    void addSetting()
++    {
++        ps2_settings::Setting s;
++        s.key = "PS2X_PLATFORM";
++        s.section = "Display";
++        s.label = "Window system";
++        s.order = 5;
++        s.help = "raylib's window (the default), or SDL3's: its window, keyboard, mouse and controllers (SDL's controller "
++                 "database: Steam Input, PlayStation, Xbox and Switch pads), the pictures drawn by SDL's renderer or the "
++                 "Vulkan renderer. Takes a restart.";
++        s.choices = {{"", "raylib"}, {"sdl3", "SDL3"}};
++        s.defaultValue = "";
++        s.current = [] { return std::string(ps2_platform::sdl3() ? "sdl3" : ""); };
++        ps2_settings::add(s);
++    }
++
++    void setPresenter(const Presenter &presenter)
++    {
++        if (S().window)
++        {
++            std::fprintf(stderr, "[platform] %s: the window is made already, its presenter stays %s\n", presenter.name, S().presenter.name);
++            return;
++        }
++        S().presenter = presenter;
++    }
++
++    const char *presenterName() { return on() ? S().presenter.name : ""; }
++
++    unsigned int registerExternalTexture(uint64_t texture, int width, int height)
++    {
++        if (!on())
++            return 0u;
++        PlatformTexture t;
++        t.handle = texture;
++        t.width = width;
++        t.height = height;
++        t.external = t.live = true;
++        return newTextureSlot(t);
++    }
++
++    void updateExternalTexture(unsigned int id, uint64_t texture, int width, int height)
++    {
++        if (PlatformTexture *t = textureOf(id); t && t->external)
++        {
++            t->handle = texture;
++            t->width = width;
++            t->height = height;
++        }
++    }
++
++    void dropExternalTexture(unsigned int id)
++    {
++        if (PlatformTexture *t = textureOf(id); t && t->external)
++            *t = PlatformTexture{};
++    }
++
++    bool gamepadRumble(int gamepad, uint16_t low, uint16_t high)
++    {
++        Pad *p = on() ? pad(gamepad) : nullptr;
++        // (a second at a time, renewed by each call while the game vibrates: SDL stops a pad that is not told again)
++        return p && SDL_RumbleGamepad(p->gamepad, low, high, 1000u);
++    }
++
++    bool gamepadTriggerRumble(int gamepad, uint16_t left, uint16_t right)
++    {
++        Pad *p = on() ? pad(gamepad) : nullptr;
++        return p && SDL_RumbleGamepadTriggers(p->gamepad, left, right, 1000u);
++    }
++
++    bool gamepadLed(int gamepad, uint8_t red, uint8_t green, uint8_t blue)
++    {
++        Pad *p = on() ? pad(gamepad) : nullptr;
++        return p && SDL_SetGamepadLED(p->gamepad, red, green, blue);
++    }
++
++    const char *gamepadType(int gamepad)
++    {
++        Pad *p = on() ? pad(gamepad) : nullptr;
++        if (!p)
++            return "";
++        const char *t = SDL_GetGamepadStringForType(SDL_GetGamepadType(p->gamepad));
++        return t ? t : "";
++    }
++
++    float windowScreenHz()
++    {
++        return on() ? S().screenHz.load(std::memory_order_relaxed) : 0.0f;
++    }
++}
++
++// ---- raylib's calls --------------------------------------------------------------------------------------------
++// Each: SDL3's answer under PS2X_PLATFORM=sdl3, else raylib's own.
++extern "C"
++{
++    void InitWindow(int width, int height, const char *title)
++    {
++        if (!on())
++            return rl_InitWindow(width, height, title);
++        if (!makeWindow(width, height, title))
++            S().shouldClose = true;
++    }
++    void CloseWindow(void) { on() ? closeWindow() : rl_CloseWindow(); }
++    bool WindowShouldClose(void) { return on() ? S().shouldClose : rl_WindowShouldClose(); }
++    bool IsWindowReady(void) { return on() ? S().ready : rl_IsWindowReady(); }
++    bool IsWindowFullscreen(void) { return on() ? S().exclusive : rl_IsWindowFullscreen(); }
++    bool IsWindowHidden(void) { return on() ? (windowStateNow() & FLAG_WINDOW_HIDDEN) != 0 : rl_IsWindowHidden(); }
++    bool IsWindowMinimized(void) { return on() ? (windowStateNow() & FLAG_WINDOW_MINIMIZED) != 0 : rl_IsWindowMinimized(); }
++    bool IsWindowFocused(void) { return on() ? S().focused : rl_IsWindowFocused(); }
++    bool IsWindowResized(void) { return on() ? S().resized : rl_IsWindowResized(); }
++    bool IsWindowState(unsigned int flag) { return on() ? (windowStateNow() & flag) == flag : rl_IsWindowState(flag); }
++    void SetWindowState(unsigned int flags) { on() ? applyWindowState(flags, true) : rl_SetWindowState(flags); }
++    void ClearWindowState(unsigned int flags) { on() ? applyWindowState(flags, false) : rl_ClearWindowState(flags); }
++    void ToggleFullscreen(void) { on() ? setExclusive(!S().exclusive) : rl_ToggleFullscreen(); }
++    void ToggleBorderlessWindowed(void) { on() ? setBorderless(!S().borderless) : rl_ToggleBorderlessWindowed(); }
++    void SetWindowTitle(const char *title)
++    {
++        if (!on())
++            return rl_SetWindowTitle(title);
++        if (S().window)
++            SDL_SetWindowTitle(S().window, title ? title : "");
++    }
++    void SetWindowPosition(int x, int y)
++    {
++        if (!on())
++            return rl_SetWindowPosition(x, y);
++        if (S().window)
++            SDL_SetWindowPosition(S().window, x, y);
++    }
++    void SetWindowSize(int width, int height)
++    {
++        if (!on())
++            return rl_SetWindowSize(width, height);
++        if (S().window)
++        {
++            SDL_SetWindowSize(S().window, width, height);
++            SDL_SyncWindow(S().window);
++            noteSize();
++        }
++    }
++    void *GetWindowHandle(void)
++    {
++        if (!on())
++            return rl_GetWindowHandle();
++#if defined(_WIN32)
++        return S().window ? SDL_GetPointerProperty(SDL_GetWindowProperties(S().window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr) : nullptr;
++#else
++        return nullptr;
++#endif
++    }
++    int GetScreenWidth(void)
++    {
++        if (!on())
++            return rl_GetScreenWidth();
++        return S().width.load(std::memory_order_relaxed);
++    }
++    int GetScreenHeight(void)
++    {
++        if (!on())
++            return rl_GetScreenHeight();
++        return S().height.load(std::memory_order_relaxed);
++    }
++    int GetRenderWidth(void)
++    {
++        if (!on())
++            return rl_GetRenderWidth();
++        return S().pixelWidth.load(std::memory_order_relaxed);
++    }
++    int GetRenderHeight(void)
++    {
++        if (!on())
++            return rl_GetRenderHeight();
++        return S().pixelHeight.load(std::memory_order_relaxed);
++    }
++    int GetMonitorCount(void)
++    {
++        if (!on())
++            return rl_GetMonitorCount();
++        int n = 0;
++        SDL_free(SDL_GetDisplays(&n));
++        return n;
++    }
++    int GetCurrentMonitor(void)
++    {
++        if (!on())
++            return rl_GetCurrentMonitor();
++        if (!S().window)
++            return 0;
++        const SDL_DisplayID d = SDL_GetDisplayForWindow(S().window);
++        int n = 0, at = 0;
++        SDL_DisplayID *ids = SDL_GetDisplays(&n);
++        for (int i = 0; ids && i < n; ++i)
++            if (ids[i] == d)
++                at = i;
++        SDL_free(ids);
++        return at;
++    }
++    Vector2 GetMonitorPosition(int monitor)
++    {
++        if (!on())
++            return rl_GetMonitorPosition(monitor);
++        SDL_Rect r{};
++        if (const SDL_DisplayID d = displayAt(monitor))
++            SDL_GetDisplayBounds(d, &r);
++        return Vector2{static_cast<float>(r.x), static_cast<float>(r.y)};
++    }
++    int GetMonitorWidth(int monitor)
++    {
++        if (!on())
++            return rl_GetMonitorWidth(monitor);
++        const SDL_DisplayMode *m = SDL_GetDesktopDisplayMode(displayAt(monitor));
++        return m ? m->w : 0;
++    }
++    int GetMonitorHeight(int monitor)
++    {
++        if (!on())
++            return rl_GetMonitorHeight(monitor);
++        const SDL_DisplayMode *m = SDL_GetDesktopDisplayMode(displayAt(monitor));
++        return m ? m->h : 0;
++    }
++    int GetMonitorRefreshRate(int monitor)
++    {
++        if (!on())
++            return rl_GetMonitorRefreshRate(monitor);
++        const SDL_DisplayMode *m = SDL_GetDesktopDisplayMode(displayAt(monitor));
++        return m ? static_cast<int>(std::lround(m->refresh_rate)) : 0;
++    }
++    Vector2 GetWindowPosition(void)
++    {
++        if (!on())
++            return rl_GetWindowPosition();
++        int x = 0, y = 0;
++        if (S().window)
++            SDL_GetWindowPosition(S().window, &x, &y);
++        return Vector2{static_cast<float>(x), static_cast<float>(y)};
++    }
++    void ShowCursor(void)
++    {
++        if (!on())
++            return rl_ShowCursor();
++        SDL_ShowCursor();
++        S().cursorHidden = false;
++        cursorToImGui();
++    }
++    void HideCursor(void)
++    {
++        if (!on())
++            return rl_HideCursor();
++        SDL_HideCursor();
++        S().cursorHidden = true;
++        cursorToImGui();
++    }
++    bool IsCursorHidden(void) { return on() ? S().cursorHidden || S().cursorCaptured : rl_IsCursorHidden(); }
++    void EnableCursor(void)
++    {
++        if (!on())
++            return rl_EnableCursor();
++        if (S().window)
++            SDL_SetWindowRelativeMouseMode(S().window, false);
++        SDL_ShowCursor();
++        S().cursorCaptured = S().cursorHidden = false;
++        cursorToImGui();
++    }
++    void DisableCursor(void)
++    {
++        if (!on())
++            return rl_DisableCursor();
++        if (S().window)
++            SDL_SetWindowRelativeMouseMode(S().window, true);
++        S().cursorCaptured = true;
++        cursorToImGui();
++    }
++    bool IsCursorOnScreen(void) { return on() ? S().cursorOnScreen : rl_IsCursorOnScreen(); }
++    void SetConfigFlags(unsigned int flags)
++    {
++        if (!on())
++            return rl_SetConfigFlags(flags);
++        S().config |= flags; // (raylib's adds them too)
++    }
++    void SetTargetFPS(int fps)
++    {
++        if (!on())
++            return rl_SetTargetFPS(fps);
++        S().targetFps = fps;
++    }
++    float GetFrameTime(void) { return on() ? static_cast<float>(S().frameTime) : rl_GetFrameTime(); }
++    double GetTime(void)
++    {
++        if (!on())
++            return rl_GetTime();
++        return S().startNs ? static_cast<double>(nowNs() - S().startNs) / 1.0e9 : 0.0;
++    }
++    void PollInputEvents(void) { on() ? pump() : rl_PollInputEvents(); }
++    void SetExitKey(int key)
++    {
++        if (!on())
++            return rl_SetExitKey(key);
++        S().exitKey = key;
++    }
++
++    bool IsKeyPressed(int key)
++    {
++        if (!on())
++            return rl_IsKeyPressed(key);
++        return key > 0 && key < kKeys && S().keyCurrent[key] && !S().keyPrevious[key];
++    }
++    bool IsKeyPressedRepeat(int key)
++    {
++        if (!on())
++            return rl_IsKeyPressedRepeat(key);
++        return key > 0 && key < kKeys && S().keyRepeat[key];
++    }
++    bool IsKeyDown(int key)
++    {
++        if (!on())
++            return rl_IsKeyDown(key);
++        return key > 0 && key < kKeys && S().keyCurrent[key];
++    }
++    bool IsKeyReleased(int key)
++    {
++        if (!on())
++            return rl_IsKeyReleased(key);
++        return key > 0 && key < kKeys && !S().keyCurrent[key] && S().keyPrevious[key];
++    }
++    bool IsKeyUp(int key)
++    {
++        if (!on())
++            return rl_IsKeyUp(key);
++        return !(key > 0 && key < kKeys && S().keyCurrent[key]);
++    }
++    int GetKeyPressed(void)
++    {
++        if (!on())
++            return rl_GetKeyPressed();
++        std::vector<int> &q = S().keyQueue;
++        if (q.empty())
++            return 0;
++        const int k = q.front();
++        q.erase(q.begin());
++        return k;
++    }
++    int GetCharPressed(void)
++    {
++        if (!on())
++            return rl_GetCharPressed();
++        std::vector<int> &q = S().charQueue;
++        if (q.empty())
++            return 0;
++        const int c = q.front();
++        q.erase(q.begin());
++        return c;
++    }
++
++    bool IsGamepadAvailable(int gamepad) { return on() ? pad(gamepad) != nullptr : rl_IsGamepadAvailable(gamepad); }
++    const char *GetGamepadName(int gamepad)
++    {
++        if (!on())
++            return rl_GetGamepadName(gamepad);
++        const Pad *p = pad(gamepad);
++        return p ? p->name.c_str() : nullptr;
++    }
++    bool IsGamepadButtonPressed(int gamepad, int button)
++    {
++        if (!on())
++            return rl_IsGamepadButtonPressed(gamepad, button);
++        const Pad *p = pad(gamepad);
++        return p && button > 0 && button < kPadButtons && p->current[button] && !p->previous[button];
++    }
++    bool IsGamepadButtonDown(int gamepad, int button)
++    {
++        if (!on())
++            return rl_IsGamepadButtonDown(gamepad, button);
++        const Pad *p = pad(gamepad);
++        return p && button > 0 && button < kPadButtons && p->current[button];
++    }
++    bool IsGamepadButtonReleased(int gamepad, int button)
++    {
++        if (!on())
++            return rl_IsGamepadButtonReleased(gamepad, button);
++        const Pad *p = pad(gamepad);
++        return p && button > 0 && button < kPadButtons && !p->current[button] && p->previous[button];
++    }
++    float GetGamepadAxisMovement(int gamepad, int axis)
++    {
++        if (!on())
++            return rl_GetGamepadAxisMovement(gamepad, axis);
++        // (raylib's: triggers -1 at rest, the rest 0; a value only past its resting one)
++        float value = (axis == GAMEPAD_AXIS_LEFT_TRIGGER || axis == GAMEPAD_AXIS_RIGHT_TRIGGER) ? -1.0f : 0.0f;
++        const Pad *p = pad(gamepad);
++        if (p && axis >= 0 && axis < kPadAxes)
++        {
++            const float movement = value < 0.0f ? p->axis[axis] : std::fabs(p->axis[axis]);
++            if (movement > value)
++                value = p->axis[axis];
++        }
++        return value;
++    }
++
++    bool IsMouseButtonPressed(int button)
++    {
++        if (!on())
++            return rl_IsMouseButtonPressed(button);
++        return button >= 0 && button < kMouseButtons && S().mouseCurrent[button] && !S().mousePrevious[button];
++    }
++    bool IsMouseButtonDown(int button)
++    {
++        if (!on())
++            return rl_IsMouseButtonDown(button);
++        return button >= 0 && button < kMouseButtons && S().mouseCurrent[button];
++    }
++    bool IsMouseButtonReleased(int button)
++    {
++        if (!on())
++            return rl_IsMouseButtonReleased(button);
++        return button >= 0 && button < kMouseButtons && !S().mouseCurrent[button] && S().mousePrevious[button];
++    }
++    int GetMouseX(void) { return on() ? static_cast<int>(S().mouse.x) : rl_GetMouseX(); }
++    int GetMouseY(void) { return on() ? static_cast<int>(S().mouse.y) : rl_GetMouseY(); }
++    Vector2 GetMousePosition(void) { return on() ? S().mouse : rl_GetMousePosition(); }
++    Vector2 GetMouseDelta(void)
++    {
++        if (!on())
++            return rl_GetMouseDelta();
++        return Vector2{S().mouse.x - S().mousePrev.x, S().mouse.y - S().mousePrev.y};
++    }
++    void SetMousePosition(int x, int y)
++    {
++        if (!on())
++            return rl_SetMousePosition(x, y);
++        if (S().window)
++            SDL_WarpMouseInWindow(S().window, static_cast<float>(x), static_cast<float>(y));
++        S().mouse = S().mousePrev = Vector2{static_cast<float>(x), static_cast<float>(y)};
++    }
++    float GetMouseWheelMove(void)
++    {
++        if (!on())
++            return rl_GetMouseWheelMove();
++        return std::fabs(S().wheel.x) > std::fabs(S().wheel.y) ? S().wheel.x : S().wheel.y;
++    }
++    Vector2 GetMouseWheelMoveV(void) { return on() ? S().wheel : rl_GetMouseWheelMoveV(); }
++
++    // ---- drawing --------------------------------------------------------------------------------------------
++    void BeginDrawing(void) { on() ? beginPicture() : rl_BeginDrawing(); }
++    void EndDrawing(void) { on() ? endPicture() : rl_EndDrawing(); }
++    void ClearBackground(Color color)
++    {
++        if (!on())
++            return rl_ClearBackground(color);
++        if (ImDrawList *dl = list(); dl && (color.r | color.g | color.b) != 0 && color.a != 0) // (black: the presenter's own clear)
++            dl->AddRectFilled(ImVec2(0.0f, 0.0f), ImGui::GetIO().DisplaySize, col(color));
++    }
++    void BeginTextureMode(RenderTexture2D target)
++    {
++        if (!on())
++            return rl_BeginTextureMode(target);
++        unsupported("BeginTextureMode");
++    }
++    void EndTextureMode(void)
++    {
++        if (!on())
++            return rl_EndTextureMode();
++    }
++    void BeginScissorMode(int x, int y, int width, int height)
++    {
++        if (!on())
++            return rl_BeginScissorMode(x, y, width, height);
++        if (ImDrawList *dl = list())
++        {
++            dl->PushClipRect(ImVec2(static_cast<float>(x), static_cast<float>(y)), ImVec2(static_cast<float>(x + width), static_cast<float>(y + height)), true);
++            ++S().scissors;
++        }
++    }
++    void EndScissorMode(void)
++    {
++        if (!on())
++            return rl_EndScissorMode();
++        if (ImDrawList *dl = list(); dl && S().scissors > 0)
++        {
++            dl->PopClipRect();
++            --S().scissors;
++        }
++    }
++    Image LoadImageFromScreen(void)
++    {
++        if (!on())
++            return rl_LoadImageFromScreen();
++        Image image{};
++        const int w = GetRenderWidth(), h = GetRenderHeight();
++        if (w <= 0 || h <= 0)
++            return image;
++        void *pixels = std::calloc(static_cast<size_t>(w) * h, 4u); // (UnloadImage frees it: raylib's RL_FREE is free)
++        if (!pixels)
++            return image;
++        if (!(S().presenter.readLastPicture && S().presenter.readLastPicture(pixels, w, h)))
++            for (size_t i = 3; i < static_cast<size_t>(w) * h * 4u; i += 4u)
++                static_cast<uint8_t *>(pixels)[i] = 255u; // (black)
++        image.data = pixels;
++        image.width = w;
++        image.height = h;
++        image.mipmaps = 1;
++        image.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
++        return image;
++    }
++
++    // Text: raylib's default font is ImGui's default font here; a font from LoadFontEx is ImGui's from the same file.
++    void DrawText(const char *text, int posX, int posY, int fontSize, Color color)
++    {
++        if (!on())
++            return rl_DrawText(text, posX, posY, fontSize, color);
++        if (ImDrawList *dl = list(); dl && text && S().defaultFont)
++            dl->AddText(S().defaultFont, static_cast<float>(std::max(fontSize, 10)), ImVec2(static_cast<float>(posX), static_cast<float>(posY)), col(color), text);
++    }
++    void DrawTextEx(Font font, const char *text, Vector2 position, float fontSize, float spacing, Color tint)
++    {
++        if (!on())
++            return rl_DrawTextEx(font, text, position, fontSize, spacing, tint);
++        if (ImDrawList *dl = list(); dl && text)
++            if (ImFont *f = fontOf(font))
++                dl->AddText(f, fontSize, ImVec2(position.x, position.y), col(tint), text);
++    }
++    int MeasureText(const char *text, int fontSize)
++    {
++        if (!on())
++            return rl_MeasureText(text, fontSize);
++        if (!text || !S().defaultFont || !ImGui::GetCurrentContext())
++            return 0;
++        return static_cast<int>(std::lround(S().defaultFont->CalcTextSizeA(static_cast<float>(std::max(fontSize, 10)), FLT_MAX, 0.0f, text).x));
++    }
++    Vector2 MeasureTextEx(Font font, const char *text, float fontSize, float spacing)
++    {
++        if (!on())
++            return rl_MeasureTextEx(font, text, fontSize, spacing);
++        ImFont *f = fontOf(font);
++        if (!text || !f || !ImGui::GetCurrentContext())
++            return Vector2{0.0f, 0.0f};
++        const ImVec2 size = f->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, text);
++        return Vector2{size.x, size.y};
++    }
++    Font GetFontDefault(void)
++    {
++        if (!on())
++            return rl_GetFontDefault();
++        Font f{};
++        f.baseSize = 10;
++        f.texture.id = kDefaultFontId;
++        return f;
++    }
++    Font LoadFontEx(const char *fileName, int fontSize, int *codepoints, int codepointCount)
++    {
++        if (!on())
++            return rl_LoadFontEx(fileName, fontSize, codepoints, codepointCount);
++        Font f = GetFontDefault();
++        if (!fileName || !ImGui::GetCurrentContext())
++            return f;
++        ImFont *font = ImGui::GetIO().Fonts->AddFontFromFileTTF(fileName, static_cast<float>(fontSize));
++        if (!font)
++            return f;
++        S().fonts.push_back(font);
++        f.baseSize = fontSize;
++        f.texture.id = kFontIdBase + static_cast<unsigned int>(S().fonts.size() - 1u);
++        return f;
++    }
++    void UnloadFont(Font font)
++    {
++        if (!on())
++            return rl_UnloadFont(font);
++        // (ImGui's atlas keeps it: a font is loaded once a session)
++    }
++
++    void DrawRectangle(int posX, int posY, int width, int height, Color color)
++    {
++        if (!on())
++            return rl_DrawRectangle(posX, posY, width, height, color);
++        if (ImDrawList *dl = list())
++            dl->AddRectFilled(ImVec2(static_cast<float>(posX), static_cast<float>(posY)), ImVec2(static_cast<float>(posX + width), static_cast<float>(posY + height)), col(color));
++    }
++    void DrawRectangleRec(Rectangle rec, Color color)
++    {
++        if (!on())
++            return rl_DrawRectangleRec(rec, color);
++        if (ImDrawList *dl = list())
++            dl->AddRectFilled(ImVec2(rec.x, rec.y), ImVec2(rec.x + rec.width, rec.y + rec.height), col(color));
++    }
++    void DrawRectangleLines(int posX, int posY, int width, int height, Color color)
++    {
++        if (!on())
++            return rl_DrawRectangleLines(posX, posY, width, height, color);
++        if (ImDrawList *dl = list())
++            dl->AddRect(ImVec2(static_cast<float>(posX), static_cast<float>(posY)), ImVec2(static_cast<float>(posX + width), static_cast<float>(posY + height)), col(color));
++    }
++    void DrawRectangleRounded(Rectangle rec, float roundness, int segments, Color color)
++    {
++        if (!on())
++            return rl_DrawRectangleRounded(rec, roundness, segments, color);
++        if (ImDrawList *dl = list())
++            dl->AddRectFilled(ImVec2(rec.x, rec.y), ImVec2(rec.x + rec.width, rec.y + rec.height), col(color),
++                              std::clamp(roundness, 0.0f, 1.0f) * std::min(rec.width, rec.height) * 0.5f);
++    }
++    void DrawRectangleRoundedLinesEx(Rectangle rec, float roundness, int segments, float lineThick, Color color)
++    {
++        if (!on())
++            return rl_DrawRectangleRoundedLinesEx(rec, roundness, segments, lineThick, color);
++        if (ImDrawList *dl = list())
++            dl->AddRect(ImVec2(rec.x, rec.y), ImVec2(rec.x + rec.width, rec.y + rec.height), col(color),
++                        std::clamp(roundness, 0.0f, 1.0f) * std::min(rec.width, rec.height) * 0.5f, 0, std::max(lineThick, 1.0f));
++    }
++    void DrawLine(int startPosX, int startPosY, int endPosX, int endPosY, Color color)
++    {
++        if (!on())
++            return rl_DrawLine(startPosX, startPosY, endPosX, endPosY, color);
++        if (ImDrawList *dl = list())
++            dl->AddLine(ImVec2(static_cast<float>(startPosX), static_cast<float>(startPosY)), ImVec2(static_cast<float>(endPosX), static_cast<float>(endPosY)), col(color));
++    }
++    void DrawLineEx(Vector2 startPos, Vector2 endPos, float thick, Color color)
++    {
++        if (!on())
++            return rl_DrawLineEx(startPos, endPos, thick, color);
++        if (ImDrawList *dl = list())
++            dl->AddLine(ImVec2(startPos.x, startPos.y), ImVec2(endPos.x, endPos.y), col(color), thick);
++    }
++    void DrawCircle(int centerX, int centerY, float radius, Color color)
++    {
++        if (!on())
++            return rl_DrawCircle(centerX, centerY, radius, color);
++        if (ImDrawList *dl = list())
++            dl->AddCircleFilled(ImVec2(static_cast<float>(centerX), static_cast<float>(centerY)), radius, col(color));
++    }
++    void DrawCircleV(Vector2 center, float radius, Color color)
++    {
++        if (!on())
++            return rl_DrawCircleV(center, radius, color);
++        if (ImDrawList *dl = list())
++            dl->AddCircleFilled(ImVec2(center.x, center.y), radius, col(color));
++    }
++    void DrawTriangle(Vector2 v1, Vector2 v2, Vector2 v3, Color color)
++    {
++        if (!on())
++            return rl_DrawTriangle(v1, v2, v3, color);
++        if (ImDrawList *dl = list())
++            dl->AddTriangleFilled(ImVec2(v1.x, v1.y), ImVec2(v2.x, v2.y), ImVec2(v3.x, v3.y), col(color));
++    }
++    void DrawTexturePro(Texture2D texture, Rectangle source, Rectangle dest, Vector2 origin, float rotation, Color tint)
++    {
++        if (!on())
++            return rl_DrawTexturePro(texture, source, dest, origin, rotation, tint);
++        const PlatformTexture *t = textureOf(texture.id);
++        ImDrawList *dl = list();
++        if (!t || !t->handle || !dl || t->width <= 0 || t->height <= 0)
++            return;
++        const uint64_t id = t->external || !S().presenter.imguiTexture ? t->handle : S().presenter.imguiTexture(t->handle);
++        if (!id)
++            return;
++        if (rotation != 0.0f)
++            unsupported("DrawTexturePro with a rotation");
++        // (a negative source width or height flips it, as raylib's)
++        const float w = static_cast<float>(t->width), h = static_cast<float>(t->height);
++        ImVec2 uv0(source.x / w, source.y / h), uv1((source.x + std::fabs(source.width)) / w, (source.y + std::fabs(source.height)) / h);
++        if (source.width < 0.0f)
++            std::swap(uv0.x, uv1.x);
++        if (source.height < 0.0f)
++            std::swap(uv0.y, uv1.y);
++        const ImVec2 p0(dest.x - origin.x, dest.y - origin.y);
++        dl->AddImage(ImTextureRef(static_cast<ImTextureID>(id)), p0, ImVec2(p0.x + dest.width, p0.y + dest.height), uv0, uv1, col(tint));
++    }
++    Texture2D LoadTextureFromImage(Image image)
++    {
++        if (!on())
++            return rl_LoadTextureFromImage(image);
++        Texture2D out{};
++        State &s = S();
++        if (!image.data || image.width <= 0 || image.height <= 0 || !s.presenterOpen || !s.presenter.makeTexture)
++            return out;
++        Image rgba = image;
++        const bool converted = image.format != PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
++        if (converted)
++        {
++            rgba = ImageCopy(image);
++            ImageFormat(&rgba, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
++        }
++        PlatformTexture t;
++        t.width = rgba.width;
++        t.height = rgba.height;
++        t.live = true;
++        t.handle = s.presenter.makeTexture(t.width, t.height, false); // (raylib's default: nearest)
++        if (t.handle && s.presenter.updateTexture)
++            s.presenter.updateTexture(t.handle, rgba.data, t.width * 4);
++        if (converted)
++            UnloadImage(rgba);
++        if (!t.handle)
++            return out;
++        out.id = newTextureSlot(t);
++        out.width = t.width;
++        out.height = t.height;
++        out.mipmaps = 1;
++        out.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
++        return out;
++    }
++    void UpdateTexture(Texture2D texture, const void *pixels)
++    {
++        if (!on())
++            return rl_UpdateTexture(texture, pixels);
++        if (const PlatformTexture *t = textureOf(texture.id); t && !t->external && pixels && S().presenter.updateTexture)
++            S().presenter.updateTexture(t->handle, pixels, t->width * 4);
++    }
++    void UnloadTexture(Texture2D texture)
++    {
++        if (!on())
++            return rl_UnloadTexture(texture);
++        if (PlatformTexture *t = textureOf(texture.id))
++        {
++            if (!t->external && S().presenter.dropTexture)
++                S().presenter.dropTexture(t->handle);
++            *t = PlatformTexture{};
++        }
++    }
++    void SetTextureFilter(Texture2D texture, int filter)
++    {
++        if (!on())
++            return rl_SetTextureFilter(texture, filter);
++        if (const PlatformTexture *t = textureOf(texture.id); t && !t->external && S().presenter.setTextureFilter)
++            S().presenter.setTextureFilter(t->handle, filter != TEXTURE_FILTER_POINT);
++    }
++    RenderTexture2D LoadRenderTexture(int width, int height)
++    {
++        if (!on())
++            return rl_LoadRenderTexture(width, height);
++        unsupported("LoadRenderTexture");
++        return RenderTexture2D{};
++    }
++    void UnloadRenderTexture(RenderTexture2D target)
++    {
++        if (!on())
++            return rl_UnloadRenderTexture(target);
++    }
++    void rlDrawRenderBatchActive(void)
++    {
++        if (!on())
++            return rl_rlDrawRenderBatchActive();
++    }
++}
++#endif
+diff --git a/ps2xRuntime/src/lib/ps2_raylib_calls.h b/ps2xRuntime/src/lib/ps2_raylib_calls.h
+new file mode 100644
+index 0000000..9ffcb5d
+--- /dev/null
++++ b/ps2xRuntime/src/lib/ps2_raylib_calls.h
+@@ -0,0 +1,132 @@
++/* raylib's window, input and 2D drawing calls that the runtime answers itself in a build with SDL3 (ps2_platform.h).
++ *
++ * Two lists of the same names, kept together:
++ * - PS2X_RAYLIB_PLATFORM_CALLS: for ps2_platform.cpp, which defines each call and forwards it to raylib's (rl_<name>)
++ *   or to SDL3's window, input and the overlays' ImGui drawing.
++ * - The #defines below: this file is a forced include on raylib's own sources (PS2X_RAYLIB_RENAME), so raylib defines
++ *   each of them as rl_<name> and its own calls between them stay its own.
++ * The linker keeps the two in step: a name in one list and not the other is either defined twice or not at all.
++ * raylib's other calls (images, fonts' files, audio, files, the clock's wait) stay raylib's under both platforms. */
++#ifndef PS2X_RAYLIB_CALLS_H
++#define PS2X_RAYLIB_CALLS_H
++
++#define PS2X_RAYLIB_PLATFORM_CALLS(X) \
++    X(InitWindow) X(CloseWindow) X(WindowShouldClose) X(IsWindowReady) X(IsWindowFullscreen) X(IsWindowHidden) \
++    X(IsWindowMinimized) X(IsWindowFocused) X(IsWindowResized) X(IsWindowState) X(SetWindowState) X(ClearWindowState) \
++    X(ToggleFullscreen) X(ToggleBorderlessWindowed) X(SetWindowTitle) X(SetWindowPosition) X(SetWindowSize) \
++    X(GetWindowHandle) X(GetScreenWidth) X(GetScreenHeight) X(GetRenderWidth) X(GetRenderHeight) X(GetMonitorCount) \
++    X(GetCurrentMonitor) X(GetMonitorPosition) X(GetMonitorWidth) X(GetMonitorHeight) X(GetMonitorRefreshRate) \
++    X(GetWindowPosition) X(ShowCursor) X(HideCursor) X(IsCursorHidden) X(EnableCursor) X(DisableCursor) \
++    X(IsCursorOnScreen) X(SetConfigFlags) X(SetTargetFPS) X(GetFrameTime) X(GetTime) X(PollInputEvents) X(SetExitKey) \
++    X(IsKeyPressed) X(IsKeyPressedRepeat) X(IsKeyDown) X(IsKeyReleased) X(IsKeyUp) X(GetKeyPressed) X(GetCharPressed) \
++    X(IsGamepadAvailable) X(GetGamepadName) X(IsGamepadButtonPressed) X(IsGamepadButtonDown) X(IsGamepadButtonReleased) \
++    X(GetGamepadAxisMovement) X(IsMouseButtonPressed) X(IsMouseButtonDown) X(IsMouseButtonReleased) X(GetMouseX) \
++    X(GetMouseY) X(GetMousePosition) X(GetMouseDelta) X(SetMousePosition) X(GetMouseWheelMove) X(GetMouseWheelMoveV) \
++    X(BeginDrawing) X(EndDrawing) X(ClearBackground) X(BeginTextureMode) X(EndTextureMode) X(BeginScissorMode) \
++    X(EndScissorMode) X(LoadImageFromScreen) X(DrawText) X(DrawTextEx) X(MeasureText) X(MeasureTextEx) \
++    X(GetFontDefault) X(LoadFontEx) X(UnloadFont) X(DrawRectangle) X(DrawRectangleRec) X(DrawRectangleLines) \
++    X(DrawRectangleRounded) X(DrawRectangleRoundedLinesEx) X(DrawLine) X(DrawLineEx) X(DrawCircle) X(DrawCircleV) \
++    X(DrawTriangle) X(DrawTexturePro) X(LoadTextureFromImage) X(UpdateTexture) X(UnloadTexture) X(SetTextureFilter) \
++    X(LoadRenderTexture) X(UnloadRenderTexture) X(rlDrawRenderBatchActive)
++
++#if defined(PS2X_RAYLIB_RENAME)
++#define InitWindow rl_InitWindow
++#define CloseWindow rl_CloseWindow
++#define WindowShouldClose rl_WindowShouldClose
++#define IsWindowReady rl_IsWindowReady
++#define IsWindowFullscreen rl_IsWindowFullscreen
++#define IsWindowHidden rl_IsWindowHidden
++#define IsWindowMinimized rl_IsWindowMinimized
++#define IsWindowFocused rl_IsWindowFocused
++#define IsWindowResized rl_IsWindowResized
++#define IsWindowState rl_IsWindowState
++#define SetWindowState rl_SetWindowState
++#define ClearWindowState rl_ClearWindowState
++#define ToggleFullscreen rl_ToggleFullscreen
++#define ToggleBorderlessWindowed rl_ToggleBorderlessWindowed
++#define SetWindowTitle rl_SetWindowTitle
++#define SetWindowPosition rl_SetWindowPosition
++#define SetWindowSize rl_SetWindowSize
++#define GetWindowHandle rl_GetWindowHandle
++#define GetScreenWidth rl_GetScreenWidth
++#define GetScreenHeight rl_GetScreenHeight
++#define GetRenderWidth rl_GetRenderWidth
++#define GetRenderHeight rl_GetRenderHeight
++#define GetMonitorCount rl_GetMonitorCount
++#define GetCurrentMonitor rl_GetCurrentMonitor
++#define GetMonitorPosition rl_GetMonitorPosition
++#define GetMonitorWidth rl_GetMonitorWidth
++#define GetMonitorHeight rl_GetMonitorHeight
++#define GetMonitorRefreshRate rl_GetMonitorRefreshRate
++#define GetWindowPosition rl_GetWindowPosition
++#define ShowCursor rl_ShowCursor
++#define HideCursor rl_HideCursor
++#define IsCursorHidden rl_IsCursorHidden
++#define EnableCursor rl_EnableCursor
++#define DisableCursor rl_DisableCursor
++#define IsCursorOnScreen rl_IsCursorOnScreen
++#define SetConfigFlags rl_SetConfigFlags
++#define SetTargetFPS rl_SetTargetFPS
++#define GetFrameTime rl_GetFrameTime
++#define GetTime rl_GetTime
++#define PollInputEvents rl_PollInputEvents
++#define SetExitKey rl_SetExitKey
++#define IsKeyPressed rl_IsKeyPressed
++#define IsKeyPressedRepeat rl_IsKeyPressedRepeat
++#define IsKeyDown rl_IsKeyDown
++#define IsKeyReleased rl_IsKeyReleased
++#define IsKeyUp rl_IsKeyUp
++#define GetKeyPressed rl_GetKeyPressed
++#define GetCharPressed rl_GetCharPressed
++#define IsGamepadAvailable rl_IsGamepadAvailable
++#define GetGamepadName rl_GetGamepadName
++#define IsGamepadButtonPressed rl_IsGamepadButtonPressed
++#define IsGamepadButtonDown rl_IsGamepadButtonDown
++#define IsGamepadButtonReleased rl_IsGamepadButtonReleased
++#define GetGamepadAxisMovement rl_GetGamepadAxisMovement
++#define IsMouseButtonPressed rl_IsMouseButtonPressed
++#define IsMouseButtonDown rl_IsMouseButtonDown
++#define IsMouseButtonReleased rl_IsMouseButtonReleased
++#define GetMouseX rl_GetMouseX
++#define GetMouseY rl_GetMouseY
++#define GetMousePosition rl_GetMousePosition
++#define GetMouseDelta rl_GetMouseDelta
++#define SetMousePosition rl_SetMousePosition
++#define GetMouseWheelMove rl_GetMouseWheelMove
++#define GetMouseWheelMoveV rl_GetMouseWheelMoveV
++#define BeginDrawing rl_BeginDrawing
++#define EndDrawing rl_EndDrawing
++#define ClearBackground rl_ClearBackground
++#define BeginTextureMode rl_BeginTextureMode
++#define EndTextureMode rl_EndTextureMode
++#define BeginScissorMode rl_BeginScissorMode
++#define EndScissorMode rl_EndScissorMode
++#define LoadImageFromScreen rl_LoadImageFromScreen
++#define DrawText rl_DrawText
++#define DrawTextEx rl_DrawTextEx
++#define MeasureText rl_MeasureText
++#define MeasureTextEx rl_MeasureTextEx
++#define GetFontDefault rl_GetFontDefault
++#define LoadFontEx rl_LoadFontEx
++#define UnloadFont rl_UnloadFont
++#define DrawRectangle rl_DrawRectangle
++#define DrawRectangleRec rl_DrawRectangleRec
++#define DrawRectangleLines rl_DrawRectangleLines
++#define DrawRectangleRounded rl_DrawRectangleRounded
++#define DrawRectangleRoundedLinesEx rl_DrawRectangleRoundedLinesEx
++#define DrawLine rl_DrawLine
++#define DrawLineEx rl_DrawLineEx
++#define DrawCircle rl_DrawCircle
++#define DrawCircleV rl_DrawCircleV
++#define DrawTriangle rl_DrawTriangle
++#define DrawTexturePro rl_DrawTexturePro
++#define LoadTextureFromImage rl_LoadTextureFromImage
++#define UpdateTexture rl_UpdateTexture
++#define UnloadTexture rl_UnloadTexture
++#define SetTextureFilter rl_SetTextureFilter
++#define LoadRenderTexture rl_LoadRenderTexture
++#define UnloadRenderTexture rl_UnloadRenderTexture
++#define rlDrawRenderBatchActive rl_rlDrawRenderBatchActive
++#endif
++
++#endif
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 38a1d43..77009ee 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -12,6 +12,7 @@
+ #include "runtime/ps2_host_display.h"
+ #include "runtime/ps2_thread_placement.h"
+ #include "runtime/ps2_host_present.h"
++#include "runtime/ps2_platform.h"
+ #include "runtime/ps2_host_input.h"
+ #include "runtime/ps2_settings.h"
+ #include "ThreadNaming.h"
+@@ -3631,6 +3632,7 @@ void PS2Runtime::run()
+     // The settings panel (F5, ps2_settings.h): the runtime's settings, and two of this loop's own,
+     // which F11 and F3 switch too.
+     ps2_settings::addRuntimeSettings();
++    ps2_platform::addSetting(); // (the window system, in a build with SDL3)
+     {
+         ps2_settings::Setting s;
+         s.key = "PS2X_FULLSCREEN";
+diff --git a/ps2xRuntime/src/lib/ps2_xinput_rumble.cpp b/ps2xRuntime/src/lib/ps2_xinput_rumble.cpp
+index 9e5c63a..4948b34 100644
+--- a/ps2xRuntime/src/lib/ps2_xinput_rumble.cpp
++++ b/ps2xRuntime/src/lib/ps2_xinput_rumble.cpp
+@@ -1,6 +1,7 @@
+ // XInput vibration for GLFW gamepads (TODO 200): see ps2_xinput_rumble.h.
+ #include "runtime/ps2_xinput_rumble.h"
+ #include "runtime/ps2_sony_pad.h"
++#include "runtime/ps2_platform.h"
+ 
+ #include <algorithm>
+ #include <atomic>
+@@ -159,6 +160,42 @@ namespace ps2x::xinput
+ #endif
+     }
+ 
++    namespace
++    {
++        // Under SDL3's window (ps2_platform.h) the motors are SDL's: SDL_RumbleGamepad on the gamepad the game reads,
++        // whatever kind it is. SDL stops a pad told nothing for the time given, so running motors are told again.
++        Speeds g_sdlWritten;
++        int64_t g_sdlRenewMs = 0;
++
++        bool sdlTick(bool focused, bool inputBlocked)
++        {
++            if (!ps2_platform::sdl3())
++                return false;
++            const Settings &cfg = settings();
++            const bool test = cfg.trace >= 2;
++            if (cfg.hidden && !test)
++                return true;
++            const int64_t now = nowMs();
++            const bool reading = now - g_lastReadMs.load(std::memory_order_relaxed) < kReadStaleMs;
++            const bool active = reading && !inputBlocked && (test || (focused && g_glfwGamepad.load(std::memory_order_relaxed)));
++            Speeds want;
++            if (active)
++            {
++                const sonypad::Motors m = sonypad::guestMotors(0);
++                want = speedsFor(m.small, m.large, cfg.percent);
++            }
++            if (want == g_sdlWritten && (want == Speeds{} || now < g_sdlRenewMs))
++                return true;
++            const bool ok = ps2_platform::gamepadRumble(-1, want.left, want.right);
++            if (cfg.trace && want != g_sdlWritten)
++                std::fprintf(stderr, "[xinput] SDL3 rumble: low %u high %u (%s): %s\n", static_cast<unsigned>(want.left),
++                             static_cast<unsigned>(want.right), active ? "the game" : "off", ok ? "ok" : "no gamepad with motors");
++            g_sdlWritten = ok ? want : Speeds{};
++            g_sdlRenewMs = now + 500;
++            return true;
++        }
++    }
++
+     void notePadRead(bool glfwGamepad)
+     {
+         g_glfwGamepad.store(glfwGamepad, std::memory_order_relaxed);
+@@ -167,6 +204,8 @@ namespace ps2x::xinput
+ 
+     void tick(bool focused, bool inputBlocked)
+     {
++        if (sdlTick(focused, inputBlocked))
++            return;
+ #if defined(_WIN32)
+         const Settings &cfg = settings();
+         const bool test = cfg.trace >= 2;
+@@ -213,6 +252,13 @@ namespace ps2x::xinput
+ 
+     void stop()
+     {
++        if (ps2_platform::sdl3())
++        {
++            if (g_sdlWritten != Speeds{})
++                ps2_platform::gamepadRumble(-1, 0u, 0u);
++            g_sdlWritten = Speeds{};
++            return;
++        }
+ #if defined(_WIN32)
+         if (g_user >= 0 && g_written != Speeds{} && api().setState)
+             write(Speeds{}, "off: exit");

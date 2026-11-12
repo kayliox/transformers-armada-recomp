@@ -5,6 +5,7 @@
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/ps2_audio_stream.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_settings.h"
 
@@ -166,6 +167,20 @@ namespace start_screens
             return std::chrono::duration<double>(std::chrono::steady_clock::now() - g_started).count();
         }
 
+        // (TODO 298) The start's turbo (start_screens.h): held from install until the main menu, released once.
+        std::atomic<bool> g_turbo{false};
+        PS2Runtime *g_runtime = nullptr;
+
+        void releaseTurbo(const char *why)
+        {
+            if (!g_turbo.exchange(false) || !g_runtime)
+                return;
+            g_runtime->eeScheduler().setTurboHeld(false);
+            ps2_audio_stream::setMuted(false);
+            std::fprintf(stderr, "[tf] start screens: the console's pace again - %s (vblank %llu, %.2f s after the start)\n", why,
+                         static_cast<unsigned long long>(tick(g_runtime)), secondsSinceStart());
+        }
+
         // (TODO 116) The card check's notices and the copyright screen skipped in "menu" mode, before the main menu has
         // been up once. TF_TEST_KEEP_NOTICES=1 (tests): kept, as item 110 had them - for before/after timings.
         bool skipNotices()
@@ -212,8 +227,8 @@ namespace start_screens
                 {
                     g_lastMovie = key;
                     if (skip || trace())
-                        std::fprintf(stderr, "[tf] start screens: movie %s %s (vblank %llu)\n", key.c_str(),
-                                     skip ? "skipped" : "plays", static_cast<unsigned long long>(tick(runtime)));
+                        std::fprintf(stderr, "[tf] start screens: movie %s %s (vblank %llu, %.2f s)\n", key.c_str(),
+                                     skip ? "skipped" : "plays", static_cast<unsigned long long>(tick(runtime)), secondsSinceStart());
                 }
                 if (skip)
                     SET_GPR_U32(ctx, 5, kSkipInput);
@@ -240,7 +255,10 @@ namespace start_screens
             {
                 g_titleSeen = true;
                 if (trace())
-                    std::fprintf(stderr, "[tf] start screens: the title (vblank %llu)\n", static_cast<unsigned long long>(tick(runtime)));
+                    std::fprintf(stderr, "[tf] start screens: the title (vblank %llu, %.2f s)\n", static_cast<unsigned long long>(tick(runtime)),
+                                 secondsSinceStart());
+                if (g_mode.load(std::memory_order_relaxed) == kTitle)
+                    releaseTurbo("the title");
             }
             // Before its update runs: the update itself goes to the main menu once the screen is shown (its
             // state 2) and Start was pressed - this is that press, kept until it acts.
@@ -291,8 +309,12 @@ namespace start_screens
             {
                 lastState = state;
                 if (trace())
-                    std::fprintf(stderr, "[tf] start screens: card check state %u (vblank %llu)\n", state,
-                                 static_cast<unsigned long long>(tick(runtime)));
+                    std::fprintf(stderr, "[tf] start screens: card check state %u (vblank %llu, %.2f s)\n", state,
+                                 static_cast<unsigned long long>(tick(runtime)), secondsSinceStart());
+                // (TODO 298) A question or an error (4/5 a load error or a corrupt save, 6 no card, 8 no room, 0xB
+                // autosave disabled): the player's, at the game's own pace.
+                if (state == 4u || state == 5u || state == 6u || state == 8u || state == 0xBu)
+                    releaseTurbo("the memory card asks the player");
             }
             if (skipNotices())
             {
@@ -346,8 +368,8 @@ namespace start_screens
                 if (!logged)
                 {
                     logged = true;
-                    std::fprintf(stderr, "[tf] start screens: the copyright screen skipped - its %.0f s run out (vblank %llu)\n", end,
-                                 static_cast<unsigned long long>(tick(runtime)));
+                    std::fprintf(stderr, "[tf] start screens: the copyright screen skipped - its %.0f s run out (vblank %llu, %.2f s)\n", end,
+                                 static_cast<unsigned long long>(tick(runtime)), secondsSinceStart());
                 }
             }
         }
@@ -426,8 +448,9 @@ namespace start_screens
             {
                 g_menuReached = true;
                 g_titleSeen = true;
-                std::fprintf(stderr, "[tf] start screens: the main menu (vblank %llu, %.1f s after the start)\n",
+                std::fprintf(stderr, "[tf] start screens: the main menu (vblank %llu, %.2f s after the start)\n",
                              static_cast<unsigned long long>(tick(runtime)), secondsSinceStart());
+                releaseTurbo("the main menu");
             }
             g_startMenuUpdate(rdram, ctx, runtime);
         }
@@ -460,8 +483,9 @@ namespace start_screens
         s.order = 5;
         s.help = "Straight to the main menu: the memory card's notices (Load Successful, the autosave notice), the copyright "
                  "screen, the logos, the attract film, the title (\"press Start\") and the story intro after New Game are "
-                 "skipped - you land on New Game / Continue / Options (a card error or question still shows). Title screen: "
-                 "only the movies skipped. Everything: as on the PS2. From the next start.";
+                 "skipped - you land on New Game / Continue / Options in a second or two, the screen black until then (a card "
+                 "error or question still shows). Title screen: only the movies skipped. Everything: as on the PS2. From the "
+                 "next start.";
         s.choices = {{"menu", "Straight to the main menu"}, {"title", "Title screen (no movies)"}, {"all", "Everything"}};
         s.defaultValue = "menu";
         s.apply = [](const std::string &value)
@@ -476,7 +500,24 @@ namespace start_screens
         static const char *const kModes[] = {"straight to the main menu", "the title, no movies", "everything",
                                              "as before the setting (a scripted run without it)"};
         std::fprintf(stderr, "[tf] start screens: %s\n", kModes[g_mode.load()]);
+        if (g_mode.load() != kMenu && g_mode.load() != kTitle)
+            releaseTurbo("the setting shows the start");
     }
+
+    void frame(PS2Runtime &runtime, bool inGame)
+    {
+        if (!g_turbo.load(std::memory_order_relaxed))
+            return;
+        const int mode = g_mode.load(std::memory_order_relaxed);
+        if (mode != kMenu && mode != kTitle)
+            releaseTurbo("the setting shows the start");
+        else if (inGame)
+            releaseTurbo("a level or the HQ runs");
+        else if (tick(&runtime) > 3000u)
+            releaseTurbo("3000 VBlanks and no main menu");
+    }
+
+    bool starting() { return g_turbo.load(std::memory_order_relaxed); }
 
     void install(PS2Runtime &runtime)
     {
@@ -509,6 +550,20 @@ namespace start_screens
 #endif
         if (!(g_introProcessInputThunk && g_titleUpdate && g_startMenuUpdate && g_cardCheckProcessInput && g_timeoutProcessInputThunk))
             std::fprintf(stderr, "[tf] start screens: a front-end function not found - those screens are shown as usual\n");
+        // (TODO 298) The start unthrottled until the main menu: not in a scripted run or one that shows the start (its
+        // setting comes later - addSettings releases it then), not when a start-up state is loaded, not without the
+        // main menu's hook (it would never be released before the 3000 VBlanks).
+        g_runtime = &runtime;
+        const char *env = std::getenv("TF_START_SCREENS");
+        const char *off = std::getenv("TF_START_TURBO");
+        const char *state = std::getenv("PS2X_LOAD_STATE");
+        if (g_startMenuUpdate && !(off && *off == '0') && !(state && *state) &&
+            !(env && (std::strcmp(env, "all") == 0 || std::strcmp(env, "scripted") == 0)))
+        {
+            g_turbo.store(true);
+            runtime.eeScheduler().setTurboHeld(true);
+            ps2_audio_stream::setMuted(true);
+        }
     }
 
     bool skipsMovie(const char *movieKey) { return movieKey && skipsKey(movieKey); }

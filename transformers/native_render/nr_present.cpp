@@ -12,9 +12,12 @@
 #include "nr_glshare.h"
 #include "view_turn.h"
 
+#include "runtime/gs/gs_gpu.h"
 #include "runtime/ps2_host_display.h"
 
 #include "raylib.h"
+#include "rlgl.h"
+#include "nr_frame.h"
 
 #include <algorithm>
 #include <atomic>
@@ -31,6 +34,7 @@
 namespace tf::port
 {
     bool moviePlaying(); // (overrides.cpp)
+    bool startHeld();    // (overrides.cpp, TODO 298: the start's turbo - black until the main menu)
 }
 
 #if defined(_WIN32)
@@ -332,7 +336,24 @@ namespace nr
 #endif
             const uint64_t serialBefore = serial;
             bool fresh = false;
-            if (share == 1 && backend().latestShared(sp, serial) && sp.index >= 0 && sp.index < d3d::kSharedPictures)
+            // (Milestone 3) The backend presents the window itself (Vulkan in SDL3's window): its picture is a texture of
+            // the window's platform, the GPU's own - no copy, no import. Asked each picture: the window draws it now.
+            static const bool windowPictures = backend().presentsWindow();
+            WindowPicture wp;
+            const bool windowNow = windowPictures && backend().latestWindowPicture(wp);
+            if (windowNow)
+            {
+                fresh = wp.serial != serial;
+                if (fresh)
+                    g_takenSerial.store(wp.serial, std::memory_order_relaxed);
+                serial = wp.serial;
+                has3D = wp.has3D;
+                sp.tick = wp.tick;
+                sp.dueNs = wp.dueNs;
+                sp.readyNs = wp.readyNs;
+                sp.has3D = wp.has3D;
+            }
+            else if (share == 1 && backend().latestShared(sp, serial) && sp.index >= 0 && sp.index < d3d::kSharedPictures)
             {
                 fresh = true;
                 g_takenSerial.store(serial, std::memory_order_relaxed);
@@ -467,6 +488,26 @@ namespace nr
                 lastNew = std::chrono::steady_clock::now();
             }
             const bool sharedNow = share == 1 && sharedShown >= 0 && imported[sharedShown].texture;
+            // (TODO 298) The start runs unthrottled to the main menu: its screens and logos flash by in a fraction of a
+            // second - black instead, the main menu the first picture shown.
+            if (tf::port::startHeld())
+            {
+                static Texture2D startBlack{};
+                if (startBlack.id == 0u)
+                {
+                    Image image = GenImageColor(4, 4, BLACK);
+                    startBlack = LoadTextureFromImage(image);
+                    UnloadImage(image);
+                }
+                if (startBlack.id != 0u)
+                {
+                    g_pacedLive.store(false, std::memory_order_relaxed);
+                    texture = startBlack.id;
+                    width = startBlack.width;
+                    height = startBlack.height;
+                    return true;
+                }
+            }
             // (Neither picture yet: black, not the window's own fill. 2026-10-28, TODO 63: after the
             // settings' restart the new process loads a state in a level; with the native renderer
             // drawing alone the GS publishes no picture there, the native one comes only once Direct3D
@@ -478,7 +519,7 @@ namespace nr
             // the GS draws nothing, so its picture is never the one to show: the native picture stays up while no new one
             // comes - a load, a pause of the game's frames. Before its first, the GS's last (from before the switch) or black.)
             const bool gsOff = !ps2_host_display::emulatedDrawing();
-            const bool nativeAny = shown.id != 0u || sharedNow;
+            const bool nativeAny = shown.id != 0u || sharedNow || windowNow;
             const bool nativeNone = !nativeAny || (!gsOff && std::chrono::steady_clock::now() - lastNew > std::chrono::milliseconds(100));
             // (N3b) What the game shows without frames of the render device - the warp tunnel of a load (its pictures
             // uploaded into the display buffers, the display switched to them), a movie DMA'd there: no native picture comes,
@@ -548,6 +589,16 @@ namespace nr
                 uint32_t pw = 0, ph = 0;
                 gsShown = ps2_host_display::copyPicture(0, probe, pw, ph);
                 std::vector<uint8_t>().swap(probe);
+                // (TODO 294) The GS drawn on the GPU (PS2X_GPU, the default) publishes no software picture - copyPicture
+                // never has one - and the window shows the GPU's own (ps2_runtime's window loop: ps2_gpu::picture). Looked
+                // for only in the software one, a GS on the GPU never counted as shown: once the native renderer stopped (a
+                // lost device: the GS drawing again) every frame got the black picture, the game behind it unseen. Its
+                // newest picture counts too.
+                if (!gsShown && ps2_gpu::viewActive())
+                {
+                    ps2_gpu::Picture gpu;
+                    gsShown = ps2_gpu::picture(gpu, ~0ull) && gpu.texture != 0u;
+                }
                 if (!gsShown)
                 {
                     static Texture2D black{};
@@ -581,6 +632,25 @@ namespace nr
             {
                 g_pacedLive.store(false, std::memory_order_relaxed);
                 return false;
+            }
+            if (windowNow)
+            {
+                const uint64_t skipped = serialBefore != 0u && serial > serialBefore + 1u ? serial - serialBefore - 1u : 0u;
+                if (fresh && g_pacerOn)
+                {
+                    g_pendingShown = true;
+                    g_pendingPicture = sp;
+                    g_pendingSkipped = skipped;
+                }
+                else if (fresh)
+                    noteShown(sp, skipped);
+                else if (pacingLogOn())
+                    ++g_pacing.repeats;
+                g_pacedLive.store(true, std::memory_order_relaxed);
+                texture = wp.texture;
+                width = wp.width;
+                height = wp.height;
+                return true;
             }
             if (sharedNow)
             {
@@ -666,12 +736,198 @@ namespace nr
         return sum > 0.0 ? 1000.0 * static_cast<double>(count) / sum : 0.0;
     }
 
+    // ---- TODO 295: FSR 1 (AMD FidelityFX Super Resolution 1, MIT) as the window's upscaler ----
+    // At a render scale under 100% the picture is smaller than the window; the window stretched it (bilinear). With
+    // F1 > Graphics > Upscaler at Auto or FSR 1 it is drawn here instead: EASU (the edge-adaptive upscale, its 12 taps
+    // read with texelFetch - GL 3.3 has no textureGather) into a texture of the window's size, then RCAS (its
+    // sharpening) onto the window. PR #23's CAS in the FXAA pass is skipped meanwhile (frame::sharpenAmount: one
+    // sharpening, not two). Not enlarged (100%), Bilinear, or the shaders not made: the window's own stretch, as before.
+    namespace fsr
+    {
+        const char *const kEasu = R"(#version 330
+in vec2 fragTexCoord;
+out vec4 finalColor;
+uniform sampler2D texture0;
+vec3 tap(ivec2 p)
+{
+    ivec2 s = textureSize(texture0, 0);
+    return texelFetch(texture0, clamp(p, ivec2(0), s - 1), 0).rgb;
+}
+float luma(vec3 c) { return c.b * 0.5 + (c.r * 0.5 + c.g); }
+void setF(inout vec2 dir, inout float len, vec2 pp, int corner, float lA, float lB, float lC, float lD, float lE)
+{
+    float w = corner == 0 ? (1.0 - pp.x) * (1.0 - pp.y) : corner == 1 ? pp.x * (1.0 - pp.y) : corner == 2 ? (1.0 - pp.x) * pp.y : pp.x * pp.y;
+    float dc = lD - lC, cb = lC - lB;
+    float lenX = 1.0 / max(max(abs(dc), abs(cb)), 1.0 / 65536.0);
+    float dirX = lD - lB;
+    dir.x += dirX * w;
+    lenX = clamp(abs(dirX) * lenX, 0.0, 1.0);
+    len += lenX * lenX * w;
+    float ec = lE - lC, ca = lC - lA;
+    float lenY = 1.0 / max(max(abs(ec), abs(ca)), 1.0 / 65536.0);
+    float dirY = lE - lA;
+    dir.y += dirY * w;
+    lenY = clamp(abs(dirY) * lenY, 0.0, 1.0);
+    len += lenY * lenY * w;
+}
+void tapF(inout vec3 aC, inout float aW, vec2 off, vec2 dir, vec2 len, float lob, float clp, vec3 c)
+{
+    vec2 v = vec2(off.x * dir.x + off.y * dir.y, off.x * -dir.y + off.y * dir.x) * len;
+    float d2 = min(v.x * v.x + v.y * v.y, clp);
+    float wB = 2.0 / 5.0 * d2 - 1.0;
+    float wA = lob * d2 - 1.0;
+    wB *= wB;
+    wA *= wA;
+    wB = 25.0 / 16.0 * wB - (25.0 / 16.0 - 1.0);
+    float w = wB * wA;
+    aC += c * w;
+    aW += w;
+}
+void main()
+{
+    vec2 pp = fragTexCoord * vec2(textureSize(texture0, 0)) - 0.5;
+    vec2 fp = floor(pp);
+    pp -= fp;
+    ivec2 o = ivec2(fp);
+    vec3 b = tap(o + ivec2(0, -1)), c = tap(o + ivec2(1, -1));
+    vec3 e = tap(o + ivec2(-1, 0)), f = tap(o), g = tap(o + ivec2(1, 0)), h = tap(o + ivec2(2, 0));
+    vec3 i = tap(o + ivec2(-1, 1)), j = tap(o + ivec2(0, 1)), k = tap(o + ivec2(1, 1)), l = tap(o + ivec2(2, 1));
+    vec3 n = tap(o + ivec2(0, 2)), oo = tap(o + ivec2(1, 2));
+    float bL = luma(b), cL = luma(c), eL = luma(e), fL = luma(f), gL = luma(g), hL = luma(h);
+    float iL = luma(i), jL = luma(j), kL = luma(k), lL = luma(l), nL = luma(n), oL = luma(oo);
+    vec2 dir = vec2(0.0);
+    float len = 0.0;
+    setF(dir, len, pp, 0, bL, eL, fL, gL, jL);
+    setF(dir, len, pp, 1, cL, fL, gL, hL, kL);
+    setF(dir, len, pp, 2, fL, iL, jL, kL, nL);
+    setF(dir, len, pp, 3, gL, jL, kL, lL, oL);
+    vec2 dir2 = dir * dir;
+    float dirR = dir2.x + dir2.y;
+    bool zro = dirR < 1.0 / 32768.0;
+    dirR = zro ? 1.0 : inversesqrt(dirR);
+    dir.x = zro ? 1.0 : dir.x;
+    dir *= dirR;
+    len = len * 0.5;
+    len *= len;
+    float stretch = (dir.x * dir.x + dir.y * dir.y) / max(abs(dir.x), abs(dir.y));
+    vec2 len2 = vec2(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);
+    float lob = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * len;
+    float clp = 1.0 / lob;
+    vec3 min4 = min(min(f, g), min(j, k));
+    vec3 max4 = max(max(f, g), max(j, k));
+    vec3 aC = vec3(0.0);
+    float aW = 0.0;
+    tapF(aC, aW, vec2(0.0, -1.0) - pp, dir, len2, lob, clp, b);
+    tapF(aC, aW, vec2(1.0, -1.0) - pp, dir, len2, lob, clp, c);
+    tapF(aC, aW, vec2(-1.0, 1.0) - pp, dir, len2, lob, clp, i);
+    tapF(aC, aW, vec2(0.0, 1.0) - pp, dir, len2, lob, clp, j);
+    tapF(aC, aW, vec2(0.0, 0.0) - pp, dir, len2, lob, clp, f);
+    tapF(aC, aW, vec2(-1.0, 0.0) - pp, dir, len2, lob, clp, e);
+    tapF(aC, aW, vec2(1.0, 1.0) - pp, dir, len2, lob, clp, k);
+    tapF(aC, aW, vec2(2.0, 1.0) - pp, dir, len2, lob, clp, l);
+    tapF(aC, aW, vec2(2.0, 0.0) - pp, dir, len2, lob, clp, h);
+    tapF(aC, aW, vec2(1.0, 0.0) - pp, dir, len2, lob, clp, g);
+    tapF(aC, aW, vec2(1.0, 2.0) - pp, dir, len2, lob, clp, oo);
+    tapF(aC, aW, vec2(0.0, 2.0) - pp, dir, len2, lob, clp, n);
+    finalColor = vec4(min(max4, max(min4, aC / aW)), 1.0);
+}
+)";
+        const char *const kRcas = R"(#version 330
+in vec2 fragTexCoord;
+out vec4 finalColor;
+uniform sampler2D texture0;
+uniform float sharpness;
+vec3 tap(ivec2 p)
+{
+    ivec2 s = textureSize(texture0, 0);
+    return texelFetch(texture0, clamp(p, ivec2(0), s - 1), 0).rgb;
+}
+void main()
+{
+    ivec2 sp = ivec2(floor(fragTexCoord * vec2(textureSize(texture0, 0))));
+    vec3 b = tap(sp + ivec2(0, -1)), d = tap(sp + ivec2(-1, 0)), e = tap(sp), f = tap(sp + ivec2(1, 0)), h = tap(sp + ivec2(0, 1));
+    vec3 mn4 = min(min(b, d), min(f, h));
+    vec3 mx4 = max(max(b, d), max(f, h));
+    vec3 hitMin = min(mn4, e) / (4.0 * mx4 + 1.0 / 65536.0);
+    vec3 hitMax = (1.0 - max(mx4, e)) / (4.0 * mn4 - 4.0 - 1.0 / 65536.0);
+    vec3 lobeRGB = max(-hitMin, hitMax);
+    float lobe = max(-(0.25 - 1.0 / 16.0), min(max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b)), 0.0)) * sharpness;
+    finalColor = vec4((lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0), 1.0);
+}
+)";
+        Shader g_easu{}, g_rcas{};
+        int g_sharpLoc = -1;
+        bool g_tried = false, g_ok = false;
+        RenderTexture2D g_mid{};
+        uint64_t g_drawn = 0;
+
+        bool ready()
+        {
+            if (g_tried)
+                return g_ok;
+            g_tried = true;
+            g_easu = LoadShaderFromMemory(nullptr, kEasu);
+            g_rcas = LoadShaderFromMemory(nullptr, kRcas);
+            const unsigned int fallback = rlGetShaderIdDefault();
+            g_ok = g_easu.id != 0u && g_easu.id != fallback && g_rcas.id != 0u && g_rcas.id != fallback;
+            if (g_ok)
+                g_sharpLoc = GetShaderLocation(g_rcas, "sharpness");
+            std::fprintf(stderr, "[native render] FSR 1 upscaler: %s\n", g_ok ? "ready (EASU + RCAS)" : "its shaders did not build - the window's stretch is used");
+            return g_ok;
+        }
+
+        // ps2_host_display::setPictureDrawer: true when drawn.
+        bool draw(unsigned int texture, int width, int height, float srcX, float srcY, float srcW, float srcH, float dstX, float dstY,
+                  float dstW, float dstH)
+        {
+            if (!frame::fsrOn() || dstW <= srcW * 1.01f || dstH <= srcH * 1.01f || !ready())
+                return false;
+            const int ow = static_cast<int>(std::lround(dstW)), oh = static_cast<int>(std::lround(dstH));
+            if (ow <= 0 || oh <= 0)
+                return false;
+            if (g_mid.id == 0u || g_mid.texture.width != ow || g_mid.texture.height != oh)
+            {
+                if (g_mid.id != 0u)
+                    UnloadRenderTexture(g_mid);
+                g_mid = LoadRenderTexture(ow, oh);
+                if (g_mid.id == 0u)
+                    return false;
+            }
+            const Texture2D picture{texture, width, height, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+            BeginTextureMode(g_mid);
+            BeginShaderMode(g_easu);
+            DrawTexturePro(picture, Rectangle{srcX, srcY, srcW, srcH}, Rectangle{0.0f, 0.0f, static_cast<float>(ow), static_cast<float>(oh)},
+                           Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+            EndShaderMode();
+            EndTextureMode();
+            // (RCAS's sharpness in stops, 0 = the most: AMD's default 0.2; TF_NATIVE_FSR_SHARPNESS=<stops>)
+            static const float sharp = std::exp2(-(std::getenv("TF_NATIVE_FSR_SHARPNESS") ? static_cast<float>(std::atof(std::getenv("TF_NATIVE_FSR_SHARPNESS"))) : 0.2f));
+            BeginShaderMode(g_rcas);
+            SetShaderValue(g_rcas, g_sharpLoc, &sharp, SHADER_UNIFORM_FLOAT);
+            // (a render texture's rows are upside down: read it flipped)
+            DrawTexturePro(g_mid.texture, Rectangle{0.0f, 0.0f, static_cast<float>(ow), -static_cast<float>(oh)}, Rectangle{dstX, dstY, dstW, dstH},
+                           Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+            EndShaderMode();
+            // (told for each new size, the first few)
+            static int lastW = 0, lastH = 0;
+            if ((width != lastW || height != lastH) && g_drawn < 8u)
+            {
+                ++g_drawn;
+                lastW = width;
+                lastH = height;
+                std::fprintf(stderr, "[native render] FSR 1 upscaler: %dx%d (shown %.0fx%.0f of it) -> %dx%d\n", width, height, srcW, srcH, ow, oh);
+            }
+            return true;
+        }
+    }
+
     void startLivePicture()
     {
         const char *live = std::getenv("TF_NATIVE_LIVE");
         if (!live || *live != '1')
             return;
         ps2_host_display::setPictureProvider(&provide);
+        ps2_host_display::setPictureDrawer(&fsr::draw); // (TODO 295: FSR 1 when enlarged and chosen)
         std::fprintf(stderr, "[native render] the native picture is shown live\n");
         // (N9) Shown as it is handed over (TF_PACING, nr_d3d.cpp): paced by default; TF_PACING=0 at the VBlanks, as before.
         if (backend().pacingMode() != 0)

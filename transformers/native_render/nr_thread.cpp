@@ -11,6 +11,7 @@
 #include "nr_backend.h"
 #include "nr_shader.h"
 #include "nr_n5.h"
+#include "nr_taa.h"
 #include "view_turn.h"
 #include "runtime/ps2_thread_placement.h"
 
@@ -522,7 +523,8 @@ namespace nr
             {
                 // (TF_POSES_ALT=<s>, a measuring aid: on and off by turns every that many seconds - an A/B within one run)
                 static const int alt = std::getenv("TF_POSES_ALT") ? std::atoi(std::getenv("TF_POSES_ALT")) : 0;
-                bool on = tf::port::posePictures();
+                // (TODO 299: one picture a frame with the temporal upscaler - its dispatch runs once a frame)
+                bool on = tf::port::posePictures() && !taa::upscalerOn();
                 if (alt > 0 && on)
                 {
                     static const auto t0 = std::chrono::steady_clock::now();
@@ -1102,6 +1104,7 @@ namespace nr
                 {
                     Draw &d = f.draws[sv.draw];
                     d.turned = true;
+                    d.sceneMotion = true;
                     d.meshB = sv.meshB;
                     const auto camera = st.cameraDelta.find(bufferOf(d.target));
                     M4 b = sv.a;
@@ -1563,8 +1566,23 @@ namespace nr
                 {
                     if (!flatFrame)
                     {
+                        // (TODO 299) The temporal upscaler's motion: each draw's frame before's pose also for a frame of
+                        // one picture (the in-between pictures' matching, as their frames get it).
+                        if (taa::wantsMotion())
+                        {
+                            prepare(f, true);
+                            assign(f);
+                            static int dbgN = 0;
+                            if (std::getenv("TF_TAA_LOG") && (dbgN++ % 60) == 0)
+                            {
+                                size_t withB = 0, scene = 0; double most = 0.0;
+                                for (const Draw &d : f.draws)
+                                    if (d.turned) { ++scene; if (d.hasB) { ++withB; const float *a = d.matrix, *b = d.matrixB; if (std::fabs(a[15]) > 1e-6f && std::fabs(b[15]) > 1e-6f) { const double dx = a[12] / a[15] - b[12] / b[15], dy = a[13] / a[15] - b[13] / b[15]; most = std::max(most, std::sqrt(dx * dx + dy * dy)); } } }
+                                std::fprintf(stderr, "[taa] tick %llu: %zu turned draws, %zu with a frame before's pose, largest origin move %g GS pixels, %zu saved, cut %d, field B moment %.3f, poses %d\n", (unsigned long long)f.tick, scene, withB, most, g_poses.saved.size(), (int)g_poses.cutNow, (double)f.fieldBMoment, (int)wanted());
+                            }
+                        }
                         markTurned(f);
-                        if (turnPictures(f, shot, prev, span, period))
+                        if (!taa::upscalerOn() && turnPictures(f, shot, prev, span, period))
                         {
                             st.lastFlat.clear();
                             return;
@@ -2303,14 +2321,16 @@ namespace nr
                                  static_cast<unsigned long long>(job.frame.tick), ms, job.readMs, ms - job.readMs, job.frame.draws.size());
                 }
             }
-            static double spent = 0.0, worst = 0.0;
+            static double spent = 0.0, worst = 0.0, readSpent = 0.0;
             static uint32_t frames = 0u;
             spent += ms;
+            readSpent += job.readMs;
             worst = std::max(worst, ms);
             if (++frames == 300u)
             {
-                std::fprintf(stderr, "[native render] render thread: %.2f ms a frame on average, %.2f at worst\n", spent / 300.0, worst);
-                spent = worst = 0.0;
+                std::fprintf(stderr, "[native render] render thread: %.2f ms a frame on average, %.2f at worst (the list read %.2f, the drawing %.2f)\n",
+                             spent / 300.0, worst, readSpent / 300.0, (spent - readSpent) / 300.0);
+                spent = worst = readSpent = 0.0;
                 frames = 0u;
             }
         }

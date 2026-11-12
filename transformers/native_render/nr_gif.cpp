@@ -15,6 +15,7 @@
 namespace nr::gif
 {
     thread_local bool t_offList = false;
+    thread_local bool t_logWindow = true;
     namespace
     {
         uint64_t lo64(const uint32_t *q) { return static_cast<uint64_t>(q[0]) | static_cast<uint64_t>(q[1]) << 32; }
@@ -234,7 +235,13 @@ namespace nr::gif
                     // count, and whether it came from the list's own words or applied from off the list, t_offList; 400 lines)
                     static const uint32_t want = std::getenv("TF_NATIVE_TEX0LOG") ? static_cast<uint32_t>(std::strtoul(std::getenv("TF_NATIVE_TEX0LOG"), nullptr, 16)) : 0xFFFFFFFFu;
                     static int left = 400;
-                    if ((static_cast<uint32_t>(value) & 0x3FFFu) == want && left-- > 0)
+                    static const uint32_t want2 = [] {
+                        const char *e = std::getenv("TF_NATIVE_TEX0LOG");
+                        const char *comma = e ? std::strchr(e, ',') : nullptr;
+                        return comma ? static_cast<uint32_t>(std::strtoul(comma + 1, nullptr, 16)) : 0xFFFFFFFFu;
+                    }();
+                    const uint32_t tbp = static_cast<uint32_t>(value) & 0x3FFFu;
+                    if ((tbp == want || tbp == want2) && t_logWindow && left-- > 0)
                         std::fprintf(stderr, "[native render] TEX0_%u %016llx at write %llu, %s\n", reg - 5u, static_cast<unsigned long long>(value),
                                      static_cast<unsigned long long>(s.writes), t_offList ? "off the list" : "the list's own");
                 }

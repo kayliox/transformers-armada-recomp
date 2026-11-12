@@ -31,6 +31,10 @@ namespace nr
         Backend &vulkanBackend(); // (nr_vulkan.cpp)
         gfx::Device &vulkanDevice();
     }
+    namespace vk::window
+    {
+        bool beforeWindow(); // (nr_vulkan_window.cpp)
+    }
 #endif
 
     namespace
@@ -85,6 +89,18 @@ namespace nr
         return true;
 #else
         return false;
+#endif
+    }
+}
+
+namespace nr
+{
+    void beforeWindow()
+    {
+#if defined(TF_VULKAN)
+        // (Milestone 3) Vulkan presents SDL3's window itself: the window is made a Vulkan window.
+        if (vulkanChosen())
+            vk::window::beforeWindow();
 #endif
     }
 }

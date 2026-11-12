@@ -73,6 +73,55 @@
   sets made before this fix, and "HD textures ready" no longer comes back at every start once the set is finished.
   `make_hd_textures.sh` checks the set's images once, as the Windows maker does (0.4.7's checks too).
 
+## 0.6.8
+
+**New**
+- F1 > Display > Low-latency pacing: shows each picture as soon as it is drawn, for a little less input delay at the
+  cost of less even frame pacing (best with FreeSync / G-Sync). Off by default.
+- F1 > Controls > Mouse > Right-click aim: Click (as before) or Hold (aim while you hold the button; the mouse wheel
+  steps the zoom then). The mouse wheel can now be bound to any action in Controls > Keys, for example Jump.
+- F1 > Graphics > Upscaler: AMD FSR 1 for a sharper picture when the render scale is under 100% (choose FSR 1 or
+  Auto; Bilinear, the old stretch, stays the default for now). At 100% nothing changes.
+- F1 > Graphics > Sharpening: a sharper picture when the render scale is under 100%, at no cost to the
+  frame rate (Auto sharpens only then; On always; Off never). Thanks to TheBrousse.
+
+**Fixed**
+- Keyboard and mouse: the Mini-Con descriptions and the equip page now name your keys ("Press E to launch a missile",
+  "Left-click to fire") instead of controller buttons.
+- European disc: with the keyboard, the hints in French, German, Italian and Spanish name your keys too. Thanks to
+  TheBrousse.
+- Built-in graphics (Intel and similar): a finished picture no longer waits before it reaches the screen, so the
+  stutter at a steady 60 is much smaller (the lowest frame rates rose from about 30 to about 45 on an Iris Xe laptop).
+- The setup window no longer uses a slice of your processor the whole time it builds (about 40 times less now).
+- First-person view: the camera no longer jolts with your robot's landing, skidding and shooting animations.
+- If the game cannot find a screen when it starts (a monitor switched off or unplugged), it now says so instead of
+  crashing.
+- Save states made in another folder or on another PC now find their files again when loaded.
+- Mouse: the crosshair (the game's original one too) stays still and no longer shakes while you turn and aim, near
+  or far, and your shots go where it points.
+  (F1 > Controls, "Still crosshair", with Show all settings: With the mouse / Always / Off.)
+- Mouse: right click now enters the aiming view while walking or running too (it only worked standing still), and
+  quick clicks are no longer lost.
+- Mouse: the game's Look Spring no longer pulls the camera back to level while you walk; it stays on for the
+  controller's right stick.
+- Mouse: in Greenland the camera no longer swings into the cliffs, high above or straight down on your robot when you
+  turn quickly, and moving the mouse while a level loads no longer throws the view around when it starts.
+- Deep Amazon temple: the wall torch's fire no longer shows as flickering white blocks with the DX12 renderer.
+- When the graphics driver restarts in the middle of play (a GPU hang), the game no longer goes on with the slow
+  emulated drawing for the rest of the session: it saves where you are, starts itself again and carries on from that
+  moment, and says so. If it happens again in the same session it suggests lower graphics settings.
+- If the graphics driver restarts too often and the game goes on with the emulated drawing, you now see the game
+  instead of a black screen. After the settings' Restart now, the menus are drawn at your screen's size again (they
+  were drawn at full Resolution, slower), and a Renderer changed to Emulated before the restart is used.
+
+**Changed**
+- The frame rate is capped at 60 by default. Choose a higher limit or Unlimited in F1 > Display > Frame rate limit
+  (a limit you already chose is kept).
+- Built-in graphics: lowering the render scale now saves much more graphics time, because the game's effect passes are
+  drawn at the lowered size too (a ThinkPad T480s at 720p and 50% needs about a third less per frame).
+- Behind the scenes: more of the Vulkan renderer (the way to Linux and the Steam Deck), still off by default. Thanks to TPepperoni.
+- "Straight to the main menu" now gets you to the menu in about 1.5 seconds instead of about 14.
+
 ## 0.6.7
 
 **Fixed**

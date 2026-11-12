@@ -18,7 +18,7 @@ Some antivirus programs with strict settings (seen with Trend Micro) flag `tfa-s
 setup builds on your PC, such as `ps2analyzer.exe`: they are new, unsigned programs it has not seen before. This is a
 false alarm. Don't turn the antivirus off. Instead:
 
-1. Add the game's install folder (for example `C:\Users\<your name>\Games\TFA`) as an exclusion (an "allowed" or
+1. Add the game's install folder (for example `D:\Games\TFA`) as an exclusion (an "allowed" or
    "exception" folder) in your antivirus.
 2. Restore the removed file from the antivirus's quarantine, or download `tfa-setup.exe` again from the releases page.
    Only restore a `tfa-setup.exe` you downloaded from this project's GitHub releases.

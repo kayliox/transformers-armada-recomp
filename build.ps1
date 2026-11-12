@@ -31,7 +31,9 @@ param(
     [switch]$SkipRecompile,
     [switch]$NoPatches,     # leave PS2Recomp as it is (when editing it directly)
     [switch]$Public,        # the public build (no overlay\: no mods) into out\build-public, from a tree that has the overlay
-    [switch]$Vulkan,        # the Vulkan backend too (-DTF_VULKAN=ON; in development, off by default). The build folder keeps it.
+    [switch]$Vulkan,        # the Vulkan backend too (-DTF_VULKAN=ON, and -Sdl3: it presents SDL3's window; in development, off by default). The build folder keeps it.
+    [switch]$Sdl3,          # SDL3 as the window and its input, chosen at run time with PS2X_PLATFORM=sdl3 (-DPS2X_SDL3=ON). Kept too.
+    [switch]$FsrSdk,        # (TODO 299) AMD's FidelityFX SDK DLLs fetched next to the game (-DTF_FSR_SDK=ON; off by default). The build folder keeps it.
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$OverlayArgs  # the overlay's own (overlay\build_hooks.ps1)
 )
 
@@ -313,7 +315,9 @@ $genArgs = Get-GeneratorArgs $ToolsBuild
 $cmakeArgs = @("-S", $Root, "-B", $Build, "-DTF_GAME_VERSION=$GameVersion") + (Get-GeneratorArgs $Build)
 if ($Public) { $cmakeArgs += "-DTF_OVERLAY_DIR=" } # (the overlay left out: transformers\CMakeLists.txt)
 if ($Vulkan) { $cmakeArgs += "-DTF_VULKAN=ON" }     # (the Vulkan backend: transformers\CMakeLists.txt; -DTF_VULKAN=OFF turns it off again)
+if ($FsrSdk) { $cmakeArgs += "-DTF_FSR_SDK=ON" }     # (the FidelityFX SDK's DLLs: transformers\CMakeLists.txt; -DTF_FSR_SDK=OFF stops fetching them)
 $cmakeArgs += "-DTF_GAME_DIR=$Game"                 # (the disc's files where they are: game\ or the install's data\game)
+if ($Sdl3 -or $Vulkan) { $cmakeArgs += "-DPS2X_SDL3=ON" } # (SDL3 as the window at run time: PS2Recomp's ps2_platform.h - Vulkan presents it, so -Vulkan too)
 
 # What the translation (steps 3-4) depends on, one line per input: "<name> <SHA-256>". The
 # recompiler and analyzer are the programs themselves - MSBuild relinks them only when a source

@@ -1,0 +1,188 @@
+Subject: [PATCH] Runtime: the window's ImGui overlays through a host (rlImGui by default)
+
+The overlays' widgets stay plain ImGui; only the frame around them - ImGui set up for the window, a frame begun
+with its input and size, the finished frame drawn into it - goes through ps2_overlay's host. The default host is
+rlImGui, so the raylib window draws exactly as before. A window of another kind (an SDL3 window drawn by SDL's
+renderer or by Vulkan: the Vulkan track's milestone 3) sets a host of its own before the overlays are set up.
+
+hostFeedsInput(): the host hands ImGui each of the window's input events itself, so a game's workarounds for
+rlImGui's once-a-picture reading (TODO 170 / 174) can stay off with it. The debugger (ps2_debug_panel.cpp) now
+begins and ends its frame through the host; ps2_overlay.cpp is built with it (PS2X_ENABLE_DEBUG_UI).
+
+diff --git a/ps2xRuntime/CMakeLists.txt b/ps2xRuntime/CMakeLists.txt
+index 50b5349..c35858e 100644
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -615,6 +615,7 @@ target_link_libraries(ps2EntryRunner
+ if(PS2X_ENABLE_DEBUG_UI AND NOT PS2X_IS_VITA AND NOT PS2X_IS_ANDROID)
+     target_sources(ps2EntryRunner PRIVATE
+         src/lib/ps2_debug_panel.cpp
++        src/lib/ps2_overlay.cpp
+     )
+     target_link_libraries(ps2EntryRunner PRIVATE rlImGui imgui)
+     target_compile_definitions(ps2EntryRunner PRIVATE PS2X_ENABLE_DEBUG_UI=1)
+diff --git a/ps2xRuntime/include/runtime/ps2_overlay.h b/ps2xRuntime/include/runtime/ps2_overlay.h
+new file mode 100644
+index 0000000..b6ad491
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_overlay.h
+@@ -0,0 +1,38 @@
++#pragma once
++
++// The window's ImGui overlays (the runtime's debugger, a game's own menus) and what draws them.
++//
++// The overlays' widgets are plain ImGui. Only the frame around them belongs to the window: setting ImGui up for it,
++// starting a frame with its input and size, and drawing the finished frame into it. That goes through the host set
++// here. The default host is rlImGui (the raylib window, as before). A window of another kind (an SDL3 window drawn by
++// SDL's renderer or by Vulkan) sets a host of its own before the overlays are set up.
++//
++// One window picture may hold two ImGui frames, one after the other in the same ImGui context (the debugger's and a
++// game's menu): each begin() ... end() pair is one frame, drawn over the picture in that order.
++//
++// (Built with the debug UI: PS2X_ENABLE_DEBUG_UI.)
++namespace ps2_overlay
++{
++    struct Host
++    {
++        const char *name = "";
++        void (*setup)(bool darkTheme) = nullptr; // ImGui made and set up for the window (once)
++        void (*shutdown)() = nullptr;
++        void (*begin)() = nullptr; // ImGui::NewFrame, with the window's input and size
++        void (*end)() = nullptr;   // ImGui::Render, and the frame drawn into the window
++        // The host hands ImGui each of the window's input events itself (SDL3's), so a game's workarounds for
++        // rlImGui's once-a-picture reading (its own feeding of characters, the wheel, button and modifier states)
++        // stay off.
++        bool feedsInput = false;
++    };
++
++    // Before setup() (the platform's window, when it is made). The default: rlImGui.
++    void setHost(const Host &host);
++    const char *hostName();
++    bool hostFeedsInput();
++
++    void setup(bool darkTheme);
++    void shutdown();
++    void begin();
++    void end();
++}
+diff --git a/ps2xRuntime/src/lib/ps2_debug_panel.cpp b/ps2xRuntime/src/lib/ps2_debug_panel.cpp
+index f5a5d65..42e9cf5 100644
+--- a/ps2xRuntime/src/lib/ps2_debug_panel.cpp
++++ b/ps2xRuntime/src/lib/ps2_debug_panel.cpp
+@@ -12,7 +12,7 @@
+ 
+ #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
+ #include "imgui.h"
+-#include "rlImGui.h"
++#include "runtime/ps2_overlay.h"
+ #include "raylib.h"
+ #endif
+ 
+@@ -2181,7 +2181,7 @@ void PS2DebugPanel::initialize()
+ #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
+     if (!m_initialized)
+     {
+-        rlImGuiSetup(true);
++        ps2_overlay::setup(true);
+         m_initialized = true;
+     }
+ #endif
+@@ -2192,7 +2192,7 @@ void PS2DebugPanel::shutdown()
+ #if defined(PS2X_ENABLE_DEBUG_UI) && !defined(PLATFORM_VITA)
+     if (m_initialized)
+     {
+-        rlImGuiShutdown();
++        ps2_overlay::shutdown();
+         m_initialized = false;
+     }
+ #endif
+@@ -2217,7 +2217,7 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
+         return;
+     }
+ 
+-    rlImGuiBegin();
++    ps2_overlay::begin();
+ 
+     ImGui::SetNextWindowSize(ImVec2(780.0f, 620.0f), ImGuiCond_FirstUseEver);
+     if (ImGui::Begin("Runtime Debugger", &m_visible, ImGuiWindowFlags_MenuBar))
+@@ -2304,7 +2304,7 @@ void PS2DebugPanel::draw(PS2Runtime &runtime)
+     }
+     ImGui::End();
+ 
+-    rlImGuiEnd();
++    ps2_overlay::end();
+ #else
+     (void)runtime;
+ #endif
+diff --git a/ps2xRuntime/src/lib/ps2_overlay.cpp b/ps2xRuntime/src/lib/ps2_overlay.cpp
+new file mode 100644
+index 0000000..9a79d53
+--- /dev/null
++++ b/ps2xRuntime/src/lib/ps2_overlay.cpp
+@@ -0,0 +1,66 @@
++// The window's ImGui overlays through a host (ps2_overlay.h). The default host is rlImGui.
++#include "runtime/ps2_overlay.h"
++
++#include "rlImGui.h"
++
++namespace ps2_overlay
++{
++    namespace
++    {
++        Host rlImGuiHost()
++        {
++            Host h;
++            h.name = "rlImGui";
++            h.setup = [](bool darkTheme) { rlImGuiSetup(darkTheme); };
++            h.shutdown = [] { rlImGuiShutdown(); };
++            h.begin = [] { rlImGuiBegin(); };
++            h.end = [] { rlImGuiEnd(); };
++            return h;
++        }
++
++        Host &current()
++        {
++            static Host host = rlImGuiHost();
++            return host;
++        }
++    }
++
++    void setHost(const Host &host)
++    {
++        current() = host;
++    }
++
++    const char *hostName()
++    {
++        return current().name;
++    }
++
++    bool hostFeedsInput()
++    {
++        return current().feedsInput;
++    }
++
++    void setup(bool darkTheme)
++    {
++        if (current().setup)
++            current().setup(darkTheme);
++    }
++
++    void shutdown()
++    {
++        if (current().shutdown)
++            current().shutdown();
++    }
++
++    void begin()
++    {
++        if (current().begin)
++            current().begin();
++    }
++
++    void end()
++    {
++        if (current().end)
++            current().end();
++    }
++}
