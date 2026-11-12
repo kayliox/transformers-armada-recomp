@@ -1,3 +1,5 @@
+cmake_minimum_required(VERSION 3.21)
+
 # Copies the FFmpeg libraries the executable needs beside it, with their own dependencies, and the game asks the
 # loader to look there first (transformers/CMakeLists.txt: BUILD_RPATH $ORIGIN, DT_RPATH).
 #
