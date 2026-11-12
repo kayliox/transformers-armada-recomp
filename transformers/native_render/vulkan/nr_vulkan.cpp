@@ -3928,20 +3928,22 @@ namespace nr::vulkan
             }
             bool latestShared(d3d::SharedPicture &, uint64_t &) override { return false; }
             void sharedHeld(int) override {}
-#if defined(__linux__)
-            bool waitPicture(uint64_t serial, int64_t untilNs, int64_t &lastNs) override { return g_pub.wait(serial, untilNs, lastNs); }
-#else
             bool waitPicture(uint64_t serial, int64_t untilNs, int64_t &lastNs) override
             {
+                // (the SDL3 window publishes its pictures separately from the TF_VK_ALONE mailbox)
                 if (vk::window::on())
                     return vk::window::waitNewer(serial, untilNs, lastNs);
+#if defined(__linux__)
+                return g_pub.wait(serial, untilNs, lastNs);
+#else
                 std::unique_lock<std::mutex> lock(g_pub.mutex);
                 const auto until = Clock::time_point(std::chrono::nanoseconds(untilNs));
                 g_pub.cv.wait_until(lock, until, [serial] { return g_pub.serial != serial; });
                 lastNs = g_pub.lastNs;
                 return g_pub.serial != serial;
-            }
 #endif
+            }
+
             // (the game's window: each picture shown when the shared pacer hands it over - nr_pace.h, TF_PACING)
             int pacingMode() override { return vk::window::on() ? pace::mode() : 0; }
             bool presentsWindow() override { return vk::window::on(); }
