@@ -168,13 +168,17 @@ namespace key_text
             static const std::map<std::string, std::string> mouse[5] = {
                 {},
                 {{"left click", "clic gauche"}, {"right click", "clic droit"}, {"middle click", "clic milieu"},
-                 {"side mouse button", "bouton souris"}, {"extra mouse button", "bouton souris"}},
+                 {"side mouse button", "bouton souris"}, {"extra mouse button", "bouton souris"},
+                 {"wheel up", "molette haut"}, {"wheel down", "molette bas"}},
                 {{"left click", "Linksklick"}, {"right click", "Rechtsklick"}, {"middle click", "Mittelklick"},
-                 {"side mouse button", "Maustaste"}, {"extra mouse button", "Maustaste"}},
+                 {"side mouse button", "Maustaste"}, {"extra mouse button", "Maustaste"},
+                 {"wheel up", "Mausrad hoch"}, {"wheel down", "Mausrad runter"}},
                 {{"left click", "clic sinistro"}, {"right click", "clic destro"}, {"middle click", "clic centrale"},
-                 {"side mouse button", "tasto mouse"}, {"extra mouse button", "tasto mouse"}},
+                 {"side mouse button", "tasto mouse"}, {"extra mouse button", "tasto mouse"},
+                 {"wheel up", "rotellina su"}, {"wheel down", "rotellina gi\xf9"}},
                 {{"left click", "clic izquierdo"}, {"right click", "clic derecho"}, {"middle click", "clic central"},
-                 {"side mouse button", "bot\xf3n del rat\xf3n"}, {"extra mouse button", "bot\xf3n del rat\xf3n"}}};
+                 {"side mouse button", "bot\xf3n del rat\xf3n"}, {"extra mouse button", "bot\xf3n del rat\xf3n"},
+                 {"wheel up", "rueda arriba"}, {"wheel down", "rueda abajo"}}};
             const auto key = [&](const char *button) {
                 std::string k = shownKey(keys, button);
                 if (k.empty() && std::string(button) == "r3" && !ps2_host_input::mouseButtonBound(1))
@@ -187,6 +191,8 @@ namespace key_text
             const std::string l1 = key("l1"), cross = key("cross"), r3 = key("r3");
             // (a button on the mouse is no key: "le clic milieu", not "la touche clic milieu")
             const auto onMouse = [&](const char *button) { return mouse[lang].count(shownKey(keys, button)) != 0; };
+            // (the wheel is feminine in French and Italian: "la molette haut enfonc\xe9e", "la rotellina su")
+            const auto wheel = [](const std::string &name) { return name.rfind("molette", 0) == 0 || name.rfind("rotellina", 0) == 0; };
             std::string s = original;
             if (lang == 1)
             {
@@ -196,9 +202,10 @@ namespace key_text
                 replaceAll(s, "Joystick analogique droit", "Souris");
                 if (!l1.empty() && onMouse("l1"))
                 {
-                    replaceAll(s, "la touche L1 enfonc\xe9" "e", "le " + l1 + " enfonc\xe9");
-                    replaceAll(s, "touche L1 enfonc\xe9" "e", l1 + " enfonc\xe9");
-                    replaceAll(s, "la touche L1", "le " + l1);
+                    const std::string le = wheel(l1) ? "la " : "le ", held = wheel(l1) ? " enfonc\xe9" "e" : " enfonc\xe9";
+                    replaceAll(s, "la touche L1 enfonc\xe9" "e", le + l1 + held);
+                    replaceAll(s, "touche L1 enfonc\xe9" "e", l1 + held);
+                    replaceAll(s, "la touche L1", le + l1);
                     replaceAll(s, "touche L1", l1);
                 }
                 else if (!l1.empty())
@@ -231,9 +238,17 @@ namespace key_text
                 if (!r3.empty())
                     replaceAll(s, "Ricognizione: tasto R3", "Ricognizione: " + r3);
                 if (!l1.empty())
+                {
+                    if (wheel(l1))
+                        replaceAll(s, "il tasto L1", "la " + l1);
                     replaceAll(s, "tasto L1", onMouse("l1") ? l1 : "tasto " + l1);
+                }
                 if (!cross.empty())
+                {
+                    if (wheel(cross))
+                        replaceAll(s, "il tasto X", "la " + cross);
                     replaceAll(s, "tasto X", onMouse("cross") ? cross : "tasto " + cross);
+                }
             }
             else
             {
