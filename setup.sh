@@ -7,19 +7,26 @@
 #
 #   ./setup.sh --iso "/path/to/Transformers (USA).iso"
 #   ./setup.sh            # again later: reuses the path it remembered
+#   ./setup.sh --gentle on   # (TODO 310) easy on the PC: the build on half the processor threads at a lower priority
+#                            # (kept in hd_textures/hd_options.json, so update.sh goes easy too; --gentle off undoes it)
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 state=$root/.setup.json
-iso=""
+iso="" gentle=""
 while [ $# -gt 0 ]; do
     case "$1" in
     --iso) iso=$2; shift 2 ;;
-    -h | --help) sed -n '2,10p' "$0"; exit 0 ;;
+    --gentle) gentle=$2; shift 2 ;;
+    -h | --help) sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
-step() { printf '\n==> %s\n' "$*"; }
+# (TODO 310) Each step with its time to TF_STEP_LOG when the setup or the update set it, synced to the disk at once: it
+# names the step even when the PC went off (tools/step_log.ps1's, on Windows).
+steplog() { if [ -n "${TF_STEP_LOG:-}" ]; then printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$TF_STEP_LOG" && sync "$TF_STEP_LOG" 2>/dev/null; fi; return 0; }
+step() { printf '\n==> %s\n' "$*"; steplog "setup: $*"; }
+if [ -z "${TF_STEP_LOG:-}" ]; then export TF_STEP_LOG="$root/setup_steps.log"; : >"$TF_STEP_LOG"; fi
 fail() { printf '\nsetup: %s\n' "$*" >&2; exit 1; }
 usa_size=2900951040 # Transformers (USA), SLUS-20668: the only disc the build accepts (it checks the executable inside)
 
@@ -97,11 +104,30 @@ fi
 # The check that refuses commits with game data (tools/check_no_game_data.py), for anyone who commits.
 [ -d "$root/.githooks" ] && git -C "$root" config core.hooksPath .githooks || true
 
+# (TODO 310) "Go easy on my PC", kept in hd_textures/hd_options.json beside the HD textures' choices (the update reads it)
+gentle_on=$(python3 - "$root/hd_textures/hd_options.json" "$gentle" <<'EOF'
+import json, os, sys
+path, want = sys.argv[1:]
+data = {}
+try:
+    data = json.load(open(path))
+except Exception:
+    pass
+if want in ("on", "off"):
+    data["gentle"] = want == "on"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    json.dump(data, open(path, "w"), indent=4)
+print(1 if data.get("gentle") else 0)
+EOF
+)
+build_args=()
+[ "$gentle_on" = 1 ] && build_args+=(--gentle)
 step "Building the game (build.sh)"
-if [ -f "$root/game/SLUS_206.68" ]; then "$root/build.sh"; else "$root/build.sh" --iso "$iso"; fi
+if [ -f "$root/game/SLUS_206.68" ]; then "$root/build.sh" ${build_args[@]+"${build_args[@]}"}; else "$root/build.sh" --iso "$iso" ${build_args[@]+"${build_args[@]}"}; fi
 
 for example in "$root/overlay/settings.example.ini" "$root/settings.example.ini"; do
     if [ ! -f "$root/settings.ini" ] && [ -f "$example" ]; then cp "$example" "$root/settings.ini"; fi
 done
 json "SetUpAt=$(git -C "$root" rev-parse HEAD)"
+steplog "setup: ready"
 printf '\nReady. Play with ./play.sh in %s (for Steam: add play.sh as a non-Steam game). Settings: F1 in the game.\n' "$root"

@@ -237,6 +237,10 @@ namespace pc_settings_row
             else
             {
                 r.key = e.id;
+                // (TODO 336 (22)) With the native renderer the game is drawn at the window's size and the Resolution row sets only
+                // the menus and movies: the row's name says so (F1 says it under its row).
+                if (id == "PS2X_GPU_SCALE" && ps2_settings::value("TF_RENDERER") == "native")
+                    r.label = "Menu Resolution";
                 // F1's Vibration (the rumble's strength, Off included) is also the DualSense's trigger strength: the haptic triggers
                 // are on by default and are turned off in F1 only. Another pad has no triggers to push back: it only rumbles.
                 if (id == "PS2X_SONYPAD_RUMBLE")

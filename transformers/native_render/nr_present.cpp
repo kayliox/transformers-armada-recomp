@@ -18,6 +18,7 @@
 #include "raylib.h"
 #include "rlgl.h"
 #include "nr_frame.h"
+#include "nr_pace.h" // (TODO 336: the pictures left out for the cap, in the pacing line)
 
 #include <algorithm>
 #include <atomic>
@@ -138,11 +139,13 @@ namespace nr
             }
             std::fprintf(stderr,
                          "[tf] pacing: %.1f new pictures a second (%zu in %.2f s); between them %.2f ms on average, spread %.2f ms, "
-                         "longest 1%% %.2f ms (1%% low %.1f a second), shortest %.2f, longest %.2f; repeats %u, never shown %u; "
+                         "longest 1%% %.2f ms (1%% low %.1f a second), shortest %.2f, longest %.2f; repeats %u, never shown %u, "
+                         "left out %u (the cap); "
                          "from the frame's moment to ready %.1f ms (spread %.1f), to the screen %.1f ms (spread %.2f, %.1f..%.1f); "
                          "screen %.0f Hz, variable refresh %s%s%s\n",
                          static_cast<double>(b.size()) / seconds, b.size(), seconds, mean, sd, worstMean,
-                         worstMean > 0.0 ? 1000.0 / worstMean : 0.0, lo, hi, p.repeats, p.unshown, rAvg, rSd, sAvg, sSd, sLo, sHi, hz,
+                         worstMean > 0.0 ? 1000.0 / worstMean : 0.0, lo, hi, p.repeats, p.unshown, pace::takeCapDrops(), rAvg, rSd, sAvg, sSd,
+                         sLo, sHi, hz,
                          !known ? "unknown" : ps2_host_display::screenVariable() ? "on" : "off", cadence, turn);
             std::fill(std::begin(p.held), std::end(p.held), 0u);
             p.between.clear();

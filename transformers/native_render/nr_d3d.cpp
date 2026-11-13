@@ -4447,7 +4447,13 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                 std::lock_guard<std::mutex> lock(g_published.mutex);
                 g_published.pending |= 1u << picture.index;
             }
-            pacer().submit(fence, moment, [picture](int64_t readyNs) { handOverPaced(picture, readyNs); });
+            pacer().submit(fence, moment, [picture](int64_t readyNs) { handOverPaced(picture, readyNs); },
+                           [picture] {
+                               // (TODO 336: left out for the frame-rate cap - its slot free again, nothing published)
+                               std::lock_guard<std::mutex> lock(g_published.mutex);
+                               g_published.pending &= ~(1u << picture.index);
+                               g_published.cv.notify_all();
+                           });
         }
 
         // Resources released on a thread of their own (finishSlot: a long list at once).
@@ -4703,20 +4709,85 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                 }
             }
 
+            // (TODO 336 (20)/(21)) The frame-rate cap on this path: its pictures never reach the Pacer, so the copier takes
+            // the same ONE bucket (nr::pace::capDueAt / capTryTake) and holds at most two pictures in buffers of its own - each
+            // slot's readback is copied out and freed at once, so the render thread never waits for the cap. The oldest held
+            // picture goes when its credit comes. A newly copied picture whose own moment has come (dueNs passed, or none)
+            // replaces every held one (left out, counted); one whose moment is still ahead waits behind them (lane A's note 4:
+            // the frame's own picture is never dropped for a later in-between one; with two already held, the newer of them
+            // is the one replaced). Cap 0 (Unlimited): today's hand-over, unchanged. A lost device drops what is held (not
+            // counted). TF_NATIVE_CPUCOPIER=0 (finishSlot's own hand-over) and the Linux hand-over stay uncapped (TODO 336).
+            struct Held
+            {
+                std::vector<uint32_t> pixels;
+                UINT w = 0, h = 0;
+                bool has3D = false;
+                int64_t dueNs = 0;
+            };
+
+            void publishPixels(std::vector<uint32_t> &pixels, UINT w, UINT h, bool has3D, int64_t dueNs)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(g_published.mutex);
+                    g_published.pixels.swap(pixels);
+                    g_published.shared.index = -1;
+                    g_published.has3D = has3D;
+                    g_published.width = w;
+                    g_published.height = h;
+                    ++g_published.serial;
+                    g_published.lastNs = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                }
+                g_published.cv.notify_all();
+                notePublished(dueNs, true);
+            }
+
             void run()
             {
 #if defined(_WIN32)
                 SetThreadDescription(GetCurrentThread(), L"NativePictureCopy");
 #endif
                 HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                Held held[2];   // (held[0] the oldest - the next to go)
+                int heldCount = 0;
+                // (only once capTryTake(t) has let it go)
+                const auto showOldest = [&held, &heldCount]() {
+                    publishPixels(held[0].pixels, held[0].w, held[0].h, held[0].has3D, held[0].dueNs);
+                    if (heldCount == 2)
+                        std::swap(held[0], held[1]); // (the published one's buffer - now the window's old one - kept for reuse)
+                    --heldCount;
+                };
                 for (;;)
                 {
                     Item it;
+                    bool have = false;
                     {
                         std::unique_lock<std::mutex> lock(mutex);
-                        work.wait(lock, [] { return !queue.empty(); });
-                        it = queue.front();
-                        queue.pop_front();
+                        for (;;)
+                        {
+                            if (!queue.empty())
+                            {
+                                it = queue.front();
+                                queue.pop_front();
+                                have = true;
+                                break;
+                            }
+                            if (heldCount == 0)
+                            {
+                                work.wait(lock, [] { return !queue.empty(); });
+                                continue;
+                            }
+                            const int64_t t = pace::now();
+                            const int64_t due = pace::capDueAt(t, held[0].dueNs);
+                            if (due <= t)
+                                break; // (the oldest held picture's credit has come)
+                            work.wait_until(lock, std::chrono::steady_clock::time_point(std::chrono::nanoseconds(due)), [] { return !queue.empty(); });
+                        }
+                    }
+                    if (!have)
+                    {
+                        if (pace::capTryTake(pace::now(), held[0].dueNs)) // (else another hand-over took it: wait again)
+                            showOldest();
+                        continue;
                     }
                     bool lost = false;
                     if (g.fence->GetCompletedValue() < it.fence)
@@ -4729,6 +4800,8 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                                 break;
                             }
                     }
+                    if (lost)
+                        heldCount = 0; // (a lost device: what was held goes - not a cap drop)
                     void *p = nullptr;
                     const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &fp = it.footprint;
                     const D3D12_RANGE all{0, static_cast<SIZE_T>(fp.Offset + static_cast<UINT64>(fp.Footprint.RowPitch) * (it.h - 1u) + it.w * 4u)};
@@ -4740,18 +4813,37 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                                         static_cast<const uint8_t *>(p) + fp.Offset + static_cast<size_t>(y) * fp.Footprint.RowPitch, it.w * 4u);
                         const D3D12_RANGE written{0, 0};
                         it.readback->Unmap(0, &written);
+                        const int64_t t = pace::now();
+                        if (pace::pictureCap() <= 0)
                         {
-                            std::lock_guard<std::mutex> lock(g_published.mutex);
-                            g_published.pixels.swap(spare);
-                            g_published.shared.index = -1;
-                            g_published.has3D = it.has3D;
-                            g_published.width = it.w;
-                            g_published.height = it.h;
-                            ++g_published.serial;
-                            g_published.lastNs = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                            heldCount = 0; // (the cap just turned off: the newest goes, what was held is old)
+                            publishPixels(spare, it.w, it.h, it.has3D, it.dueNs);
                         }
-                        g_published.cv.notify_all();
-                        notePublished(it.dueNs, true);
+                        else
+                        {
+                            if (heldCount > 0 && (it.dueNs == 0 || it.dueNs <= t))
+                            {
+                                for (int i = 0; i < heldCount; ++i)
+                                    pace::noteCapDrop();
+                                heldCount = 0;
+                            }
+                            else if (heldCount == 2)
+                            {
+                                pace::noteCapDrop(); // (the newer held one replaced; the oldest, the frame's own, stays first)
+                                heldCount = 1;
+                            }
+                            if (heldCount == 0 && pace::capTryTake(t, it.dueNs))
+                                publishPixels(spare, it.w, it.h, it.has3D, it.dueNs);
+                            else
+                            {
+                                Held &h = held[heldCount++];
+                                h.pixels.swap(spare);
+                                h.w = it.w;
+                                h.h = it.h;
+                                h.has3D = it.has3D;
+                                h.dueNs = it.dueNs;
+                            }
+                        }
                     }
                     {
                         std::lock_guard<std::mutex> lock(mutex);

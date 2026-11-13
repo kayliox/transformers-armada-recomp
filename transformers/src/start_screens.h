@@ -55,4 +55,14 @@ namespace start_screens
     // A start movie the setting skips (by its key, hd_movies::movieKey: "NATARI", "NINTRO", ...) - the
     // FMV skip's fallback presses (overrides.cpp) use it too, for a movie the state skip above missed.
     bool skipsMovie(const char *movieKey);
+    // (TODO 341 (1)) The copyright screen is up (its timer took input within the last ~0.2 s), and the option to show its
+    // 2D at the shape it was drawn for (TF_LEGAL_SHAPE, F1 Display, on by default): the PS2 draws its 512-wide frame
+    // across the TV, so the Transformers and Hasbro logos there came out about a sixth too wide (overrides.cpp narrows
+    // the whole picture by the display mode's own pixel shape while it is up, black at the sides).
+    bool copyrightShown();
+    bool legalShapeOn();
+    // (TODO 341 (2)) The title ("press Start") or the card check's notices are up and the option (TF_START_SHAPE, F1
+    // Display, on by default) shows them at 4:3 in a wide picture: pictures made for a 4:3 TV, stretched across a wide one
+    // before (overrides.cpp: the whole picture at 4:3 while they are up, black at the sides).
+    bool startScreen43();
 }

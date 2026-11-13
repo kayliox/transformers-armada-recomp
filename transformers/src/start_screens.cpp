@@ -61,6 +61,30 @@ namespace start_screens
         };
         std::atomic<int> g_mode{kMenu};
 
+        // (TODO 341 (1)) The game's VBlank tick when the copyright screen's timer last took input while it ran (0 never), and
+        // since when it has without a break - in game time, as the start's turbo runs many frames in a moment of the PC's -
+        // and the tick of the last game frame (frame()).
+        std::atomic<uint64_t> g_copyrightTick{0}, g_copyrightSince{0}, g_frameTick{0};
+        std::atomic<int> g_legalShape{1};
+        // (TODO 341 (2)) The same for the title ("press Start") and the card check's notices: their screens' updates, while
+        // they run; and the option to show them at 4:3 in a wide picture (TF_START_SHAPE).
+        std::atomic<uint64_t> g_titleTick{0}, g_titleSince{0}, g_cardTick{0}, g_cardSince{0};
+        std::atomic<int> g_startShape{1};
+
+        void stampSeen(std::atomic<uint64_t> &at, std::atomic<uint64_t> &since, uint64_t now)
+        {
+            if (now > at.load(std::memory_order_relaxed) + 12u)
+                since.store(now, std::memory_order_relaxed);
+            at.store(now, std::memory_order_relaxed);
+        }
+
+        bool seenNow(const std::atomic<uint64_t> &at, const std::atomic<uint64_t> &since)
+        {
+            const uint64_t t = at.load(std::memory_order_relaxed), now = g_frameTick.load(std::memory_order_relaxed);
+            return t != 0 && now <= t + 6u && t >= since.load(std::memory_order_relaxed) + 18u;
+        }
+
+
         PS2Runtime::RecompiledFunction g_introProcessInput = nullptr;
         PS2Runtime::RecompiledFunction g_introProcessInputThunk = nullptr;
         PS2Runtime::RecompiledFunction g_titleUpdate = nullptr;
@@ -246,6 +270,7 @@ namespace start_screens
         void titleUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t self = getRegU32(ctx, 4);
+            stampSeen(g_titleTick, g_titleSince, tick(runtime)); // (TODO 341 (2))
             if (!g_titleSeen)
             {
                 g_titleSeen = true;
@@ -298,6 +323,7 @@ namespace start_screens
         void cardCheckProcessInput(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t self = getRegU32(ctx, 4);
+            stampSeen(g_cardTick, g_cardSince, tick(runtime)); // (TODO 341 (2))
             static uint32_t lastState = ~0u;
             const uint32_t state = read32(rdram, self + kCardCheckState);
             if (state != lastState)
@@ -336,8 +362,6 @@ namespace start_screens
         // the next screen, as after its 8 s.
         void timeoutInput(uint8_t *rdram, PS2Runtime *runtime, uint32_t self)
         {
-            if (!skipNotices())
-                return;
             const uint32_t next = read32(rdram, self + 0x18u);
             char name[12] = {};
             for (uint32_t i = 0; next != 0u && i + 1u < sizeof(name); ++i)
@@ -355,6 +379,12 @@ namespace start_screens
             float timer[3] = {}; // the timeout, the part that cannot be skipped, the time so far
             std::memcpy(timer, p, sizeof(timer));
             const float end = timer[0] > timer[1] ? timer[0] : timer[1];
+            // (TODO 341 (1): the screen counts only while its timer runs - its item is still handed input for a frame or two
+            // between the start movies after it, its time long run out)
+            if (timer[2] < end)
+                stampSeen(g_copyrightTick, g_copyrightSince, tick(runtime));
+            if (!skipNotices())
+                return;
             if (timer[2] < end)
             {
                 timer[2] = end;
@@ -414,8 +444,61 @@ namespace start_screens
 #endif
     }
 
+    bool copyrightShown()
+    {
+        // (shown while its timer took input within the last 6 VBlanks, after 18 in a row: a frame or two of its item between
+        // the start movies is not the screen)
+        return seenNow(g_copyrightTick, g_copyrightSince);
+    }
+
+    bool legalShapeOn() { return g_legalShape.load(std::memory_order_relaxed) != 0; }
+
+    bool startScreen43()
+    {
+        return g_startShape.load(std::memory_order_relaxed) != 0 && (seenNow(g_titleTick, g_titleSince) || seenNow(g_cardTick, g_cardSince));
+    }
+
     void addSettings()
     {
+        {
+            // (TODO 341 (1)) The copyright screen's logos at their own shape.
+            ps2_settings::Setting s;
+            s.key = "TF_LEGAL_SHAPE";
+            s.section = "Display";
+            s.label = "Copyright screen logos";
+            s.order = 60;
+            s.help = "The Transformers and Hasbro logos on the copyright screen at start: at their own shape, or stretched a "
+                     "little wide as on the PS2 (its picture is drawn 512 pixels wide across the TV).";
+            s.choices = {{"1", "Their own shape"}, {"0", "As on the PS2"}};
+            s.defaultValue = "1";
+            s.apply = [](const std::string &value)
+            {
+                g_legalShape.store(value == "0" ? 0 : 1, std::memory_order_relaxed);
+                return true;
+            };
+            ps2_settings::add(s);
+            g_legalShape.store(ps2_settings::value("TF_LEGAL_SHAPE") == "0" ? 0 : 1, std::memory_order_relaxed);
+        }
+        {
+            // (TODO 341 (2)) The title and the card check's notices at 4:3 in a wide picture.
+            ps2_settings::Setting s;
+            s.key = "TF_START_SHAPE";
+            s.section = "Display";
+            s.label = "Start screens on a wide screen";
+            s.order = 61;
+            s.help = "The title (\"Press Start\") and the memory card notices at start are pictures made for a 4:3 TV. "
+                     "4:3: shown at that shape, black at the sides. Stretched: widened to the screen, as the PS2 does in its "
+                     "widescreen mode.";
+            s.choices = {{"1", "4:3"}, {"0", "Stretched"}};
+            s.defaultValue = "1";
+            s.apply = [](const std::string &value)
+            {
+                g_startShape.store(value == "0" ? 0 : 1, std::memory_order_relaxed);
+                return true;
+            };
+            ps2_settings::add(s);
+            g_startShape.store(ps2_settings::value("TF_START_SHAPE") == "0" ? 0 : 1, std::memory_order_relaxed);
+        }
         ps2_settings::Setting s;
         s.key = "TF_START_SCREENS";
         s.section = "Gameplay";
@@ -446,6 +529,7 @@ namespace start_screens
 
     void frame(PS2Runtime &runtime, bool inGame)
     {
+        g_frameTick.store(tick(&runtime), std::memory_order_relaxed); // (TODO 341 (1): copyrightShown's clock)
         if (!g_turbo.load(std::memory_order_relaxed))
             return;
         const int mode = g_mode.load(std::memory_order_relaxed);

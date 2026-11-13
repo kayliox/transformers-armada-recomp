@@ -68,3 +68,6 @@ settings.ini.bak*
 # setup.ps1's remembered disc path (yours only) and update.ps1's own log
 /.setup.json
 /update.log
+# (TODO 310) the steps' own records (setup.ps1 / update.ps1 / setup.sh / update.sh, run by hand)
+/setup_steps.log
+/update_steps.log

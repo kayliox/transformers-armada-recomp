@@ -1,5 +1,29 @@
 # What's new
 
+## 0.7.2
+
+**New**
+- F1 > Graphics > Upscaler: AMD FSR 3 and FSR 4 (FSR 4 on Radeon RX 7000 / 9000 drivers that offer it) with Quality /
+  Balanced / Performance presets; the setup downloads AMD's upscaler files.
+- Setup: "Go easy on my PC (slower)" now covers the whole setup and every update: the game is built with half the
+  processor at low priority, for laptops that overheat or shut down while building. If a setup stops partway, the
+  setup now shows the step it stopped at.
+
+**Fixed**
+- The copyright screen at start shows the Transformers and Hasbro logos at their real shape, no longer stretched wide
+  (at 4:3 a little, on wide screens a lot). F1 > Display > Copyright screen logos: As on the PS2 brings the old look
+  back. Thanks to wayneng1997.
+- On a wide screen the title ("Press Start") and the memory card notices at start are shown at 4:3 with black at the
+  sides, no longer stretched. F1 > Display > Start screens on a wide screen: Stretched brings the old look back.
+  Thanks to wayneng1997.
+- The cutscenes and logos now play at the shape they were made at (16:9). The HD movies were shown about a fifth
+  too narrow, and the game's own movies a little narrow, as on the PS2. Thanks to wayneng1997.
+- Forest distance 4x and Far trees "3D to the edge" no longer go back to Auto at every start. Your settings
+  are now moved to the new Ultra preset's forest at most once, and anything you set after that stays. Thanks to
+  wayneng1997.
+- The frame rate cap now also holds on loading screens, in the menus and at start-up, also with Intel graphics: a
+  30 cap no longer shows 60 or 120 frames a second there. Thanks to bbatts.
+
 ## 0.7.1
 
 **New**

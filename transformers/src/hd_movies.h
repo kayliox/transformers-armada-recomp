@@ -17,4 +17,12 @@ namespace hd_movies
     // The movie's name under FMV without its extension ("CG/EP01/N1_1"), and its upscaled file.
     std::string movieKey(std::string name);
     std::string fileFor(const std::string &key);
+    // (TODO 341 (4)) The shape a movie is shown at, width / height of its picture (the band of rows the game shows,
+    // overrides.cpp createFmvStream): the movies are MPEG-2 at 640x384 with square-pixel pictures - the films, the
+    // attract film and the logos 640x360 between 12-row black bars (16:9), the Atari logo the whole 640x384 (5:3) - which
+    // the PS2's 4:3 TV showed a little narrower (1.66:1 and 1.56:1). By default the shape they were made at;
+    // TF_MOVIE_SHAPE=ps2: the PS2's. An HD copy is drawn at this shape too, whatever its file's own (the reforged films
+    // are 1536x1082, 1.42:1 - shown at that, every cutscene came out about a fifth too narrow).
+    float movieShape(const std::string &key);
+    bool movieShapeAsPs2();
 }

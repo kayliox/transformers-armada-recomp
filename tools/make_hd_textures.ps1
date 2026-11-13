@@ -48,6 +48,8 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path $PSScriptRoot -Parent
 # (TODO 279: the disc's files may be in the install's data\game - install_layout.ps1)
 . (Join-Path $PSScriptRoot "install_layout.ps1")
+# (TODO 310) Each step and batch to TF_STEP_LOG with its time, when the setup or the update set it (step_log.ps1)
+. (Join-Path $PSScriptRoot "step_log.ps1")
 $Game = Get-GameDataDir $Root
 $Out = Join-Path $Root "hd_textures"
 $Py = Join-Path $PSScriptRoot "hd_textures"
@@ -138,7 +140,7 @@ function TakeWorkerLock {
     return $false
 }
 
-function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
+function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan; Write-StepLog "hd: $msg" }
 function Run([string]$Exe, [string[]]$Arguments) {
     $ErrorActionPreference = "Continue"
     & $Exe @Arguments 2>&1 | ForEach-Object { "$_" }
@@ -346,7 +348,11 @@ $ErrorActionPreference = "Continue"
 # (TODO 219) In batches, the textures seen first made first, each colour-matched as it is made; it waits while the
 # game runs (unless hd_options.json says to carry on) and says "HD textures: N of M made" after each batch.
 & $Python (Join-Path $Py "upscale_textures.py") $converted --out (Join-Path $Out "upscaled") `
-    --work (Join-Path $Out "work") --exe $exe --quality $Quality --match-colour @withGame @(if ($Gentle) { "--gentle" }) 2>&1 | ForEach-Object { "$_" } | Tee-Object -Variable lines | Out-Host
+    --work (Join-Path $Out "work") --exe $exe --quality $Quality --match-colour @withGame @(if ($Gentle) { "--gentle" }) 2>&1 | ForEach-Object {
+        $l = "$_"
+        if ($l.StartsWith("HD textures: ")) { Write-StepLog "hd:     $l" }   # (TODO 310: the batch it was at)
+        $l
+    } | Tee-Object -Variable lines | Out-Host
 $code = $LASTEXITCODE
 # (TODO 267) Exit 4: the game closed and the upscale stopped with it - the rest waits for the next start.
 if ($code -eq 4) { exit 0 }

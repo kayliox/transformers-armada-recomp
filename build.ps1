@@ -33,7 +33,9 @@ param(
     [switch]$Public,        # the public build (no overlay\: no mods) into out\build-public, from a tree that has the overlay
     [switch]$Vulkan,        # the Vulkan backend too (-DTF_VULKAN=ON, and -Sdl3: it presents SDL3's window; in development, off by default). The build folder keeps it.
     [switch]$Sdl3,          # SDL3 as the window and its input, chosen at run time with PS2X_PLATFORM=sdl3 (-DPS2X_SDL3=ON). Kept too.
-    [switch]$FsrSdk,        # (TODO 299) AMD's FidelityFX SDK DLLs fetched next to the game (-DTF_FSR_SDK=ON; off by default). The build folder keeps it.
+    [switch]$FsrSdk,        # (TODO 299) kept for old command lines: AMD's FidelityFX SDK DLLs are fetched next to the game by default now
+    [switch]$NoFsrSdk,      # (TODO 299) AMD's FidelityFX SDK DLLs (FSR 3.1 / FSR 4) not fetched (-DTF_FSR_SDK=OFF): no FSR 3 / 4 in the game
+    [switch]$Gentle,        # (TODO 310) easy on the PC: half the processor threads, at a lower priority (the setup's "Go easy on my PC"); about half as fast
     [string]$BuildDir,      # another build folder under out\ for an A/B build beside the played one, e.g. build-ab
     [string]$CMakeDefine,   # CMake cache settings for it, ";"-separated, e.g. "TF_LTCG=ON" (the folder keeps them)
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$OverlayArgs  # the overlay's own (overlay\build_hooks.ps1)
@@ -49,6 +51,22 @@ if (-not $env:GIT_CONFIG_COUNT) {
 $Root = $PSScriptRoot
 # (TODO 279) The disc's files: game\ here, or the install's data\game once its folders were moved (tools\install_layout.ps1)
 . (Join-Path $Root "tools\install_layout.ps1")
+# (TODO 310) Each step to TF_STEP_LOG with its time, when the setup or the update set it (tools\step_log.ps1)
+. (Join-Path $Root "tools\step_log.ps1")
+# (TODO 310) -Gentle: for a PC that resets or overheats under a long full load. The build and every program it starts
+# (Windows passes the lower priority on to them) run below normal, and MSBuild and the compiler use half the processor
+# threads - "/m" and the compiler's own count (MultiToolTask) both held to it. Without it the build is as before.
+# (The compiler's count goes in as environment variables, which MSBuild reads as properties: given as /p: they are
+# global properties, and the first test saw a gentle build compile every file again - 787 instead of the 71 touched.)
+$BuildParallel = @("/m")
+if ($Gentle) {
+    $GentleJobs = [Math]::Max(1, [int][Math]::Floor([Environment]::ProcessorCount / 2))
+    try { (Get-Process -Id $PID).PriorityClass = "BelowNormal" } catch {}
+    $BuildParallel = @("/m:$GentleJobs")
+    $env:MultiProcMaxCount = "$GentleJobs"
+    $env:EnforceProcessCountAcrossBuilds = "true"
+    Write-Host "Going easy on the PC: $GentleJobs of $([Environment]::ProcessorCount) processor threads, at a lower priority" -ForegroundColor Cyan
+}
 $Game = Get-GameDataDir $Root
 $Work = Join-Path $Root "work"
 $Build = Join-Path $Root $(if ($Public) { "out\build-public" } else { "out\build" })
@@ -100,7 +118,8 @@ $Clock = [Diagnostics.Stopwatch]::StartNew()
 $script:stage = $null
 $script:stageStart = 0.0
 $Spent = [ordered]@{}       # stage -> seconds, this build
-$TimesFile = Join-Path $Root "out\build-times.json"
+# (a gentle build keeps its own record: its slower times would make a normal build's estimates too long)
+$TimesFile = Join-Path $Root $(if ($Gentle) { "out\build-times-gentle.json" } else { "out\build-times.json" })
 $History = @{}
 try { if (Test-Path $TimesFile) { (Get-Content $TimesFile -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $History[$_.Name] = $_.Value } } } catch {}
 function Close-Stage {
@@ -114,6 +133,7 @@ function Step($msg, [string]$stage) {
     Close-Stage
     if ($stage) { $script:stage = $stage; $script:stageStart = $Clock.Elapsed.TotalSeconds }
     Write-Host "`n==> $msg" -ForegroundColor Cyan
+    Write-StepLog "build: $msg"
 }
 function Format-Duration([double]$seconds) {
     $s = [int][Math]::Round($seconds)
@@ -318,7 +338,9 @@ $genArgs = Get-GeneratorArgs $ToolsBuild
 $cmakeArgs = @("-S", $Root, "-B", $Build, "-DTF_GAME_VERSION=$GameVersion") + (Get-GeneratorArgs $Build)
 if ($Public) { $cmakeArgs += "-DTF_OVERLAY_DIR=" } # (the overlay left out: transformers\CMakeLists.txt)
 if ($Vulkan) { $cmakeArgs += "-DTF_VULKAN=ON" }     # (the Vulkan backend: transformers\CMakeLists.txt; -DTF_VULKAN=OFF turns it off again)
-if ($FsrSdk) { $cmakeArgs += "-DTF_FSR_SDK=ON" }     # (the FidelityFX SDK's DLLs: transformers\CMakeLists.txt; -DTF_FSR_SDK=OFF stops fetching them)
+# (the FidelityFX SDK's DLLs, transformers\CMakeLists.txt: always said, so a build folder made before they were the default -
+# its cache holding OFF - fetches them too; fetched once a release, a failed fetch only a warning)
+$cmakeArgs += $(if ($NoFsrSdk) { "-DTF_FSR_SDK=OFF" } else { "-DTF_FSR_SDK=ON" })
 $cmakeArgs += "-DTF_GAME_DIR=$Game"                 # (the disc's files where they are: game\ or the install's data\game)
 if ($Sdl3 -or $Vulkan) { $cmakeArgs += "-DPS2X_SDL3=ON" } # (SDL3 as the window at run time: PS2Recomp's ps2_platform.h - Vulkan presents it, so -Vulkan too)
 foreach ($define in ($CMakeDefine -split ";" | Where-Object { $_ })) { $cmakeArgs += "-D$define" } # (-CMakeDefine: cache settings for that folder, which keeps them)
@@ -368,7 +390,7 @@ if (-not $SkipRecompile) {
     # effect only at the build after - a new file would be left out of this one)
     Run cmake (@("-S", (Join-Path $Root "PS2Recomp"), "-B", $ToolsBuild,
                  "-DPS2X_BUILD_RUNTIME=OFF", "-DPS2X_BUILD_TEST=OFF", "-DPS2X_BUILD_STUDIO=OFF") + $genArgs)
-    Run cmake @("--build", $ToolsBuild, "--config", $Config, "--target", "ps2_recomp", "ps2_analyzer", "--", "/m", "/v:m")
+    Run cmake (@("--build", $ToolsBuild, "--config", $Config, "--target", "ps2_recomp", "ps2_analyzer", "--") + $BuildParallel + @("/v:m"))
     # (both there right after the build: an antivirus that took one says so here, not as a puzzling failure later)
     foreach ($t in "ps2xAnalyzer\$Config\ps2_analyzer.exe", "ps2xRecomp\$Config\ps2_recomp.exe") { Assert-NotBlocked (Join-Path $ToolsBuild $t) }
 
@@ -596,7 +618,7 @@ $lastCompileAt = $null
 $lastShown = -100.0
 $buildStart = $Clock.Elapsed.TotalSeconds
 $ErrorActionPreference = "Continue"
-& cmake @("--build", $Build, "--config", $Config, "--target", "TransformersRecomp", "tfa_launcher", "--", "/m", "/v:m", "/p:UseMultiToolTask=true") 2>&1 | ForEach-Object {
+& cmake (@("--build", $Build, "--config", $Config, "--target", "TransformersRecomp", "tfa_launcher", "--") + $BuildParallel + @("/v:m", "/p:UseMultiToolTask=true")) 2>&1 | ForEach-Object {
     $line = "$_"
     if ($line -match '^\s+([\w.+-]+)\.(c|cc|cpp|cxx)\s*$') {
         $compiled++
@@ -605,7 +627,7 @@ $ErrorActionPreference = "Continue"
         $lastCompileAt = $now
         if ($now - $lastShown -ge 10 -or $compiled -eq 1) {
             $lastShown = $now
-            if ($forecast -and $compiled -lt $forecast.Total) {
+            $progressLine = if ($forecast -and $compiled -lt $forecast.Total) {
                 # what is left at the record's rates, corrected by how this build is going so far
                 $left = Expected ([Math]::Max(0, $forecast.Batches - $compiledBatches)) ([Math]::Max(0, $forecast.Other - ($compiled - $compiledBatches)))
                 $done = Expected $compiledBatches ($compiled - $compiledBatches)
@@ -617,6 +639,8 @@ $ErrorActionPreference = "Continue"
             } else {
                 "    compiling the game: $compiled file(s) so far"
             }
+            Write-StepLog "build: $progressLine"
+            $progressLine
         }
     } else { $line }
 }
@@ -653,7 +677,7 @@ if ((Test-Path -LiteralPath $builtExe) -and $bakeDone) {
     $ErrorActionPreference = "Stop"
     if (Test-AntivirusBlock $builtExe $baked $bakeText) { throw (Get-AntivirusBlockMessage $builtExe) }
     if ($baked -eq 2) {
-        Run cmake @("--build", $Build, "--config", $Config, "--target", "TransformersRecomp", "--", "/m", "/v:m", "/p:UseMultiToolTask=true") | Out-Null
+        Run cmake (@("--build", $Build, "--config", $Config, "--target", "TransformersRecomp", "--") + $BuildParallel + @("/v:m", "/p:UseMultiToolTask=true")) | Out-Null
     }
     if ($baked -eq 0 -or $baked -eq 2) {
         Set-Content -LiteralPath $bakeRecord -Value $bakeInput -NoNewline
@@ -719,3 +743,4 @@ if ($compiled -gt 0) {
 $exe = Join-Path $Build "transformers\$Config\TransformersRecomp.exe"
 Write-Host "`nDone: $exe" -ForegroundColor Green
 Write-Host "Built in $(Format-Duration $Clock.Elapsed.TotalSeconds): $($parts -join ', ')." -ForegroundColor Green
+Write-StepLog "build: built in $(Format-Duration $Clock.Elapsed.TotalSeconds)"

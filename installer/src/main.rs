@@ -102,7 +102,7 @@ struct App {
     hd_set_gb: Option<f32>,      // the install's HD set (hd_textures\upscaled) now, GB (None: no set)
     hd_note: String,             // the update screen's line after Apply
     hd_while_playing: bool, // keep making them while the game runs
-    hd_gentle: bool,        // (TODO 310) easy on the graphics card: short bursts with rests, about three times as slow
+    hd_gentle: bool,        // (TODO 310) "Go easy on my PC": the build on half the processor threads at a lower priority, the HD textures with rests
     gpu: Option<(String, u64)>, // the graphics card the suggestion is for (name, video memory)
     low_end: bool,              // built-in or low-end graphics: no HD textures made (detect_gpu)
     hd_playable: bool,      // the HD step has got to the upscale: the game can be played meanwhile
@@ -507,6 +507,13 @@ impl Job {
         if layout_of(&self.folder) == 2 && logs.is_dir() { logs.join(name) } else { self.folder.join(name) }
     }
 
+    /// (TODO 310) The steps' own record beside the log (TF_STEP_LOG, tools\step_log.ps1): each step with its time,
+    /// written straight to the disk - it names the step even when the PC went off. Made empty at each start.
+    fn step_log_path(&self) -> PathBuf {
+        let log = self.log_path();
+        log.with_file_name(if self.update { "update_steps.log" } else { "setup_steps.log" })
+    }
+
     fn run(&self, tx: &Sender<Msg>) -> Result<(), String> {
         std::fs::create_dir_all(&self.folder).map_err(|e| format!("cannot make {}: {e}", self.folder.display()))?;
         let log_path = self.log_path();
@@ -520,6 +527,7 @@ impl Job {
         // (a run that does not finish - closed half way - leaves this mark: the setup opens again next time,
         // not the game; a player's report. Installs from before the mark have none: finished.)
         let _ = std::fs::write(self.folder.join(UNFINISHED_MARK), b"");
+        let _ = std::fs::write(self.step_log_path(), b"");
 
         if self.update {
             // update.ps1 does it all (and, for the game's own update, starts it again: -Play).
@@ -614,8 +622,9 @@ impl Job {
         } else {
             args.extend(["-HdQuality".into(), self.hd_quality.arg().into()]);
             args.extend(["-HdWhilePlaying".into(), if self.hd_while_playing { "on" } else { "off" }.into()]);
-            args.extend(["-HdGentle".into(), if self.hd_gentle { "on" } else { "off" }.into()]);
         }
+        // (TODO 310) "Go easy on my PC": the build too, so also without the HD textures (setup.ps1 keeps it in hd_options.json)
+        args.extend(["-HdGentle".into(), if self.hd_gentle { "on" } else { "off" }.into()]);
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let _ = tx.send(Msg::Step(STEP_TOOLS));
         for attempt in 0..2 {
@@ -679,6 +688,8 @@ impl Job {
         cmd.env("GIT_CONFIG_KEY_1", "safe.directory").env("GIT_CONFIG_VALUE_1", "*");
         // (update.ps1 on a failure: no 30 s pause in a window nobody sees)
         cmd.env("TFA_UPDATE_NO_PAUSE", "1");
+        // (TODO 310) each step of setup.ps1 / update.ps1 / build.ps1 / make_hd_textures.ps1 with its time, to the disk
+        cmd.env("TF_STEP_LOG", self.step_log_path());
         if self.managed { cmd.env("RECOMPLAUNCHER", "1"); }
         // (TODO 289) Its output goes straight into the log file, which this window follows - not through pipes to this
         // window: a player's graphics driver reset (a GTX 1660 SUPER, during the HD textures) took the setup's window
@@ -929,6 +940,25 @@ fn compile_progress(text: &str) -> Option<f32> {
 
 /// The mark a setup run keeps in the install folder until it has finished every step.
 const UNFINISHED_MARK: &str = ".setup_unfinished";
+
+/// (TODO 310) The last line of the newer steps record (setup_steps.log / update_steps.log, beside the setup's log or in
+/// the install's logs\): the step a setup or an update was at when it stopped.
+fn last_step(folder: &Path) -> Option<String> {
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for dir in [folder.to_path_buf(), folder.join("logs")] {
+        for name in ["setup_steps.log", "update_steps.log"] {
+            let p = dir.join(name);
+            if let Ok(t) = std::fs::metadata(&p).and_then(|m| m.modified()) {
+                if newest.as_ref().map_or(true, |(n, _)| t > *n) {
+                    newest = Some((t, p));
+                }
+            }
+        }
+    }
+    let text = std::fs::read_to_string(newest?.1).ok()?;
+    let line = text.lines().rev().find(|l| !l.trim().is_empty())?.trim().to_string();
+    Some(line.chars().take(140).collect())
+}
 
 /// make_hd_textures.ps1's "HD textures: 640 of 1900 made, about 25 min left" (TODO 219): the bar moves
 /// through the upscale, from where "upscaling" put it (0.72) to 0.97.
@@ -1738,6 +1768,10 @@ impl App {
             ui.add_space(8.0);
             ui.label(RichText::new("The setup did not finish last time. Press \"Finish the setup\" to carry on: finished steps are kept.")
                 .color(Color32::from_rgb(240, 180, 0)));
+            // (TODO 310) where it stopped, from the steps' own record (it survives the PC going off)
+            if let Some(last) = last_step(Path::new(&self.folder)) {
+                ui.label(RichText::new(format!("It stopped at: {last}")).color(DIM).small());
+            }
         }
         ui.add_space(20.0);
         let c = self.check.clone();
@@ -1929,12 +1963,10 @@ impl App {
                 ui.checkbox(&mut self.hd_while_playing, "Keep making HD textures while I play").on_hover_text(
                     "Off: they wait while the game runs and carry on when you close it. On: they carry on, and the game runs a little slower meanwhile.");
             });
-            ui.horizontal(|ui| {
-                ui.add_space(24.0);
-                ui.checkbox(&mut self.hd_gentle, "Go easy on my graphics card (slower)").on_hover_text(
-                    "For a PC that restarts, freezes or overheats while the HD textures are made: the graphics card works in short bursts with rests in between, never at full power for minutes. Takes about three times as long.");
-            });
         }
+        // (TODO 310) Not only the HD textures: the build too (a player's PC reset with 8 BIOS beeps near the end of the last bar)
+        ui.checkbox(&mut self.hd_gentle, "Go easy on my PC (slower)").on_hover_text(
+            "For a PC that restarts, freezes or overheats while it is set up or updated: the build uses half the processor at a lower priority, and the HD textures are made in short bursts with rests, never at full power for minutes. Takes about twice as long.");
         ui.add_space(6.0);
         ui.label(RichText::new("Missing tools (Git, Python, Visual Studio Build Tools) are installed with winget; Windows may ask for permission.").color(DIM).small());
 

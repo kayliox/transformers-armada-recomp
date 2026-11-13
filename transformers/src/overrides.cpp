@@ -50,6 +50,7 @@
 #include "menu_mouse.h"
 #include "mod_menu.h"
 #include "frustum_native.h"
+#include "nr_pace.h" // (TODO 336: the frame-rate cap holds for the pictures everywhere)
 #include "nr_forest.h"
 #include "playrec.h"
 #include "decomp.h"
@@ -399,13 +400,18 @@ namespace
     // mode (0x70F480, set by 0x25E080 at every change of screen) holds the width and the pixel
     // aspect drawn with: 1 / (640 / width x 0.93), times 3/4 in widescreen. The window shows
     // the picture in the shape the game draws for: 16:9 when the mode's pixel aspect is the
-    // widescreen one, else 4:3, and 4:3 while a movie plays (the movies are 4:3 pictures, which
-    // the game shows unchanged in either mode).
+    // widescreen one, else 4:3; while a movie plays, the shape that shows the movie's band at
+    // its own shape (g_movieAspect, TODO 341 (4)) - the game shows its movies unchanged in either mode.
     constexpr uint32_t kDisplayMode = 0x0070F480u; // width, height (u32), ..., pixel aspect (float at +0x10)
+
+    // (TODO 341 (4)) While a movie plays: the whole frame's shape that shows its band of rows at the movie's own shape
+    // (hd_movies::movieShape: 640 / 448 - the band 16:9, the Atari logo's 5:3), or the 4:3 TV's (TF_MOVIE_SHAPE=ps2, and
+    // with TF_MOVIE_BAND=0 the whole 4:3 frame) - set in createFmvStream.
+    float g_movieAspect = 4.0f / 3.0f;
 
     void updateDisplayAspect(const uint8_t *rdram)
     {
-        float aspect = 4.0f / 3.0f;
+        float aspect = g_liveFmvStreams != 0 ? g_movieAspect : 4.0f / 3.0f;
         if (g_liveFmvStreams == 0)
         {
             uint32_t width = 0u;
@@ -444,6 +450,19 @@ namespace
             aspect = settled;
 #endif
         }
+        // (TODO 341 (1)) The copyright screen at the shape it was drawn for: a picture of 2D alone, drawn outside the display
+        // list (never narrowed as the HUD is - the GS's whole picture), so the whole picture is shown narrower, a 4:3 TV's
+        // shape times the display mode's own pixel shape (the game's 3D takes the same, 1 / (640 / width x 0.93): 0.86 at its
+        // 512 width), black at the sides - in either TV mode. TF_LEGAL_SHAPE=0: as before.
+        if (g_liveFmvStreams == 0 && start_screens::legalShapeOn() && start_screens::copyrightShown())
+        {
+            uint32_t width = 0u;
+            std::memcpy(&width, rdram + kDisplayMode, sizeof(width));
+            if (width >= 256u && width < 640u)
+                aspect = (4.0f / 3.0f) / ((640.0f / static_cast<float>(width)) * 0.93f);
+        }
+        else if (g_liveFmvStreams == 0 && aspect > 1.4f && start_screens::startScreen43())
+            aspect = 4.0f / 3.0f; // (TODO 341 (2): the title and the card notices at the 4:3 TV's shape)
         static float shown = 0.0f;
         if (aspect != shown)
         {
@@ -746,10 +765,14 @@ namespace
             // 1.66:1, full height on 16:9 and 21:9). The Atari logo has no bars: its band is the 384 rows. With an HD copy
             // (movies_hd) its own overlay draws instead. TF_MOVIE_BAND=0: the whole 4:3 frame, as before.
             static const bool band = !(std::getenv("TF_MOVIE_BAND") && *std::getenv("TF_MOVIE_BAND") == '0');
+            g_movieAspect = 4.0f / 3.0f;
             if (band)
             {
-                const bool bars = hd_movies::movieKey(movie) != "NATARI";
+                const std::string key = hd_movies::movieKey(movie);
+                const bool bars = key != "NATARI";
                 ps2_host_display::setPictureBand((bars ? 44.0f : 32.0f) / 448.0f, (bars ? 404.0f : 416.0f) / 448.0f);
+                // (TODO 341 (4)) the band at the movie's own shape (16:9; TF_MOVIE_SHAPE=ps2: the PS2's 1.66:1)
+                g_movieAspect = hd_movies::movieShape(key) * (bars ? 360.0f : 384.0f) / 448.0f;
             }
             updateDisplayAspect(rdram);
             applyVBlankPeriod(runtime);
@@ -3670,6 +3693,10 @@ namespace
     int g_switches = 0;
     std::chrono::steady_clock::time_point g_rateTrackSaid{}; // (TODO 160: Unlimited following the PC - its changes said at most every 2 s)
 
+    // (TODO 336 (18)/(20)/(21)) The frame-rate cap for the pictures too (nr::pace::setPictureCap): the SETTING, never the
+    // rate ladder's current top - in the boot, the menus, a load and after a stall's catch-up as in a level.
+    void publishPictureCap() { nr::pace::setPictureCap(g_rateSetting >= kUnlimitedRate ? 0 : g_rateSetting); }
+
     bool followRates()
     {
         static const bool ladder = std::getenv("TF_RATE_LADDER") && *std::getenv("TF_RATE_LADDER") == '1';
@@ -4989,7 +5016,10 @@ namespace
         if (lock < 0 && moments < 0 && cap < 0)
             return;
         if (cap >= 0)
+        {
             g_rateSetting = cap == 0 ? kUnlimitedRate : std::clamp(cap, 30, kUnlimitedRate); // (TODO 160)
+            publishPictureCap();
+        }
         if (moments >= 0)
         {
             g_moments.store(moments == 1);
@@ -5601,8 +5631,8 @@ namespace
     // (2026-11-11, the user's decision) The forest's reach on Auto at most 2x, whatever the Draw distance: 3x and 4x (and
     // "Trees: full 3D at any distance") are very heavy - the user's RX 5700 XT in Amazon at 3440x1440: forest 4x 87 frames
     // a second, 2x 103 (its GPU's time a frame 10.0 -> 8.4 ms) - so they come only from the Forest distance row itself, and
-    // the Ultra preset leaves the forest on Auto. A settings file the old Ultra wrote is moved to the new one at start
-    // (migrateUltraForest).
+    // the Ultra preset leaves the forest on Auto. A settings file the old Ultra wrote is moved to the new one, once, before
+    // the settings are read (ultra_migrate.cpp, TODO 339).
     constexpr float kForestAutoMax = 2.0f;
     // (TODO 137: the grass's reach the preset's factor - 1 = the console's; measured cheap: 4x about +0.2 ms of GPU time)
     float presetGrass(float preset) { return preset <= 1.0f ? 1.0f : std::min(preset, 16.0f); }
@@ -8035,74 +8065,8 @@ namespace
         std::fprintf(stderr, "[tf:chardetail] %zu steps, %zu types only\n", g_charDetailSteps.size(), g_charDetailOnly.size());
     }
 
-    // (2026-11-11, the user's decision) The old Ultra preset into the new one: a settings file holding everything the old Ultra
-    // wrote for the distances - Draw distance, scenery, forest, grass and ground at 4x, far trees 3D to the edge, 8x smooth
-    // edges (with "Trees: full 3D" on, as the last Ultra wrote it, or not, as the one before) - has its forest set back to
-    // Auto (2x at most, kForestAutoMax), its far trees to Auto and full 3D off, at start, before anything reads them; the file
-    // is written once the settings are known (addSettings). Only the file's values count, not a launch's environment (test
-    // runs), and a forest set apart by hand - any of the other rows not at their Ultra value - stays. TF_ULTRA_MIGRATE=0: off.
-    std::vector<std::pair<std::string, std::string>> g_ultraMigrated;
-    void migrateUltraForest()
-    {
-        if (const char *e = std::getenv("TF_ULTRA_MIGRATE"); e && *e == '0')
-            return;
-        std::filesystem::path file = "settings.ini";
-        if (const char *env = std::getenv("PS2X_SETTINGS_FILE"))
-        {
-            const std::string name = env;
-            if (name.empty() || name == "0" || name == "none" || name == "NONE")
-                return;
-            file = name;
-        }
-        std::ifstream in(file);
-        if (!in)
-            return;
-        std::map<std::string, std::string> fromFile;
-        for (std::string line; std::getline(in, line);)
-        {
-            while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
-                line.pop_back();
-            const size_t eq = line.find('=');
-            if (line.empty() || line[0] == '#' || line[0] == ';' || eq == std::string::npos)
-                continue;
-            std::string key = line.substr(0, eq), value = line.substr(eq + 1);
-            while (!key.empty() && (key.back() == ' ' || key.back() == '\t'))
-                key.pop_back();
-            while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
-                value.erase(value.begin());
-            if (!fromFile.count(key))
-                fromFile[key] = value;
-        }
-        const auto is = [&](const char *key, const char *value)
-        {
-            const auto it = fromFile.find(key);
-            const char *env = std::getenv(key);
-            return it != fromFile.end() && it->second == value && env && it->second == env;
-        };
-        if (!is("TF_DRAW_DISTANCE", "4") || !is("TF_SCENERY_DISTANCE", "4") || !is("TF_FOREST_DISTANCE", "4") || !is("TF_GRASS_DISTANCE", "4") ||
-            !is("TF_TERRAIN_DETAIL", "4") || !is("TF_FOREST_SPRITES", "1") || !is("PS2X_GPU_MSAA", "8"))
-            return;
-        if (const auto it = fromFile.find("TF_FOREST_FULL_DETAIL"); it != fromFile.end() && it->second != "0" && it->second != "1" && !it->second.empty())
-            return;
-        g_ultraMigrated = {{"TF_FOREST_DISTANCE", ""}, {"TF_FOREST_SPRITES", ""}, {"TF_FOREST_FULL_DETAIL", "0"}};
-        for (const auto &[key, value] : g_ultraMigrated)
-        {
-#if defined(_WIN32)
-            _putenv_s(key.c_str(), value.c_str());
-#else
-            if (value.empty())
-                unsetenv(key.c_str());
-            else
-                setenv(key.c_str(), value.c_str(), 1);
-#endif
-        }
-        std::fprintf(stderr, "[tf] the settings are the old Ultra preset's: the forest set to the new Ultra's - Auto (2x), far trees "
-                             "Auto, full 3D off (Forest distance and Trees in Graphics > Advanced set them apart)\n");
-    }
-
     void installDrawDistance(PS2Runtime &runtime)
     {
-        migrateUltraForest();
         installCharDetail(runtime);
         installForest(runtime);
         if (g_poolCensusOn)
@@ -9964,6 +9928,7 @@ namespace
                      followRates())
                 g_frameRate = 60;
             g_rateSetting = g_frameRate;
+            publishPictureCap();
             // (TODO 161 a: the fixed logic rate - over the cap, which then caps the pictures; not with the console's 30 asked
             // for, nor with the old ladder)
             {
@@ -10100,7 +10065,10 @@ namespace
         }
         g_levelHooks = g_frameRate > 30;
         if (!g_levelHooks)
+        {
             g_rateSetting = 30;
+            publishPictureCap();
+        }
         if (ps2_host_display::widescreenTv())
         {
             if ((g_copyOptions = runtime.lookupFunction(kCopyOptions)) != nullptr)
@@ -10136,8 +10104,6 @@ namespace
         installCallMap(runtime);
         if (!ext::install(ext::Phase::BeforeSettings, runtime)) runtime.requestStop(); // (e.g. the overlay's Playable Decepticons: its adapters and added code)
         addSettings();
-        for (const auto &[key, value] : g_ultraMigrated) // (the old Ultra's forest moved to the new: into the settings file)
-            ps2_settings::noteChanged(key, value);
         if (!ext::install(ext::Phase::AfterSettings, runtime)) runtime.requestStop(); // (the Decepticon HQ's first part)
         // The HQ's selected Autobot sits back down at the PC rate (TODO 107; Jenvery, PR #6): a
         // high-rate fade-in's first weight rounds to 0 and the game disabled the incoming idle.

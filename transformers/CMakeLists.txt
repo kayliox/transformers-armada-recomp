@@ -443,31 +443,61 @@ endif()
 ps2x_stage_ffmpeg_runtime_dlls(TransformersRecomp)
 
 # (TODO 299, the temporal upscaler) AMD's FidelityFX SDK: the API's headers are vendored (native_render/ext/fidelityfx, MIT);
-# its two signed DLLs (the loader and the upscaler, FSR 3.1 / FSR 4) are AMD's own binary licence - never committed, fetched
-# here at a pinned release with their SHA-256 only when TF_FSR_SDK is on, and put next to the game. Without them the
-# temporal upscaler is not offered (the game loads the loader at run time).
-option(TF_FSR_SDK "Fetch AMD's FidelityFX SDK DLLs (FSR 3.1 / FSR 4) next to the game" OFF)
+# its two signed DLLs (the loader and the upscaler, FSR 3.1 / FSR 4) are never committed: fetched here from AMD's own
+# repository at a pinned release with their SHA-256, and put next to the game (THIRD_PARTY_NOTICES.md has AMD's notice).
+# On by default (the user's decision, 2026-11-12: every build offers FSR 3 / 4, still off in the settings); they are fetched
+# once a release - into a folder named after it - and again only when the pin below changes. A failed fetch does not fail
+# the build: a warning, and the game simply has no FSR 3 / 4 (it loads the loader at run time and offers the choice only
+# when both DLLs are beside it). -DTF_FSR_SDK=OFF (build.ps1 -NoFsrSdk): not fetched.
+option(TF_FSR_SDK "Fetch AMD's FidelityFX SDK DLLs (FSR 3.1 / FSR 4) next to the game" ON)
 if(TF_FSR_SDK AND WIN32)
     set(TF_FFX_TAG "v2.4.0")
     set(TF_FFX_DIR "${CMAKE_BINARY_DIR}/ThirdParty/fidelityfx-${TF_FFX_TAG}")
     set(TF_FFX_FILES
         "amd_fidelityfx_loader_dx12.dll|e2191d3c0828be45eb8affd4e3ec0378f2293adc345b772a7170edcf3b021ecb"
         "amd_fidelityfx_upscaler_dx12.dll|aad4fccccb29084a655f9a4f9f613bd22c8c03fb4a0f8840148cc6543b4ccace")
+    set(TF_FFX_OK ON)
     foreach(entry IN LISTS TF_FFX_FILES)
         string(REPLACE "|" ";" parts "${entry}")
         list(GET parts 0 name)
         list(GET parts 1 hash)
-        if(NOT EXISTS "${TF_FFX_DIR}/${name}")
-            message(STATUS "FidelityFX SDK ${TF_FFX_TAG}: fetching ${name}")
-            file(DOWNLOAD "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/raw/${TF_FFX_TAG}/Kits/FidelityFX/signedbin/${name}"
-                 "${TF_FFX_DIR}/${name}" EXPECTED_HASH SHA256=${hash} TLS_VERIFY ON STATUS fetched)
-            list(GET fetched 0 code)
-            if(NOT code EQUAL 0)
-                message(FATAL_ERROR "FidelityFX SDK: ${name} could not be fetched (${fetched})")
+        if(EXISTS "${TF_FFX_DIR}/${name}")
+            file(SHA256 "${TF_FFX_DIR}/${name}" have)
+            if(NOT have STREQUAL hash)
+                file(REMOVE "${TF_FFX_DIR}/${name}") # (not the pinned file: fetched again)
             endif()
         endif()
-        add_custom_command(TARGET TransformersRecomp POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TF_FFX_DIR}/${name}" "$<TARGET_FILE_DIR:TransformersRecomp>/${name}")
+        if(NOT EXISTS "${TF_FFX_DIR}/${name}")
+            message(STATUS "FidelityFX SDK ${TF_FFX_TAG}: fetching ${name}")
+            # (into a part file, renamed only once whole and checked: a failed or cut download leaves nothing behind)
+            file(DOWNLOAD "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/raw/${TF_FFX_TAG}/Kits/FidelityFX/signedbin/${name}"
+                 "${TF_FFX_DIR}/${name}.part" TLS_VERIFY ON STATUS fetched)
+            list(GET fetched 0 code)
+            if(code EQUAL 0)
+                # (checked here, not by EXPECTED_HASH: with that, a failed download is a CMake error, not a warning)
+                file(SHA256 "${TF_FFX_DIR}/${name}.part" got)
+                if(NOT got STREQUAL hash)
+                    set(fetched "its SHA-256 is ${got}, not the pinned ${hash}")
+                    set(code 1)
+                endif()
+            endif()
+            if(code EQUAL 0)
+                file(RENAME "${TF_FFX_DIR}/${name}.part" "${TF_FFX_DIR}/${name}")
+            else()
+                file(REMOVE "${TF_FFX_DIR}/${name}.part")
+                message(WARNING "FidelityFX SDK: ${name} could not be fetched (${fetched}). The game builds without "
+                                "FSR 3 / 4; the next build tries again.")
+                set(TF_FFX_OK OFF)
+            endif()
+        endif()
     endforeach()
+    if(TF_FFX_OK)
+        foreach(entry IN LISTS TF_FFX_FILES)
+            string(REPLACE "|" ";" parts "${entry}")
+            list(GET parts 0 name)
+            add_custom_command(TARGET TransformersRecomp POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TF_FFX_DIR}/${name}" "$<TARGET_FILE_DIR:TransformersRecomp>/${name}")
+        endforeach()
+    endif()
 endif()
 

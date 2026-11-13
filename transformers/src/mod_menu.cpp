@@ -1940,6 +1940,15 @@ namespace mod_menu
                 keyRow("TF_RENDERER");
             advancedEnd();
             keyRow("PS2X_GPU_SCALE");
+            // (TODO 336 (22): a player set 1x to match the console and the game still drew at the window's size) What this row
+            // does with the native renderer, under it while that renderer is chosen (its help said so, unseen).
+            if (!g_list && ps2_settings::value("TF_RENDERER") == "native")
+            {
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextDisabled("With the native renderer the game is drawn at the window's size: its resolution is the Render scale "
+                                    "setting (below, under Show all settings). This row sets only the menus and movies.");
+                ImGui::PopTextWrapPos();
+            }
             keyRow("TF_DRAW_DISTANCE");
             if (advanced("graphics-distance"))
             {

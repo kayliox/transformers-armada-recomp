@@ -15,10 +15,11 @@
 #   ./build.sh --skip-recompile      # only rebuild the executable after runtime or port changes
 #   ./build.sh --patches-only        # only apply the PS2Recomp patch series (CI: no disc)
 #   ./build.sh --no-vkd3d            # the emulated renderer only (no vkd3d build)
+#   ./build.sh --gentle              # (TODO 310) easy on the PC: half the processor threads, at a lower priority
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-iso="" config=RelWithDebInfo skip_recompile=0 no_patches=0 patches_only=0 no_vkd3d=0
+iso="" config=RelWithDebInfo skip_recompile=0 no_patches=0 patches_only=0 no_vkd3d=0 gentle=0
 while [ $# -gt 0 ]; do
     case "$1" in
     --iso) iso=$2; shift 2 ;;
@@ -27,7 +28,8 @@ while [ $# -gt 0 ]; do
     --no-patches) no_patches=1; shift ;;
     --patches-only) patches_only=1; shift ;;
     --no-vkd3d) no_vkd3d=1; shift ;;
-    -h | --help) sed -n '2,18p' "$0"; exit 0 ;;
+    --gentle) gentle=1; shift ;;
+    -h | --help) sed -n '2,19p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -35,7 +37,19 @@ done
 game=$root/game work=$root/work build=$root/out/build tools_build=$root/out/tools tools=$root/transformers/tools
 ps2recomp=$root/PS2Recomp elf=SLUS_206.68
 python=${PYTHON:-python3}
-step() { printf '\n== %s\n' "$*"; }
+# (TODO 310) Each step with its time to TF_STEP_LOG when the setup or the update set it, synced to the disk at once: it
+# names the step even when the PC went off (tools/step_log.ps1's, on Windows).
+steplog() { if [ -n "${TF_STEP_LOG:-}" ]; then printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$TF_STEP_LOG" && sync "$TF_STEP_LOG" 2>/dev/null; fi; return 0; }
+step() { printf '\n== %s\n' "$*"; steplog "build: $*"; }
+# (TODO 310) --gentle: the build and what it starts at a lower priority (nice), and half the processor threads
+parallel=()
+if [ "$gentle" = 1 ]; then
+    jobs=$(($(nproc) / 2))
+    [ "$jobs" -ge 1 ] || jobs=1
+    renice -n 10 -p $$ >/dev/null 2>&1 || true
+    parallel=(--parallel "$jobs")
+    echo "Going easy on the PC: $jobs of $(nproc) processor threads, at a lower priority"
+fi
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 
 [ -f "$ps2recomp/ps2xRuntime/CMakeLists.txt" ] || git -C "$root" submodule update --init --recursive
@@ -88,7 +102,7 @@ if [ "$skip_recompile" = 0 ]; then
     step "Building recompiler tools"
     cmake -S "$ps2recomp" -B "$tools_build" "${generator[@]}" \
         -DPS2X_BUILD_RUNTIME=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_STUDIO=OFF >/dev/null
-    cmake --build "$tools_build" --target ps2_recomp ps2_analyzer
+    cmake --build "$tools_build" ${parallel[@]+"${parallel[@]}"} --target ps2_recomp ps2_analyzer
     analyzer=$tools_build/ps2xAnalyzer/ps2_analyzer recomp=$tools_build/ps2xRecomp/ps2_recomp
     inputs=$(
         echo "scheme linux-1 $config"
@@ -132,5 +146,5 @@ step "Configuring game build"
 # shellcheck disable=SC2086
 cmake -S "$root" -B "$build" "${generator[@]}" "$vkd3d_arg" ${TF_CMAKE_ARGS:-} >/dev/null
 step "Building TransformersRecomp ($config) - the first build compiles ~22,000 generated functions"
-cmake --build "$build" --target TransformersRecomp
+cmake --build "$build" ${parallel[@]+"${parallel[@]}"} --target TransformersRecomp
 step "Built $build/transformers/TransformersRecomp"

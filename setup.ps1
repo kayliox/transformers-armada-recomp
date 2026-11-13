@@ -20,6 +20,12 @@
        (tools\make_hd_textures.ps1 -Resume).
     4. Remembers your disc path in .setup.json (git-ignored) for update.ps1.
 
+    -HdGentle on (or -Gentle on; the setup window's "Go easy on my PC"): for a PC that restarts, freezes or
+    overheats under a long full load. The build uses half the processor threads at a lower priority, and the HD
+    textures are made in short bursts with rests. About twice as long. Kept in hd_textures\hd_options.json
+    ("gentle"), so update.ps1 goes easy too. Each step is also written, with its time, to setup_steps.log
+    (TF_STEP_LOG): straight to the disk, so it names the step even when the PC went off.
+
     Everything made from your disc stays on your PC: the folders it writes are git-ignored. Never
     commit or share them.
 
@@ -36,7 +42,7 @@ param(
     [switch]$SkipHdTextures,
     [ValidateSet("", "fast", "balanced", "best")][string]$HdQuality = "",   # HD textures preset (PR #20)
     [ValidateSet("", "on", "off")][string]$HdWhilePlaying = "", # keep making them while the game runs
-    [ValidateSet("", "on", "off")][string]$HdGentle = "",       # (TODO 310) easy on the graphics card: rests, about three times as slow
+    [Alias("Gentle")][ValidateSet("", "on", "off")][string]$HdGentle = "", # (TODO 310) easy on the PC: the build on half the processor threads at a lower priority, the HD textures with rests; about twice as slow
     [switch]$InstallPrerequisites,
     [string]$Root,                 # the git repository's top (default: this folder)
     [string]$Hooks,                # a script with extra steps (Invoke-SetupHook), dot-sourced
@@ -49,11 +55,20 @@ if (-not $Root) { $Root = $Port }
 $Root = (Resolve-Path $Root).Path
 $StateFile = Join-Path $Root ".setup.json"
 
-function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
-function Fail($msg) { Write-Host "`nsetup: $msg" -ForegroundColor Red; exit 1 }
+function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan; Write-StepLog "setup: $msg" }
+function Fail($msg) { Write-Host "`nsetup: $msg" -ForegroundColor Red; Write-StepLog "setup: stopped: $msg"; exit 1 }
 
 # The shared helpers: real-Python detection (not Windows' Store shortcut), probes, git long paths.
 . (Join-Path $Port "tools\setup_common.ps1")
+# (TODO 310) Each step with its time, written straight to the disk (tools\step_log.ps1): the setup window sets
+# TF_STEP_LOG beside its setup.log; run by hand, setup_steps.log in the install's logs\ (or here).
+. (Join-Path $Port "tools\step_log.ps1")
+if (-not $env:TF_STEP_LOG) {
+    . (Join-Path $Port "tools\install_layout.ps1")
+    $stepDir = Get-LayoutLogsDir $Port
+    $env:TF_STEP_LOG = Join-Path $(if ($stepDir) { $stepDir } else { $Root }) "setup_steps.log"
+    try { Set-Content -LiteralPath $env:TF_STEP_LOG -Value $null } catch {}
+}
 if ($Hooks) { . $Hooks }
 
 # --- the remembered choices ---------------------------------------------------------------------
@@ -145,9 +160,28 @@ if (-not (Test-Path (Join-Path $Port "PS2Recomp\CMakeLists.txt"))) {
     Step "Fetching the PS2Recomp submodule"
     if ((Invoke-Native { & git -C $Root submodule update --init --recursive }) -ne 0) { Fail "git submodule update failed" }
 }
+# (TODO 219) The choices, kept in hd_textures\hd_options.json: the upscale reads them (the "while playing" one at
+# every batch), and the game's own window that carries on with an unfinished set. (TODO 310) Written before the build:
+# "gentle" is the build's too, also when the HD textures are left out.
+$hdDir = Join-Path $Port "hd_textures"
+$optFile = Join-Path $hdDir "hd_options.json"
+$opt = [ordered]@{ quality = "balanced"; while_playing = $false; gentle = $false }
+if (Test-Path $optFile) {
+    try { $o = Get-Content $optFile -Raw | ConvertFrom-Json; $opt.quality = "$($o.quality)"; $opt.while_playing = [bool]$o.while_playing; $opt.gentle = [bool]$o.gentle } catch {}
+}
+if ($HdQuality -or $HdWhilePlaying -or $HdGentle) {
+    New-Item -ItemType Directory -Force $hdDir | Out-Null
+    if ($HdQuality) { $opt.quality = $HdQuality }
+    if ($HdWhilePlaying) { $opt.while_playing = ($HdWhilePlaying -eq "on") }
+    if ($HdGentle) { $opt.gentle = ($HdGentle -eq "on") }
+    [System.IO.File]::WriteAllText($optFile, ($opt | ConvertTo-Json))
+}
+
 Step "Building the game (build.ps1)"
 $buildArgs = @{}
 if (-not $haveGame) { $buildArgs.Iso = $state.Iso }
+# (TODO 310) "Go easy on my PC": half the processor threads at a lower priority (a build.ps1 from before it: as it is)
+if ($opt.gentle -and (Select-String -LiteralPath (Join-Path $Port "build.ps1") -SimpleMatch '[switch]$Gentle' -Quiet)) { $buildArgs.Gentle = $true }
 try {
     & (Join-Path $Port "build.ps1") @buildArgs
     if (-not $?) { Fail "the build failed (see above)" }
@@ -163,21 +197,7 @@ if ($SkipHdTextures) {
     Step "Making the button prompts and fonts (no GPU upscale)"
     Invoke-OptionalFonts -Python $Python -Port $Port
 } else {
-    # (TODO 219) The choices, kept in hd_textures\hd_options.json: the upscale reads them (the "while playing" one
-    # at every batch), and the game's own window that carries on with an unfinished set.
-    if ($HdQuality -or $HdWhilePlaying -or $HdGentle) {
-        $hdDir = Join-Path $Port "hd_textures"
-        New-Item -ItemType Directory -Force $hdDir | Out-Null
-        $optFile = Join-Path $hdDir "hd_options.json"
-        $opt = [ordered]@{ quality = "balanced"; while_playing = $false; gentle = $false }
-        if (Test-Path $optFile) {
-            try { $o = Get-Content $optFile -Raw | ConvertFrom-Json; $opt.quality = "$($o.quality)"; $opt.while_playing = [bool]$o.while_playing; $opt.gentle = [bool]$o.gentle } catch {}
-        }
-        if ($HdQuality) { $opt.quality = $HdQuality }
-        if ($HdWhilePlaying) { $opt.while_playing = ($HdWhilePlaying -eq "on") }
-        if ($HdGentle) { $opt.gentle = ($HdGentle -eq "on") }
-        [System.IO.File]::WriteAllText($optFile, ($opt | ConvertTo-Json))
-    }
+    # (the choices were written before the build, above)
     Step "Making the HD textures (tools\make_hd_textures.ps1)"
     & (Join-Path $Port "tools\make_hd_textures.ps1") -Python $Python
     if (-not $?) { Fail "making the HD textures failed (see above); -SkipHdTextures plays without them" }
@@ -192,4 +212,5 @@ if (Get-Command Invoke-SetupHook -ErrorAction SilentlyContinue) {
 $state | Add-Member -Force SetUpAt (& git -C $Root rev-parse HEAD)
 Add-DesktopShortcutOnce -Repo $Root -Port $Port
 $state | ConvertTo-Json | Set-Content $StateFile -Encoding UTF8
+Write-StepLog "setup: ready"
 Write-Host "`nReady. Play with Play.bat in $Root. Settings: F1 in the game." -ForegroundColor Green

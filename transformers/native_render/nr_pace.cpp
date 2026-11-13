@@ -37,6 +37,91 @@ namespace nr::pace
         return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     }
 
+    namespace
+    {
+        std::atomic<int> g_pictureCap{0};
+        std::atomic<unsigned> g_capDrops{0};
+
+        std::mutex g_capMutex;       // (the cap's state below)
+        int64_t g_capLastNs = 0;     // when the last picture went (0: none yet - the next one goes at once)
+        int64_t g_capLastMoment = 0; // and its moment (its arrival time when it had none)
+        bool g_capLastHadMoment = false;
+        double g_capCredit = 0.0;    // the ONE credit left after it (both clocks share it - two would let the wall
+                                     // clock's phase-lock back in)
+        constexpr double kCapGate = 0.75; // (the gate: three quarters of a period)
+
+        // The credit a picture would have at t: the larger of its moment's count and the wall clock's, at most 1.1. A
+        // moment never counts backwards (a state load, the frame clock rebased after a load or a movie, a rate change);
+        // a picture with a moment after one without (or the other way round) counts by the wall clock alone - the two
+        // clocks' difference is not a distance.
+        double capCreditLocked(int64_t t, int64_t momentNs, double periodNs)
+        {
+            if (!g_capLastNs)
+                return 1.0;
+            const double byWall = static_cast<double>(std::max<int64_t>(0, t - g_capLastNs)) / periodNs;
+            const double byMoment = momentNs && g_capLastHadMoment
+                ? static_cast<double>(std::max<int64_t>(0, momentNs - g_capLastMoment)) / periodNs
+                : 0.0;
+            return std::min(1.1, g_capCredit + std::max(byMoment, byWall));
+        }
+    }
+
+    void setPictureCap(int perSecond)
+    {
+        const int cap = perSecond > 0 ? perSecond : 0;
+        if (g_pictureCap.exchange(cap, std::memory_order_relaxed) != cap)
+        {
+            // (a new cap - Unlimited to a cap included - starts afresh: the next picture goes at once)
+            std::lock_guard<std::mutex> lock(g_capMutex);
+            g_capLastNs = 0;
+            g_capLastMoment = 0;
+            g_capLastHadMoment = false;
+            g_capCredit = 0.0;
+        }
+    }
+
+    unsigned takeCapDrops() { return g_capDrops.exchange(0u, std::memory_order_relaxed); }
+
+    int pictureCap() { return g_pictureCap.load(std::memory_order_relaxed); }
+
+    void noteCapDrop() { g_capDrops.fetch_add(1u, std::memory_order_relaxed); }
+
+    int64_t capDueAt(int64_t t, int64_t momentNs)
+    {
+        const int cap = pictureCap();
+        if (cap <= 0)
+            return t; // (Unlimited: no gate either)
+        const double period = 1.0e9 / cap;
+        std::lock_guard<std::mutex> lock(g_capMutex);
+        if (!g_capLastNs)
+            return t;
+        const int64_t gate = g_capLastNs + static_cast<int64_t>(kCapGate * period);
+        const double credit = capCreditLocked(t, momentNs, period);
+        const int64_t byCredit = credit >= 1.0 ? t : g_capLastNs + static_cast<int64_t>((1.0 - g_capCredit) * period) + 1;
+        return std::max({t, gate, byCredit});
+    }
+
+    bool capTryTake(int64_t t, int64_t momentNs)
+    {
+        const int cap = pictureCap();
+        if (cap <= 0)
+            return true;
+        const double period = 1.0e9 / cap;
+        std::lock_guard<std::mutex> lock(g_capMutex);
+        // (the gate is load-bearing: when the game runs ahead of real time - a stall's catch-up, old moments - the
+        // moments' count says yes to every picture, and only the gate keeps two from going at once)
+        if (g_capLastNs && t - g_capLastNs < static_cast<int64_t>(kCapGate * period))
+            return false;
+        const double credit = capCreditLocked(t, momentNs, period);
+        if (credit < 1.0)
+            return false;
+        g_capCredit = credit - 1.0;
+        g_capLastNs = t;
+        g_capLastMoment = momentNs ? momentNs : t; // (both anchors together; a moment that jumped back is the new base)
+        g_capLastHadMoment = momentNs != 0;
+        return true;
+    }
+
     struct Pacer::State
     {
         struct Item
@@ -44,11 +129,15 @@ namespace nr::pace
             uint64_t fence = 0;
             Moment moment;
             std::function<void(int64_t)> handOver;
+            std::function<void()> drop; // (TODO 336: left out for the cap - its slot freed, nothing shown)
             int64_t readyNs = 0; // (stamped once its fence is seen passed)
         };
         Gpu gpu;
         std::mutex mutex;
         std::condition_variable cv;
+        // (TODO 336) Only run() pops this queue, so every item is either handed over or dropped. Any future clear of it (a
+        // level load, a lost device) must call each item's `drop`: else the backend's pending marks leak and its shared
+        // pictures run out.
         std::deque<Item> queue;
         bool started = false;
         double delayMs = -1.0;                 // (-1: none yet; the pacer's thread only)
@@ -119,6 +208,7 @@ namespace nr::pace
         {
             State::Item it;
             std::function<void(int64_t)> handOver;
+            std::function<void()> drop;
             {
                 std::unique_lock<std::mutex> lock(s.mutex);
                 s.cv.wait(lock, [&s] { return !s.queue.empty(); });
@@ -126,6 +216,7 @@ namespace nr::pace
                 it.fence = front.fence;
                 it.moment = front.moment;
                 handOver = std::move(front.handOver);
+                drop = std::move(front.drop);
             }
             // Its fence (the GPU done with the picture).
             if (s.gpu.completed() < it.fence)
@@ -163,6 +254,40 @@ namespace nr::pace
                     s.stampPassed(s.gpu.completed(), now());
                 }
             }
+            // (TODO 336 (18)/(20)/(21)) The cap: a bucket of one picture's credit a cap period, at most 1.1 banked (a picture a
+            // little early by the VBlanks' jitter at cap 60 is not held, a stall's catch-up burst is). Without credit the
+            // picture waits; it is left out only once a newer picture is ready AND that one's moment has come - so at cap 30
+            // a 30-a-second menu's own picture is never dropped for an in-between one due later (a visible step).
+            if (const int cap = g_pictureCap.load(std::memory_order_relaxed); cap > 0)
+            {
+                (void)cap;
+                bool dropped = false;
+                int64_t t = now();
+                for (; !capTryTake(t, it.moment.dueNs); t = now())
+                {
+                    {
+                        std::lock_guard<std::mutex> lock(s.mutex);
+                        if (s.queue.size() > 1u)
+                        {
+                            const State::Item &next = s.queue[1];
+                            dropped = s.gpu.completed() >= next.fence && (next.moment.dueNs == 0 || next.moment.dueNs <= t);
+                        }
+                    }
+                    if (dropped)
+                        break;
+                    std::this_thread::sleep_for(std::chrono::nanoseconds(std::clamp<int64_t>(capDueAt(t, it.moment.dueNs) - t, 100000, 500000)));
+                    s.stampPassed(s.gpu.completed(), now());
+                }
+                if (dropped)
+                {
+                    if (drop)
+                        drop();
+                    noteCapDrop();
+                    std::lock_guard<std::mutex> lock(s.mutex);
+                    s.queue.pop_front();
+                    continue;
+                }
+            }
             handOver(it.readyNs);
             {
                 std::lock_guard<std::mutex> lock(s.mutex);
@@ -171,7 +296,7 @@ namespace nr::pace
         }
     }
 
-    void Pacer::submit(uint64_t fence, const Moment &moment, std::function<void(int64_t readyNs)> handOver)
+    void Pacer::submit(uint64_t fence, const Moment &moment, std::function<void(int64_t readyNs)> handOver, std::function<void()> drop)
     {
         State &s = *m_state;
         std::lock_guard<std::mutex> lock(s.mutex);
@@ -184,6 +309,7 @@ namespace nr::pace
         it.fence = fence;
         it.moment = moment;
         it.handOver = std::move(handOver);
+        it.drop = std::move(drop);
         s.queue.push_back(std::move(it));
         s.cv.notify_one();
     }

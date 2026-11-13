@@ -31,6 +31,20 @@ false alarm. Don't turn the antivirus off. Instead:
 - If it still fails, open an [issue](https://github.com/kayliox/transformers-armada-recomp/issues) with the end
   of the output.
 
+### The PC restarts, freezes or overheats during the setup or an update
+
+The setup and the update are the heaviest work most PCs ever do: the build uses every processor core for minutes, and
+the HD textures keep the graphics card at full power. A PC that restarts (sometimes with beeps), freezes or overheats
+then usually has a power supply or cooling at its limit.
+
+- Run the setup again with **Go easy on my PC** ticked (on Linux `./setup.sh --gentle on`). The build then uses half
+  the processor at a lower priority, and the HD textures are made in short bursts with rests. It takes about twice as
+  long, and the updates after it go easy too.
+- To leave the HD textures out for now, untick **HD textures**; the game plays with its original textures.
+- The setup notes each step with its time in `setup_steps.log` (an update in `update_steps.log`), beside `setup.log`
+  or in the install's `logs` folder. The file is written straight to the disk, so after a restart its last line says
+  where it stopped. Please add it to a report.
+
 ### On Linux the game stops with "cannot open shared object file"
 
 The build copies the FFmpeg libraries it found, and their own dependencies, beside the executable, so a folder

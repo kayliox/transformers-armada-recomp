@@ -32,6 +32,7 @@
 #include "install_layout.h"
 #include "iop_tripwire.h"
 #include "restart_wait.h"
+#include "ultra_migrate.h"
 #if defined(PS2X_ENABLE_DEBUG_UI)
 #include "ps2_debug_panel.h"
 #endif
@@ -373,6 +374,8 @@ int main(int argc, char *argv[])
     // (0.7.1) Built-in or low-end graphics: once, the graphics rows of settings.ini back to the laptop defaults (a copy
     // kept; laptop_reset.h). Before the file is read.
     laptop_reset::run();
+    // (TODO 339) The old Ultra preset's forest moved to the new Ultra's, once per settings file, in the file itself.
+    ultra_migrate::run();
     // The settings panel's choices (settings.ini, F5 while playing) into the environment before
     // anything reads it: a variable already set wins (ps2_settings.h).
     ps2_settings::loadFile();

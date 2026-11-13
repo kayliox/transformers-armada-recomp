@@ -30,7 +30,11 @@ done
 exec > >(tee -a "$port/update.log") 2>&1
 start_time=$SECONDS
 
-step() { printf '\n==> %s\n' "$*"; }
+# (TODO 310) Each step with its time to TF_STEP_LOG when the setup or the update set it, synced to the disk at once: it
+# names the step even when the PC went off (tools/step_log.ps1's, on Windows).
+steplog() { if [ -n "${TF_STEP_LOG:-}" ]; then printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$TF_STEP_LOG" && sync "$TF_STEP_LOG" 2>/dev/null; fi; return 0; }
+step() { printf '\n==> %s\n' "$*"; steplog "update: $*"; }
+if [ -z "${TF_STEP_LOG:-}" ]; then export TF_STEP_LOG="$port/update_steps.log"; : >"$TF_STEP_LOG"; fi
 g() { git -C "$repo" -c core.longpaths=true "$@"; }
 result() {
     [ "$play" = 1 ] || return 0
@@ -159,15 +163,21 @@ if [ "$force" = 0 ]; then
     while IFS= read -r path; do
         case "$path" in
         docs/* | *.md | installer/* | .github/* | .githooks/* | setup.ps1 | update.ps1 | Play.bat | setup.sh | update.sh | play.sh | \
-            tools/setup_common.ps1 | tools/check_no_game_data.py | tools/check_publishable.py | LICENSE | .gitignore | .gitattributes) ;;
+            tools/setup_common.ps1 | tools/step_log.ps1 | tools/check_no_game_data.py | tools/check_publishable.py | LICENSE | .gitignore | .gitattributes) ;;
         *) need_build=1 ;;
         esac
     done < <(g diff --name-only "$since" HEAD)
 fi
 if [ "$need_build" = 1 ]; then
-    step "Rebuilding the game (build.sh)"
+    # (TODO 310) "Go easy on my PC" (hd_textures/hd_options.json "gentle"): a build.sh from before it builds as it is
+    build_args=()
+    if grep -q -- '--gentle)' "$port/build.sh" &&
+        python3 -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("gentle") else 1)' "$port/hd_textures/hd_options.json" 2>/dev/null; then
+        build_args+=(--gentle)
+    fi
+    step "Rebuilding the game (build.sh${build_args[*]+, going easy on the PC})"
     if [ "$force" = 1 ]; then rm -f "$port"/work/*-inputs.txt; fi # (the translation redone too)
-    "$port/build.sh" || fail "the build failed (see above)"
+    "$port/build.sh" ${build_args[@]+"${build_args[@]}"} || fail "the build failed (see above)"
 else
     echo "Nothing to rebuild (documentation only)."
 fi

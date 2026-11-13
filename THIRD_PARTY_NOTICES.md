@@ -35,15 +35,44 @@ development.
 | [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) | The Khronos Group | Apache-2.0 or MIT | The Vulkan API's headers (`vulkan-sdk-1.4.363.0`, fetched) |
 | [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) | Advanced Micro Devices | MIT | Video memory sub-allocation (`v3.4.0`, header only, fetched) |
 
-## Built into the game with the FidelityFX SDK (temporal upscaler, in development)
+## Built into the game with the FidelityFX SDK (FSR 3 / FSR 4)
 
-Only in a build made with `build.ps1 -FsrSdk` (`-DTF_FSR_SDK=ON`); off by default and in every release while the
-temporal upscaler (TODO 299) is in development.
+Every build fetches these (TODO 299; `build.ps1 -NoFsrSdk` leaves them out). FSR 3 / 4 is off in the settings by default.
 
 | Component | Author | Licence | How it is used |
 |---|---|---|---|
 | [FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) API headers | Advanced Micro Devices, Inc. | MIT | The SDK's API (`transformers/native_render/ext/fidelityfx`) |
-| FidelityFX SDK signed DLLs (`amd_fidelityfx_loader_dx12.dll`, `amd_fidelityfx_upscaler_dx12.dll`: FSR 3.1 / FSR 4) | Advanced Micro Devices, Inc. | AMD's binary licence (`Kits/FidelityFX/docs/license.md` in the SDK: redistribution in binary form, no reverse engineering, its notices kept) | Downloaded during the build (release v2.4.0, SHA-256 checked) and placed beside the game; never in this repository |
+| FidelityFX SDK signed DLLs (`amd_fidelityfx_loader_dx12.dll`, `amd_fidelityfx_upscaler_dx12.dll`: FSR 3.1 / FSR 4) | Advanced Micro Devices, Inc. | AMD's licence below (`docs/license.md` of the SDK, release v2.4.0) | Downloaded by the build on your PC from AMD's own repository (release v2.4.0, SHA-256 checked) and placed beside the game; never in this repository or in the setup program |
+
+AMD's licence for the FidelityFX SDK v2.4.0 (`docs/license.md`, quoted in full except its list of files). The SDK's
+licence puts most of its files under the first notice and lists the files under the second; the two DLLs above are in
+that list. Both notices are reproduced here as the licence asks.
+
+> The following license applies to all files except as noted below.
+>
+> Copyright (C) Advanced Micro Devices, Inc.
+>
+> REDISTRIBUTION: Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to install, reproduce, copy and distribute copies of the Software, in binary form only, and to permit persons to whom the Software is provided to do the same, provided that the following conditions are met:
+>
+> No reverse engineering, decompilation, or disassembly of this Software is permitted.
+>
+> Redistributions must reproduce the above copyright notice, this permission notice, and the following disclaimers and notices in the Software documentation and/or other materials provided with the Software.
+>
+> DISCLAIMER: THE USE OF THE SOFTWARE IS AT YOUR SOLE RISK.  THE SOFTWARE IS PROVIDED “AS IS” AND WITHOUT WARRANTY OF ANY KIND AND COPYRIGHT HOLDER AND ITS LICENSORS EXPRESSLY DISCLAIM ALL WARRANTIES, EXPRESS AND IMPLIED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. COPYRIGHT HOLDER AND ITS LICENSORS DO NOT WARRANT THAT THE SOFTWARE WILL MEET YOUR REQUIREMENTS, OR THAT THE OPERATION OF THE SOFTWARE WILL BE UNINTERRUPTED OR ERROR-FREE.  THE ENTIRE RISK ASSOCIATED WITH THE USE OF THE SOFTWARE IS ASSUMED BY YOU.  FURTHERMORE, COPYRIGHT HOLDER AND ITS LICENSORS DO NOT WARRANT OR MAKE ANY REPRESENTATIONS REGARDING THE USE OR THE RESULTS OF THE USE OF THE SOFTWARE IN TERMS OF ITS CORRECTNESS, ACCURACY, RELIABILITY, CURRENTNESS, OR OTHERWISE.
+>
+> DISCLAIMER: UNDER NO CIRCUMSTANCES INCLUDING NEGLIGENCE, SHALL COPYRIGHT HOLDER AND ITS LICENSORS OR ITS DIRECTORS, OFFICERS, EMPLOYEES OR AGENTS (“AUTHORIZED REPRESENTATIVES”) BE LIABLE FOR ANY INCIDENTAL, INDIRECT, SPECIAL OR CONSEQUENTIAL DAMAGES (INCLUDING DAMAGES FOR LOSS OF BUSINESS PROFITS, BUSINESS INTERRUPTION, LOSS OF BUSINESS INFORMATION, AND THE LIKE) ARISING OUT OF THE USE, MISUSE OR INABILITY TO USE THE SOFTWARE, BREACH OR DEFAULT, INCLUDING THOSE ARISING FROM INFRINGEMENT OR ALLEGED INFRINGEMENT OF ANY PATENT, TRADEMARK, COPYRIGHT OR OTHER INTELLECTUAL PROPERTY RIGHT EVEN IF COPYRIGHT HOLDER AND ITS AUTHORIZED REPRESENTATIVES HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.  IN NO EVENT SHALL COPYRIGHT HOLDER OR ITS AUTHORIZED REPRESENTATIVES TOTAL LIABILITY FOR ALL DAMAGES, LOSSES, AND CAUSES OF ACTION (WHETHER IN CONTRACT, TORT (INCLUDING NEGLIGENCE) OR OTHERWISE) EXCEED THE AMOUNT OF US$10.
+>
+> These source files [the list] are subject to the following license:
+>
+> Copyright (C) Advanced Micro Devices, Inc.
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+AMD, FidelityFX and FSR are trademarks of Advanced Micro Devices, Inc.
 
 ## Build tools
 

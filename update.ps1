@@ -64,6 +64,7 @@ function Step($msg, [string]$part) {
         $script:partStart = $clock.Elapsed.TotalSeconds
     }
     Write-Host "`n==> $msg" -ForegroundColor Cyan
+    if (Get-Command Write-StepLog -ErrorAction SilentlyContinue) { Write-StepLog "update: $msg" }
 }
 function Format-Time([double]$seconds) {
     $sec = [int][Math]::Round($seconds)
@@ -197,6 +198,7 @@ function Save-LocalWork([string]$branch) {
 }
 function Fail($msg) {
     Write-Host "`nupdate: $msg" -ForegroundColor Red
+    if (Get-Command Write-StepLog -ErrorAction SilentlyContinue) { Write-StepLog "update: stopped: $msg" }
     Result "failed $msg"
     Start-Game
     # (the console window the game opened: a moment to read why; not in tfa-setup's hidden run)
@@ -221,6 +223,15 @@ if (Test-Path -LiteralPath (Join-Path $Port "tools\install_layout.ps1")) {
     if ($logs) { $UpdateLog = Join-Path $logs "update.log" }
 }
 try { Start-Transcript -Path $UpdateLog -Force | Out-Null } catch {}
+# (TODO 310) Each step with its time, written straight to the disk (tools\step_log.ps1): update_steps.log beside
+# update.log, unless the setup window set TF_STEP_LOG beside its own log.
+if (Test-Path -LiteralPath (Join-Path $Port "tools\step_log.ps1")) {
+    . (Join-Path $Port "tools\step_log.ps1")
+    if (-not $env:TF_STEP_LOG) {
+        $env:TF_STEP_LOG = Join-Path (Split-Path $UpdateLog) "update_steps.log"
+        try { Set-Content -LiteralPath $env:TF_STEP_LOG -Value $null } catch {}
+    }
+}
 
 if ($WaitForPid -gt 0) {
     $game = Get-Process -Id $WaitForPid -ErrorAction SilentlyContinue
@@ -275,7 +286,7 @@ $since = if ($built) { $built } else { $old }
 $changed = if ($Force) { @("${pre}build.ps1", "${pre}tools/hd_textures/") } else { @(& git -C $Repo diff --name-only $since HEAD) }
 # (what never needs the game rebuilt: documents, the setup program, the setup scripts, GitHub's files)
 $noBuild = @("docs/*", "*.md", "installer/*", ".github/*", ".githooks/*", "setup.ps1", "update.ps1", "Play.bat",
-    "tools/setup_common.ps1", "tools/check_no_game_data.py", "tools/check_publishable.py", "LICENSE", ".gitignore", ".gitattributes")
+    "tools/setup_common.ps1", "tools/step_log.ps1", "tools/check_no_game_data.py", "tools/check_publishable.py", "LICENSE", ".gitignore", ".gitattributes")
 $needBuild = @($changed | Where-Object {
     $path = $_
     $path.StartsWith($pre) -and -not ($noBuild | Where-Object { $path.Substring($pre.Length) -like $_ })
@@ -316,7 +327,13 @@ if ($needBuild -and $Binaries) {
             $_ -like "${pre}transformers/config/*" -or $_ -eq "${pre}build.ps1" }
         if (-not $needRecompile -and (Test-Path (Join-Path $Port "work\generated\register_functions.cpp"))) { $buildArgs.SkipRecompile = $true }
     }
-    Step ("Rebuilding the game (build.ps1{0})" -f $(if ($buildArgs.SkipRecompile) { " -SkipRecompile: the game's code is translated as before" } else { "" })) "the game"
+    # (TODO 310) "Go easy on my PC" (hd_textures\hd_options.json "gentle", the setup's choice): half the processor
+    # threads at a lower priority (a build.ps1 from before it: as it is)
+    $gentle = $false
+    try { $gentle = [bool](Get-Content (Join-Path $Port "hd_textures\hd_options.json") -Raw -ErrorAction Stop | ConvertFrom-Json).gentle } catch {}
+    if ($gentle -and (Select-String -LiteralPath $buildPs1 -SimpleMatch '[switch]$Gentle' -Quiet)) { $buildArgs.Gentle = $true }
+    Step ("Rebuilding the game (build.ps1{0}{1})" -f $(if ($buildArgs.SkipRecompile) { " -SkipRecompile: the game's code is translated as before" } else { "" }),
+        $(if ($buildArgs.Gentle) { ", going easy on the PC" } else { "" })) "the game"
     & $buildPs1 @buildArgs
     if (-not $?) { Fail "the build failed (see above)" }
 }
@@ -384,6 +401,7 @@ $spentOn = @($parts.Keys | Where-Object { $parts[$_] -ge 1 } | ForEach-Object { 
 Write-Host ("`nUp to date ({0}), in {1}{2}. Play with Play.bat." -f (& git -C $Repo rev-parse --short HEAD), (Format-Time $took.TotalSeconds),
     $(if ($spentOn.Count -gt 1) { ": " + ($spentOn -join ", ") } else { "" })) -ForegroundColor Green
 Add-DesktopShortcutOnce -Repo $Repo -Port $Port
+if (Get-Command Write-StepLog -ErrorAction SilentlyContinue) { Write-StepLog "update: up to date" }
 Result "ok $((& git -C $Repo rev-parse HEAD).Trim())"
 Start-Game
 try { Stop-Transcript | Out-Null } catch {}

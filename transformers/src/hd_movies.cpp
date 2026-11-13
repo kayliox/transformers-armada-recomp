@@ -134,6 +134,23 @@ namespace hd_movies
 
     bool playing() { return g_playing.load(); }
 
+    bool movieShapeAsPs2()
+    {
+        static const bool ps2 = [] {
+            const char *v = std::getenv("TF_MOVIE_SHAPE");
+            return v && (std::tolower(static_cast<unsigned char>(v[0])) == 'p');
+        }();
+        return ps2;
+    }
+
+    float movieShape(const std::string &key)
+    {
+        const bool bars = key != "NATARI"; // (the Atari logo has no black bars of its own: 384 rows of picture)
+        const float rows = bars ? 360.0f : 384.0f;
+        // (the PS2's: its 640 x 448 frame filled a 4:3 TV, so a pixel was 0.933 wide)
+        return movieShapeAsPs2() ? (4.0f / 3.0f) * (448.0f / rows) : 640.0f / rows;
+    }
+
     void draw(PS2Runtime &runtime)
     {
 #if defined(PS2X_ENABLE_DEBUG_UI)
@@ -174,6 +191,11 @@ namespace hd_movies
                 int width = 0;
                 double fps = 30.0;
                 hd_movies_decoder::probe(file, height, width, fps);
+                // (TODO 341 (4)) Decoded at the movie's own shape, not the file's (the reforged films' 1.42:1 squeezed the
+                // picture); TF_MOVIE_SHAPE=file: the file's, as before.
+                static const bool fileShape = std::getenv("TF_MOVIE_SHAPE") && std::tolower(static_cast<unsigned char>(*std::getenv("TF_MOVIE_SHAPE"))) == 'f';
+                if (!fileShape)
+                    width = (static_cast<int>(height * movieShape(key) + 0.5f) + 1) & ~1;
                 if (hd_movies_decoder::start(file, width, height, fps))
                 {
                     haveFrame = false;
