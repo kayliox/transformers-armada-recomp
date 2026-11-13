@@ -48,7 +48,8 @@ namespace crisp_text
             s.order = 66;
             s.help = "Auto follows the last controller used while the prompts follow the device (TF_KEY_PROMPTS on): a Sony "
                      "pad shows the Button symbols above, other pads Xbox labels. PlayStation and Xbox force a controller "
-                     "style. Keyboard prompts still follow the keyboard. Changes live. (In the overlay: Display, Button prompts.)";
+                     "style. The Xbox labels look like the pad plugged in: an Xbox 360 pad's or an Xbox One / Series pad's "
+                     "buttons. Keyboard prompts still follow the keyboard. Changes live. (In the overlay: Display, Button prompts.)";
             s.choices = {{"auto", "Auto"}, {"ps", "PlayStation"}, {"xbox", "Xbox"}};
             s.defaultValue = "auto";
             s.apply = [](const std::string &value)

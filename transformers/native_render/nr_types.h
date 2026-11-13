@@ -105,6 +105,8 @@ namespace nr
         // instead while the keyboard and mouse are the device last used (keyPromptsShown).
         std::shared_ptr<const Texture> keys;
         std::shared_ptr<const Texture> xbox;
+        // (its Xbox 360 look: drawn instead of xbox while the pads plugged in are 360 ones, xbox360PromptsShown)
+        std::shared_ptr<const Texture> xbox360;
         // (TODO 164) Set while a worker converts it: its pixels are not there until pending->done (waitTexture).
         std::shared_ptr<TexturePending> pending;
         // (TODO 164) Its texels' hash (pixelHash, nr_texture.cpp), made where it was converted; 0 = not made yet.
@@ -125,6 +127,7 @@ namespace nr
     // device last used; nr_hires.cpp). Any thread.
     bool keyPromptsShown();
     bool xboxPromptsShown();
+    bool xbox360PromptsShown();
 
     // The mip chain below a texture's image (each level the one above box-filtered), into its mips.
     void buildMips(Texture &texture);

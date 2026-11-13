@@ -66,7 +66,7 @@ namespace nr
             fs::path crisp;
             std::string crispSet;
             // (the keyboard's key prompts: text_keys / keys, drawn while the keyboard is the device last used)
-            std::string keysSet, xboxSet;
+            std::string keysSet, xboxSet, xbox360Set;
             bool fontsOnly = false;
             bool ps2Symbols = false; // (TF_BUTTON_SYMBOLS=ps2: Auto keeps them, xboxPromptsShown)
             // (TODO 290 (17)) A PCSX2 texture pack (TF_HD_PACK): our texture name (relpath) -> the pack's image, through
@@ -155,6 +155,11 @@ namespace nr
             g.xboxSet = text ? "text_xbox" : "xbox";
             if (!fs::is_directory(g.crisp / g.xboxSet, ec))
                 g.xboxSet.clear();
+            // (The Xbox 360 pad's look beside the Xbox One / Series one: drawn while the pads plugged in are 360 ones.
+            // Fonts made before it have none: the One / Series look for every Xbox pad, as before.)
+            g.xbox360Set = text ? "text_xbox360" : "xbox360";
+            if (g.xboxSet.empty() || !fs::is_directory(g.crisp / g.xbox360Set, ec))
+                g.xbox360Set.clear();
             // The key prompts (TF_KEY_PROMPTS, on by default): each atlas with button symbols has a twin with the
             // player's keys in their place (make_crisp_fonts.py, from controls.txt), with the crisp text or
             // without; loaded beside it and drawn instead while the keyboard and mouse are the device last
@@ -303,7 +308,14 @@ namespace nr
                 else
                     std::fprintf(stderr, "[native render] no upscaled textures at %s\n", g.upscaled.string().c_str());
                 g.fontsOnly = true;
-                if (g.native.empty() || !fs::is_directory(g.native / "TFA2" / "FONTS", ec)) return;
+                if (g.native.empty() || !fs::is_directory(g.native / "TFA2" / "FONTS", ec))
+                {
+                    // (the sharp fonts are matched with the game's own font images: without them none is used)
+                    if (!g.crispSet.empty() || !g.keysSet.empty() || !g.xboxSet.empty())
+                        std::fprintf(stderr, "[native render] crisp fonts: not used, the game's own font images are missing (%s); "
+                                             "tools\\make_hd_textures.ps1 -FontsOnly makes them again\n", (g.native / "TFA2" / "FONTS").string().c_str());
+                    return;
+                }
             }
             size_t files = 0;
             for (auto it = fs::recursive_directory_iterator(g.native, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
@@ -1081,6 +1093,15 @@ namespace nr
                     out.xbox = std::move(xbox);
                 }
             }
+            if (!forceSet && out.xbox && !g.xbox360Set.empty())
+            {
+                auto xbox360 = std::make_shared<Texture>();
+                if (loadLarge(name, game, *xbox360, &g.xbox360Set))
+                {
+                    xbox360->id = game.id | (1ull << 60);
+                    out.xbox360 = std::move(xbox360);
+                }
+            }
             g_loadMs += static_cast<uint64_t>(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
             return true;
         }
@@ -1119,6 +1140,8 @@ namespace nr
                             std::const_pointer_cast<Texture>(large->keys)->fallback = game;
                         if (large->xbox)
                             std::const_pointer_cast<Texture>(large->xbox)->fallback = game;
+                        if (large->xbox360)
+                            std::const_pointer_cast<Texture>(large->xbox360)->fallback = game;
                         done.large = std::move(large);
                     }
                     else
@@ -1215,6 +1238,7 @@ namespace nr
                               ps2_host_input::lastPadStyle() == ps2_host_input::PadStyle::PlayStation,
                               ps2_host_input::keyboardPrompts(), g.ps2Symbols);
     }
+    bool xbox360PromptsShown() { return ps2_host_input::xbox360Pads(); }
 
     void prepareHires()
     {

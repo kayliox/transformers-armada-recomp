@@ -346,6 +346,14 @@ if (-not (Test-Path (Join-Path $Port "hd_textures"))) {
     Step "Making the button prompts and fonts (no GPU upscale)" "fonts"
     Invoke-OptionalFonts -Python $Python -Port $Port
 }
+# The sharp fonts are there but not the game's own font images they are matched with (hd_textures\converted): the
+# game cannot use them and shows its old PS2 button symbols, Xbox prompts included. Made again from the disc (fonts only).
+if (-not $needTextures -and (Test-Path (Join-Path $Port "hd_textures\crisp_fonts\manifest.json")) -and
+    -not (Test-Path (Join-Path $Port "hd_textures\converted\textures\TFA2\FONTS"))) {
+    Step "Making the button prompts and fonts again (the game's own font images are missing)" "fonts"
+    Invoke-OptionalFonts -Python $Python -Port $Port
+    $needTextures = $true
+}
 # (TODO 186) The sharp fonts and PS5 button symbols (hd_textures\crisp_fonts): made when an install with the HD textures
 # has none - one made before they existed, or without numpy, kept the game's old letters through every update.
 $crispMissing = (Test-Path (Join-Path $Port "hd_textures\converted\textures")) -and

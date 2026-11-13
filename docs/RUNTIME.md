@@ -1753,3 +1753,12 @@ GPU id (bits 61 and 62 respectively) and original-texture fallback. A draw check
 then the live controller style (`TF_PAD_PROMPTS`); PlayStation continues using `TF_BUTTON_SYMBOLS`.
 The emulated texture pack's `keyboard/` handling is unchanged. Fonts are made from decoded local
 RGBA atlases, so drawing never precedes palette availability.
+
+The Xbox labels come in two looks, as the pads have them: the Xbox One / Series pad's (dark buttons, coloured
+letters, View and Menu icons: `text_xbox` / `xbox`) and the Xbox 360 pad's (coloured buttons, pale letters,
+Back and Start arrows: `text_xbox360` / `xbox360`, a third twin with GPU id bit 60). GLFW names both pads
+"Xbox Controller", so the runtime (patch 0172, `ps2_host_input::xbox360Pads`) reads the USB ids in the Windows
+device path of each XInput pad (raw input, `IG_` in the path): when every one is a Microsoft 360 pad
+(045E:028E, 028F, 0291, 02A1, 0719) the 360 look is drawn, otherwise (One / Series, other makers, a mix, not
+Windows) the One / Series look. Looked at when a gamepad appears and every 3 s while one is there. Fonts made
+before the 360 look keep the One / Series look for every Xbox pad.

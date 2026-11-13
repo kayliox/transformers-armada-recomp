@@ -726,7 +726,7 @@ namespace nr::frame
             if (texture->keys && keyPromptsShown())
                 return textureFor(texture->keys, standInOk);
             if (texture->xbox && xboxPromptsShown())
-                return textureFor(texture->xbox, standInOk);
+                return textureFor(texture->xbox360 && xbox360PromptsShown() ? texture->xbox360 : texture->xbox, standInOk);
             auto it = g.textures.find(texture->id);
             if (it != g.textures.end())
                 return &it->second;
