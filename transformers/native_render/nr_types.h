@@ -105,6 +105,8 @@ namespace nr
         // instead while the keyboard and mouse are the device last used (keyPromptsShown).
         std::shared_ptr<const Texture> keys;
         std::shared_ptr<const Texture> xbox;
+        // (its Xbox 360 look: drawn instead of xbox while the pads plugged in are 360 ones, xbox360PromptsShown)
+        std::shared_ptr<const Texture> xbox360;
         // (TODO 164) Set while a worker converts it: its pixels are not there until pending->done (waitTexture).
         std::shared_ptr<TexturePending> pending;
         // (TODO 164) Its texels' hash (pixelHash, nr_texture.cpp), made where it was converted; 0 = not made yet.
@@ -125,6 +127,7 @@ namespace nr
     // device last used; nr_hires.cpp). Any thread.
     bool keyPromptsShown();
     bool xboxPromptsShown();
+    bool xbox360PromptsShown();
 
     // The mip chain below a texture's image (each level the one above box-filtered), into its mips.
     void buildMips(Texture &texture);
@@ -185,6 +188,8 @@ namespace nr
     // rows func_00221DB0 sends to VU1: screen = row0 * x + row1 * y + row2 * z + row3, then / w).
     struct Draw
     {
+        // Playable Decepticons' receipt for a player draw it may replace (nr_decepticon.cpp); 0 = untouched.
+        uint64_t decepticon_token = 0;
         std::shared_ptr<const PointCloud> cloud; // (TODO 27: the warp tunnel's sparks - drawn by drawCloud, no mesh)
         std::shared_ptr<const Mesh> mesh;
         std::shared_ptr<const Texture> texture; // the device's stage 0 texture (none: untextured)
@@ -416,9 +421,18 @@ namespace nr
 
     namespace d3d
     {
+        struct SharedPicture; // (nr_glshare.h: a picture in a texture the window imports, or its moment on the CPU path)
+
+#if defined(__linux__)
+        // The window's size in pixels (the window's thread, nr_present.cpp, each frame): the native picture is drawn
+        // with as many lines as it shows in the window (the window's height, or fewer when it is narrower than the
+        // picture's shape), unless TF_NATIVE_HEIGHT says otherwise.
+        void setWindowSize(int width, int height);
+#else
         // The window's height in pixels (the window's thread, nr_present.cpp, each frame): the
         // native picture is drawn with that many lines unless TF_NATIVE_HEIGHT says otherwise.
         void setWindowLines(int lines);
+#endif
 
         // The large images' bytes on the GPU now, and the adapter's video memory (its dedicated memory, MB; 0: not
         // known) - the figure the video-memory policy (the quality preset, the large images' cap and budget: TODO 94,
@@ -448,9 +462,22 @@ namespace nr
         // (N9 stage 3) The pacer's delay after a picture's moment (ms): how late the GPU's pictures are ready.
         double pacerDelayMs();
 
+#if defined(__linux__)
+        // The next picture the window has not shown (RGBA8, R in the low byte), in a readback of the renderer's
+        // that it uploads straight from: `pixels` is its first row (mapped; `rowPitch` bytes a row - width * 4 when
+        // the rows have no padding), `index` the readback to give back with pictureShown() once the upload has
+        // returned, and `meta` its size, has3D, tick, moment (dueNs, readyNs) and turnId for the pacing log. The
+        // oldest picture handed over since `serial` (which is then updated) - a newer one never replaces one
+        // waiting, so the pictures reach the screen in order. False when there is none. (Any thread.)
+        bool latestPicture(const uint8_t *&pixels, uint32_t &rowPitch, int &index, uint64_t &serial, d3d::SharedPicture &meta);
+        // (N9) The window is done with the picture's pixels (its GL upload has returned): the readback may be drawn
+        // into again. The window's thread, after latestPicture().
+        void pictureShown(int index);
+#else
         // The latest picture drawn (RGBA8, R in the low byte), copied into `pixels` when newer than
         // `serial` (which is then updated); false when there is none newer. (Any thread.)
         bool latestPicture(std::vector<uint32_t> &pixels, uint32_t &width, uint32_t &height, uint64_t &serial, bool &has3D);
+#endif
 
         // The device, queue, shaders and pipeline made on a thread of their own (seconds: the
         // shaders' compilation), so the game never waits for them; frames before are not drawn.
@@ -459,6 +486,11 @@ namespace nr
 
     // A finished frame to the renderer's thread (nr_thread.cpp; TF_NATIVE_THREAD=0: drawn at once).
     void submitFrame(Frame &&frame, const std::string &shot);
+    // A frame shown as more than one picture submits its closed list once per picture; D3D12 forbids submitting a
+    // list again before its previous submission finished (debug layer error 553, the earlier black-screen stall at
+    // high frame rates). On (Playable Decepticons switches it on; TF_NATIVE_SERIAL_REPLAY=1 for any run): each extra
+    // picture waits for the one before it. Set before the renderer starts.
+    void setSerialPictureReplay(bool on);
     // (TODO 94, the capture's cost) A frame's draws and list vectors back from the renderer once it is done with them:
     // their memory kept for the game's next frames (nr_thread.cpp) - a fresh megabyte or two each frame was page faults
     // the game's thread paid for as it first wrote each draw. takeFrameBuffers: the largest kept ones (empty, their
@@ -484,6 +516,8 @@ namespace nr
     // Whether frames are kept and read whole at their end (expandFrame) - on the renderer's thread or, with
     // TF_NATIVE_THREAD=0, the game's; false only for TF_NATIVE_THREAD=old (each stretch read as it is sent).
     bool framesDeferred();
+    // (N5, TODO 94) Whether the geometry-set hook's caches and trims are on (TF_N5_SETCACHE, default on - nr_capture.cpp).
+    bool setCacheOn();
     // (N5.3, game thread) A GS register a native device function set instead of writing its packet: into the frame's
     // native registers (applied where the packet would have been) and the register stream (nr_capture.cpp).
     void deviceRegister(const uint8_t *rdram, uint32_t reg, uint64_t value);
@@ -533,6 +567,10 @@ namespace nr
         bool sceneMotion = false; // (TODO 299: Draw::sceneMotion)
     };
     void buildPasses(const Draw &draw, std::vector<Pass> &out);
+    // (TODO 305 (7)) The motion trail's look (the 0x2220 after-image of flyers and dashes; TF_MOTION_TRAILS): 0 the
+    // original (the hard push), 1 soft push, 2 ghost blur, 3 off, -1 the default look ("smooth"). Live, from any thread.
+    void setMotionTrails(int mode);
+    int motionTrails();
     // (TODO 101 a) The pose halfway between a draw's two (16 floats, rows: the images of the model's axes and its origin):
     // the axes turned by half the turn between them - not their average, which shortens an axis that turns - the origin
     // halfway. False when the turn is over 60 degrees in a frame: no pose of the same thing (a part snapped round), to be

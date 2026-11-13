@@ -1,0 +1,50 @@
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -615,6 +615,12 @@ void ps2CaptureFrameAtVSync(PS2Runtime &runtime, uint64_t tick)
+     ExportImage(shot, path.c_str());
+ }
+ 
++static uint32_t &BlankTextureId()
++{
++    static uint32_t id = 0u;
++    return id;
++}
++
+ // Puts the picture of VBlank `tick` (ps2_host_display.h) into `tex` when it differs from the
+ // last one, and returns whether it did.
+ static bool UploadFrame(Texture2D &tex, uint32_t &outWidth, uint32_t &outHeight, uint64_t tick)
+@@ -631,9 +637,13 @@ static bool UploadFrame(Texture2D &tex, uint32_t &outWidth, uint32_t &outHeight,
+     uint32_t height = 0u;
+     if (!ps2_host_display::copyPicture(tick, s_scratch, width, height))
+     {
+-        Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, MAGENTA);
+-        UpdateTexture(tex, blank.data);
+-        UnloadImage(blank);
++        if (BlankTextureId() != tex.id)
++        {
++            Image blank = GenImageColor(FB_WIDTH, FB_HEIGHT, MAGENTA);
++            UpdateTexture(tex, blank.data);
++            UnloadImage(blank);
++            BlankTextureId() = tex.id;
++        }
+         outWidth = FB_WIDTH;
+         outHeight = DEFAULT_DISPLAY_HEIGHT;
+         s_lastWidth = outWidth;
+@@ -703,6 +713,7 @@ static bool UploadFrame(Texture2D &tex, uint32_t &outWidth, uint32_t &outHeight,
+     }
+ 
+     UpdateTexture(tex, s_uploadBuffer.data());
++    BlankTextureId() = 0u;
+     outWidth = width;
+     outHeight = height;
+     s_hasUploadedFrame = true;
+@@ -3792,6 +3803,8 @@ void PS2Runtime::run()
+         m_debugUiShutdownCallback(*this, m_debugUiUserData);
+         m_debugUiInitialized = false;
+     }
++    // A later run may create a texture with the same GL id.
++    BlankTextureId() = 0u;
+     UnloadTexture(frameTex);
+     // The GS thread first: its GPU context (a hidden window sharing this one's GL) would otherwise still be current
+     // there while CloseWindow destroys it - Mesa's Zink crashed in that teardown (abort / a jump into unloaded code).

@@ -22,7 +22,7 @@
 // The window then shows the picture at S, and the 2D (HUD, menus, text, drawn for 4:3) is narrowed
 // by (4/3) / S, its groups kept at the screen's edges (the runtime's overlay squeeze).
 //
-// TF_ASPECT = 16:9 (the game's own, the default), 21:9, 32:9, screen (the window's shape) or W:H.
+// TF_ASPECT = screen (the default: the window's shape), 16:9 (the game's own), 21:9, 32:9 or W:H.
 // Up to 2.4 (the data's tested range; 32:9 showed culling holes at the sides in 12 of 90 frames
 // in the PAL tests, so it is clamped). Movies stay 4:3.
 
@@ -51,4 +51,7 @@ namespace ultrawide
     // A taScreenInGMenu screen is up (menu_mouse.cpp, each game frame): in the HQ, one of its hologram
     // panels - the camera closes in on it while it is (TF_HQ_PANELS, TODO 53).
     void notePanel(bool shown);
+    // An HQ panel is up, zoomed in all the way (TF_HQ_PANELS on): it is where it was measured to be (menu_mouse.cpp points at it
+    // only then; while it eases in or out, or with the setting off, it is somewhere else).
+    bool panelSettled();
 }

@@ -26,6 +26,11 @@
 #include <vector>
 
 class PS2Runtime;
+namespace nr
+{
+    struct Draw;
+    struct Frame;
+}
 
 namespace ext
 {
@@ -39,8 +44,10 @@ namespace ext
                              // layout every existing save state was made with)
         BeforeGuestCode = 2, // after the core's installs, before the added code's install and self-test
         AfterGuestCode = 3,  // right after the added code's install (no guest allocations of its own)
-        AfterSettings = 4,   // right after the core's settings are added, before the HQ animation tween's install
-        Late = 5,            // after everything else, before the added code is written to guest memory
+        AfterRender = 4,     // right after the native renderer's install (nr::install), before its N5 step's
+        BeforeSettings = 5,  // after the core's debugging hooks, right before the core's settings are added
+        AfterSettings = 6,   // right after the core's settings are added, before the HQ animation tween's install
+        Late = 7,            // after everything else, before the added code is written to guest memory
     };
 
     // What a frame hook is told about the moment (the game hook's frame, overrides.cpp).
@@ -51,6 +58,19 @@ namespace ext
         bool inHq = false;              // the HQ's executor runs
         int levelRate = 0;              // tf::port::levelRate()'s figure for this frame
         uint32_t playerPosition = 0u;   // the player's position in guest memory, 0 when none
+        bool moviePlaying = false;      // a movie streams (an FMV is live)
+    };
+
+    // The native renderer's capture of a frame (nr_capture.cpp), for an extension that draws the player its own way.
+    // Set once at static initialisation (setRenderHooks); none set, or `active` false: the renderer runs as without it.
+    struct RenderHooks
+    {
+        bool (*active)() = nullptr;                                               // checked before every hook below
+        void (*noteTexture)(uint32_t guestTexture, const std::string &name) = nullptr; // game thread, each texture converted
+        void (*beginCapture)(const uint8_t *rdram, uint64_t tick, bool gameplay, double ticksPerSecond) = nullptr; // game thread
+        void (*tagDraw)(nr::Draw &draw) = nullptr;                                // a freshly captured draw, before its enqueue
+        void (*sealCapture)(nr::Frame &frame) = nullptr;                          // game thread, before the frame is submitted
+        bool (*replaceFrame)(nr::Frame &frame) = nullptr;                         // render thread, after the frame is expanded
     };
 
     struct Extension
@@ -76,6 +96,9 @@ namespace ext
         bool (*rowBounds)(const uint8_t *rdram, uint32_t menu, unsigned row, float &start, float &end) = nullptr;
         std::string (*notification)() = nullptr;                         // a message for the menu's notice line
         std::filesystem::path (*prepareDisc)(const std::filesystem::path &gameDir) = nullptr; // another disc root, empty = none
+        // (TODO 316) Another memory card root than `normalRoot` (the save profile's own card), empty = none. Asked once
+        // at the start, after the ELF loaded; not when the caller gave the card itself (TF_MC_ROOT: tests).
+        std::filesystem::path (*cardRoot)(const std::filesystem::path &normalRoot) = nullptr;
         std::vector<std::string> (*loadoutTags)() = nullptr;             // what it changes, kept in recordings and states
         // Its own controls (buttons) in the F1 menu, drawn where the menu shows `section` (mod_menu.cpp).
         void (*menuSection)(const char *section) = nullptr;
@@ -93,6 +116,11 @@ namespace ext
         // The character the player plays when it is its own (Discord status, discord_presence.h): its name and the
         // art asset key of its small image; false: none of its own (the Autobot is shown).
         bool (*presenceCharacter)(const uint8_t *rdram, std::string &name, std::string &imageKey) = nullptr;
+        // A save state was loaded, before the core adopts it (overrides.cpp); false: the extension could not adopt it
+        // and the runtime is stopping (the core then leaves the state alone).
+        bool (*stateLoaded)(PS2Runtime &runtime) = nullptr;
+        // A movie (its key, hd_movies::movieKey) skipped as the player would skip it: true skips it.
+        bool (*skipMovie)(std::string_view movieKey) = nullptr;
     };
 
     // Registers an extension (kept by pointer: give it static storage).
@@ -114,6 +142,8 @@ namespace ext
     bool rowBounds(const uint8_t *rdram, uint32_t menu, unsigned row, float &start, float &end);
     std::string notification();
     std::filesystem::path prepareDisc(const std::filesystem::path &gameDir);
+    // The memory card root an extension moves the card to (TODO 316), empty = the normal one.
+    std::filesystem::path cardRoot(const std::filesystem::path &normalRoot);
     // Every extension's tags, in order.
     std::vector<std::string> loadoutTags();
     // Every extension's controls for a menu section, in order.
@@ -126,6 +156,13 @@ namespace ext
     void beforeQuit();
     // The first extension's character (presenceCharacter above); false: none.
     bool presenceCharacter(const uint8_t *rdram, std::string &name, std::string &imageKey);
+    // Every extension's stateLoaded; false when one could not adopt the state.
+    bool stateLoaded(PS2Runtime &runtime);
+    // Any extension skips this movie.
+    bool skipMovie(std::string_view movieKey);
+    // The renderer's hooks (RenderHooks above): set once; null = none.
+    void setRenderHooks(const RenderHooks *hooks);
+    const RenderHooks *renderHooks();
 }
 
 #define TF_EXT_CAT2(a, b) a##b

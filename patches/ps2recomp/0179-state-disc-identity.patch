@@ -1,0 +1,301 @@
+Subject: [PATCH] Runtime: a state made with other game files is refused instead of hanging (TODO 304)
+
+A state made with mods (the disc read from Mods\.build\disc, its archives rebuilt) and loaded without them, or the
+other way round, loaded: the game's memory holds that disc's layout, its reads went past this disc's end (zeros) and
+it waited for them forever - the HQ's "Exit to title screen" stuck in its load. A state now holds the identity of the
+game files it has open (size and a hash of the first and last 64 KB, worked out once per file and run; not the memory
+cards' files) in a new DISC section, and a load first finds each one as this run reads it (the same tail under this
+run's disc folder, then 0177's relocation): another file there and the state is refused before anything is
+overwritten - "made with other game files: TFA.ZIP here is not the one it was made with". The files it found are the
+ones reopened. A state without the section (made before) loads as before; the format number stays.
+
+--- a/ps2xRuntime/src/lib/ps2_iop_host.cpp
++++ b/ps2xRuntime/src/lib/ps2_iop_host.cpp
+@@ -9,6 +9,7 @@
+ #include "Kernel/Syscalls/Common.h"
+ 
+ #include <algorithm>
++#include <cctype>
+ #include <cstring>
+ #include <filesystem>
+ #include <iostream>
+@@ -570,10 +571,98 @@ namespace
+     // found by the longest tail of its path that is there (the disc's folder first, then the host's and the cards').
+     // "C:\old\Mods\.build\disc\FMV\CG\EP01\N1_1.PSS" is "<disc>\FMV\CG\EP01\N1_1.PSS" here. The state keeps the path
+     // as it was: only where it is opened changes. Nothing found: the path as it is (and its "cannot reopen" line).
+-    std::filesystem::path relocateStateHostFile(const std::filesystem::path &path)
++    // A state's file identity (TODO 304): the size and a hash of the first and last 64 KB. Enough to tell a mods
++    // build's disc copy of TFA.ZIP from the disc's own (its directory is at the front), and cheap on a disc image.
++    struct StateFileIdentity
++    {
++        uint64_t size = 0u;
++        uint64_t hash = 0u;
++    };
++
++    // Worked out once per file and run (keyed on its path, size and time written): an F5 / F9 reads no file twice.
++    bool stateFileIdentity(const std::filesystem::path &path, StateFileIdentity &identity)
++    {
++        std::error_code error;
++        identity.size = std::filesystem::file_size(path, error);
++        if (error)
++            return false;
++        const auto written = std::filesystem::last_write_time(path, error);
++        if (error)
++            return false;
++        static std::mutex cacheMutex;
++        static std::map<std::filesystem::path, std::pair<std::pair<uint64_t, std::filesystem::file_time_type>, uint64_t>> cache;
++        {
++            std::lock_guard<std::mutex> lock(cacheMutex);
++            if (const auto found = cache.find(path); found != cache.end() && found->second.first.first == identity.size &&
++                                                     found->second.first.second == written)
++            {
++                identity.hash = found->second.second;
++                return true;
++            }
++        }
++#if defined(_WIN32)
++        std::FILE *stream = ::_wfopen(path.c_str(), L"rb");
++#else
++        std::FILE *stream = std::fopen(path.string().c_str(), "rb");
++#endif
++        if (!stream)
++            return false;
++        constexpr uint64_t kEnd = 64u * 1024u;
++        uint64_t hash = 14695981039346656037ull; // FNV-1a
++        for (int i = 0; i < 8; ++i)
++            hash = (hash ^ ((identity.size >> (i * 8)) & 0xFFu)) * 1099511628211ull;
++        std::vector<uint8_t> buffer(static_cast<size_t>(std::min(kEnd, identity.size)));
++        bool ok = true;
++        for (const uint64_t offset : {uint64_t{0u}, identity.size - buffer.size()})
++        {
++            if (buffer.empty())
++                break;
++#if defined(_WIN32)
++            ok = _fseeki64(stream, static_cast<int64_t>(offset), SEEK_SET) == 0;
++#else
++            ok = fseeko(stream, static_cast<off_t>(offset), SEEK_SET) == 0;
++#endif
++            ok = ok && std::fread(buffer.data(), 1u, buffer.size(), stream) == buffer.size();
++            if (!ok)
++                break;
++            for (const uint8_t byte : buffer)
++                hash = (hash ^ byte) * 1099511628211ull;
++        }
++        std::fclose(stream);
++        identity.hash = hash;
++        if (ok)
++        {
++            std::lock_guard<std::mutex> lock(cacheMutex);
++            cache[path] = {{identity.size, written}, hash};
++        }
++        return ok;
++    }
++
++    // The cards' files (slot 1's folder and slot 2's "<folder>_slot1") change on their own and are restored from the
++    // state anyway: not checked. Everything else a state holds open is the game's (the disc's files, the image).
++    bool stateFileIsCard(const std::string &path)
++    {
++        const std::string root = PS2Runtime::getIoPaths().mcRoot.string();
++        if (root.empty() || path.size() < root.size())
++            return false;
++        for (size_t i = 0; i < root.size(); ++i)
++        {
++            const char a = path[i] == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(path[i])));
++            const char b = root[i] == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(root[i])));
++            if (a != b)
++                return false;
++        }
++        return true;
++    }
++
++    // `thisRunFirst` (a state's game file being checked, TODO 304): the file this run reads for that path - the same
++    // tail under this run's folders - even where the path itself is there too: a state made with mods (the disc read
++    // from Mods\.build\disc) loaded without them names files that are still on this PC but are not the disc this run
++    // reads. Otherwise (0177): the path as it is when it is there.
++    std::filesystem::path relocateStateHostFile(const std::filesystem::path &path, bool thisRunFirst = false)
+     {
+         std::error_code error;
+-        if (path.empty() || std::filesystem::is_regular_file(path, error))
++        if (path.empty() || (!thisRunFirst && std::filesystem::is_regular_file(path, error)))
+             return path;
+         // (split on both separators: a Windows state's path on Linux - the Deck - is one name to std::filesystem there)
+         std::vector<std::string> parts;
+@@ -646,7 +735,9 @@ void PS2IopHostAdapter::loadState(ps2x::StateReader &in)
+         if (path == kStateCdImageToken)
+             path = cdImage;
+         HostFile file;
+-        const std::filesystem::path here = relocateStateHostFile(std::filesystem::path(path));
++        const auto match = m_stateFileMatches.find(handle);
++        const std::filesystem::path here = match != m_stateFileMatches.end() ? std::filesystem::path(match->second)
++                                                                             : relocateStateHostFile(std::filesystem::path(path));
+         file.path = here.string();
+         file.stream = openStateHostFile(here, file.size);
+         if (!file.stream)
+@@ -661,6 +752,84 @@ void PS2IopHostAdapter::loadState(ps2x::StateReader &in)
+     }
+     m_nextHostFileHandle = in.u64();
+     m_nextToken = in.u64();
++    m_stateFileMatches.clear();
++}
++
++void PS2IopHostAdapter::saveStateFiles(ps2x::StateWriter &out) const
++{
++    const std::string cdImage = PS2Runtime::getIoPaths().cdImage.string();
++    std::lock_guard<std::mutex> lock(m_hostFileMutex);
++    std::map<uint64_t, const HostFile *> ordered;
++    for (const auto &[handle, file] : m_hostFiles)
++        ordered.emplace(handle, &file);
++    out.u64(ordered.size());
++    for (const auto &[handle, file] : ordered)
++    {
++        out.u64(handle);
++        out.string(!cdImage.empty() && file->path == cdImage ? std::string(kStateCdImageToken) : file->path);
++        StateFileIdentity identity;
++        const bool checked = !stateFileIsCard(file->path) && stateFileIdentity(std::filesystem::path(file->path), identity);
++        out.u8(checked ? 1u : 0u);
++        out.u64(identity.size);
++        out.u64(identity.hash);
++    }
++}
++
++bool PS2IopHostAdapter::checkStateFiles(ps2x::StateReader &in, std::string &reason)
++{
++    const std::string cdImage = PS2Runtime::getIoPaths().cdImage.string();
++    std::lock_guard<std::mutex> lock(m_hostFileMutex);
++    m_stateFileMatches.clear();
++    const size_t files = in.count(29u);
++    for (size_t i = 0; i < files && in.ok(); ++i)
++    {
++        const uint64_t handle = in.u64();
++        std::string path = in.string();
++        const bool checked = in.u8() != 0u;
++        StateFileIdentity want;
++        want.size = in.u64();
++        want.hash = in.u64();
++        if (!in.ok())
++            break;
++        if (path == kStateCdImageToken)
++            path = cdImage;
++        if (!checked)
++            continue;
++        // The file this run reads for that path (its disc's), and failing that the path as it is.
++        std::filesystem::path here = relocateStateHostFile(std::filesystem::path(path), true);
++        std::error_code error;
++        if (!std::filesystem::is_regular_file(here, error))
++            here = relocateStateHostFile(std::filesystem::path(path));
++        StateFileIdentity have;
++        if (!stateFileIdentity(here, have))
++        {
++            m_stateFileMatches.clear();
++            reason = "it needs a game file that is not here (" + std::filesystem::path(path).filename().string() + ")";
++            return false;
++        }
++        if (have.size != want.size || have.hash != want.hash)
++        {
++            m_stateFileMatches.clear();
++            reason = "made with other game files: " + std::filesystem::path(path).filename().string() +
++                     " here is not the one it was made with (a state made with mods loads only with the same mods, and "
++                     "one made without mods only without them)";
++            return false;
++        }
++        m_stateFileMatches[handle] = here.string();
++    }
++    if (!in.ok())
++    {
++        m_stateFileMatches.clear();
++        reason = "section DISC does not match this build";
++        return false;
++    }
++    return true;
++}
++
++void PS2IopHostAdapter::forgetStateFiles()
++{
++    std::lock_guard<std::mutex> lock(m_hostFileMutex);
++    m_stateFileMatches.clear();
+ }
+ 
+ size_t PS2IopHostAdapter::openHostFileCount() const
+--- a/ps2xRuntime/src/lib/ps2_iop_host.h
++++ b/ps2xRuntime/src/lib/ps2_iop_host.h
+@@ -95,6 +95,14 @@ public:
+     void loadState(ps2x::StateReader &in);
+     [[nodiscard]] size_t openHostFileCount() const;
+ 
++    // The open files' identity (size and a hash of their ends; not the cards' files): a state made
++    // with other game files - a mods build's disc copy, another disc - is refused before anything is
++    // overwritten. checkStateFiles() finds each file here (where it is, or by 0177's relocation) and
++    // loadState() then opens those; forgetStateFiles() for a state without the identities.
++    void saveStateFiles(ps2x::StateWriter &out) const;
++    bool checkStateFiles(ps2x::StateReader &in, std::string &reason);
++    void forgetStateFiles();
++
+ private:
+     friend class CallScope;
+ 
+@@ -115,4 +123,6 @@ private:
+     mutable std::mutex m_hostFileMutex;
+     std::unordered_map<uint64_t, HostFile> m_hostFiles;
+     uint64_t m_nextHostFileHandle = 1u;
++    // checkStateFiles()' finds, by handle: the file here that is the one the state was made with.
++    std::unordered_map<uint64_t, std::string> m_stateFileMatches;
+ };
+--- a/ps2xRuntime/src/lib/ps2_savestate.cpp
++++ b/ps2xRuntime/src/lib/ps2_savestate.cpp
+@@ -57,6 +57,10 @@ namespace
+     // The SPU2 reverb's resampling history (since 2026-10-08; a state without it loads with the
+     // history empty: 0.8 ms of the effect).
+     constexpr uint32_t kReverb = tag('R', 'V', 'R', 'B');
++    // The identity of the game files the state holds open (since 2026-11-12, TODO 304): a state made with other files
++    // (with mods, without them, another disc) is refused before anything is overwritten - the game's memory knows
++    // that disc's layout and waits forever for reads past this disc's end. A state without it loads as before.
++    constexpr uint32_t kDisc = tag('D', 'I', 'S', 'C');
+ 
+     std::string tagName(uint32_t value)
+     {
+@@ -647,6 +651,21 @@ struct PS2StateAccess
+         runtime.m_iopHost->saveState(out);
+     }
+ 
++    static void saveDisc(PS2Runtime &runtime, ps2x::StateWriter &out)
++    {
++        runtime.m_iopHost->saveStateFiles(out);
++    }
++
++    static bool checkDisc(PS2Runtime &runtime, ps2x::StateReader *in, std::string &reason)
++    {
++        if (!in)
++        {
++            runtime.m_iopHost->forgetStateFiles();
++            return true;
++        }
++        return runtime.m_iopHost->checkStateFiles(*in, reason);
++    }
++
+     static void saveReverb(PS2Runtime &runtime, ps2x::StateWriter &out)
+     {
+         runtime.m_iopSubsystem->saveReverbState(out);
+@@ -1123,6 +1142,8 @@ namespace ps2_savestate
+                 { PS2StateAccess::saveIop(runtime, out); });
+         section(kReverb, [&](ps2x::StateWriter &out)
+                 { PS2StateAccess::saveReverb(runtime, out); });
++        section(kDisc, [&](ps2x::StateWriter &out)
++                { PS2StateAccess::saveDisc(runtime, out); });
+         section(kHle, [&](ps2x::StateWriter &out)
+                 { PS2StateAccess::saveHle(runtime, out); });
+         section(kCard, [&](ps2x::StateWriter &out)
+@@ -1198,6 +1219,14 @@ namespace ps2_savestate
+             if (!checkInfo(in, reason))
+                 return false;
+         }
++        if (sections.contains(kDisc))
++        {
++            ps2x::StateReader in(sections[kDisc].data, sections[kDisc].size);
++            if (!PS2StateAccess::checkDisc(runtime, &in, reason))
++                return false;
++        }
++        else
++            PS2StateAccess::checkDisc(runtime, nullptr, reason);
+ 
+         // From here on the machine is being overwritten.
+         if (untouched)

@@ -1,0 +1,84 @@
+Subject: [PATCH] Runtime: the chain summaries' 30 s line says what the sent lists are made of (TODO 312)
+
+Of the bytes the kick copies for VIF1: the UNPACKs' data VIF1 passes over while lite, DIRECT's GIF data and MPG's microcode, counted as the interpreter meets them (three relaxed counters), so the copy can be cut to what VIF1 really reads.
+
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -1,6 +1,7 @@
+ // Based on Blackline Interactive implementation
+ #include "runtime/ps2_memory.h"
+ #include "runtime/ps2_vif1_thread.h"
++#include <atomic>
+ #include <cstring>
+ #include <string>
+ #include <chrono>
+@@ -321,6 +322,9 @@ uint64_t g_ps2VifMpgUploads = 0u;
+ uint64_t g_ps2VifMpgChanged = 0u;
+ uint64_t g_ps2VifMpgDropped = 0u;
+ uint64_t g_ps2Vif1OpcodeCounts[128] = {};
++// (TODO 312: what a frame's list is made of, for the copy at the kick - ps2_vif1_thread.cpp's 30 s line) The bytes of the
++// UNPACKs' data passed over while lite, of DIRECT data and of MPG microcode, as the interpreter meets them.
++std::atomic<uint64_t> g_ps2Vif1LiteUnpackBytes{0u}, g_ps2Vif1DirectBytes{0u}, g_ps2Vif1MpgBytes{0u};
+ bool g_ps2VifTraceActive = false;
+ bool ps2Vu1WatchHit(uint32_t qword); // PS2X_VU1_WATCH (ps2_vu1_core.cpp)
+ void ps2Vu1HistoryUnpack(uint32_t qword, uint32_t count); // PS2X_VU1_HISTORY (ps2_vu1_core.cpp)
+@@ -657,6 +661,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+             if (availableQw == 0u)
+                 break;
+             const uint32_t chunkQw = std::min<uint32_t>(vif1_regs.num, availableQw);
++            g_ps2Vif1DirectBytes.fetch_add(chunkQw * 16u, std::memory_order_relaxed);
+             sendDirectData(data + pos, chunkQw, currentOpcode == VIF_DIRECTHL);
+             pos += chunkQw * 16u;
+             vif1_regs.num -= chunkQw;
+@@ -848,6 +853,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+             uint32_t destAddr = (uint32_t)imm * 8u;
+             const uint32_t instructionCount = (num == 0u) ? 256u : static_cast<uint32_t>(num);
+             const uint32_t mpgBytes = instructionCount * 8u;
++            g_ps2Vif1MpgBytes.fetch_add(mpgBytes, std::memory_order_relaxed);
+             if (m_vu1Code && destAddr < PS2_VU1_CODE_SIZE && mpgBytes > 0)
+             {
+                 uint32_t copyBytes = mpgBytes;
+@@ -883,6 +889,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+         {
+             const uint32_t qwCount = (imm == 0u) ? 65536u : imm;
+             const uint32_t chunkQw = std::min<uint32_t>(qwCount, (sizeBytes - pos) / 16u);
++            g_ps2Vif1DirectBytes.fetch_add(chunkQw * 16u, std::memory_order_relaxed);
+             sendDirectData(data + pos, chunkQw, opcode == VIF_DIRECTHL);
+             pos += chunkQw * 16u;
+             // Whatever is missing arrives with the next transfer.
+@@ -941,6 +948,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+             if (lite)
+             {
+                 // (ps2vif1::setLite: its data passed over, VU1 memory untouched)
++                g_ps2Vif1LiteUnpackBytes.fetch_add(totalBytes + 4u, std::memory_order_relaxed);
+                 pos += totalBytes;
+                 if (pos > sizeBytes)
+                     break;
+--- a/ps2xRuntime/src/lib/ps2_vif1_thread.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_thread.cpp
+@@ -18,6 +18,9 @@
+ #include <string>
+ #include <thread>
+ 
++// (TODO 312, ps2_vif1_interpreter.cpp) What the lists sent are made of: the UNPACKs' data passed over while lite, DIRECT, MPG.
++extern std::atomic<uint64_t> g_ps2Vif1LiteUnpackBytes, g_ps2Vif1DirectBytes, g_ps2Vif1MpgBytes;
++
+ namespace
+ {
+     // Interrupts share the DMAC completion queue, tagged with this flag (see
+@@ -1105,9 +1108,13 @@ namespace ps2vif1
+                 const auto now = std::chrono::steady_clock::now();
+                 if (now - st.last >= std::chrono::seconds(30))
+                 {
+-                    std::fprintf(stderr, "[vif1] 30 s of chain summaries%s: %llu chains, %llu calls summarized, %.1f MB not sent (%.1f MB sent)\n",
++                    // (TODO 312: of what was sent, the UNPACKs' data VIF1 passed over while lite, DIRECT's GIF data, MPG's microcode)
++                    std::fprintf(stderr, "[vif1] 30 s of chain summaries%s: %llu chains, %llu calls summarized, %.1f MB not sent (%.1f MB sent: "
++                                         "UNPACKs passed over while lite %.1f, DIRECT %.1f, MPG %.1f)\n",
+                                  g_summaryCheck ? " (checked: sent whole)" : "", static_cast<unsigned long long>(st.chains),
+-                                 static_cast<unsigned long long>(st.calls), st.savedBytes / 1048576.0, st.sentBytes / 1048576.0);
++                                 static_cast<unsigned long long>(st.calls), st.savedBytes / 1048576.0, st.sentBytes / 1048576.0,
++                                 g_ps2Vif1LiteUnpackBytes.exchange(0u) / 1048576.0, g_ps2Vif1DirectBytes.exchange(0u) / 1048576.0,
++                                 g_ps2Vif1MpgBytes.exchange(0u) / 1048576.0);
+                     st = SummaryStats{};
+                     st.last = now;
+                 }

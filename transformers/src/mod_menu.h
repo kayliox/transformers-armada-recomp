@@ -13,16 +13,39 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 class PS2Runtime;
 
 namespace mod_menu
 {
+    // F1's merged rows (one choice that sets several settings), as F1 offers them: the choices and, for each, the settings it
+    // writes. The game's Options pages (pc_settings_row.cpp, game_menu_list.h) take these rows from here instead of keeping copies.
+    // `accepted` lists the other values of a setting that also count as the choice being on.
+    struct MergedPair
+    {
+        std::string key, value;
+        std::vector<std::string> accepted;
+    };
+    struct MergedOption
+    {
+        std::string label;
+        std::vector<MergedPair> pairs;
+    };
+    // id: "aspect", "preset", "antialiasing", "volume" or "prompts" (empty for another id). The window thread (it reads the settings'
+    // rows, as F1 does when it draws).
+    std::vector<MergedOption> mergedOptions(const std::string &id);
+
     // From the debug UI callbacks (main.cpp): after the debugger's initialize, each frame.
     // Its own settings (before the window loop starts): driving with W / S.
     void addSettings();
     void draw(PS2Runtime &runtime);
     bool isOpen();
+    // How many times the menu has been closed so far (any thread): a page of the game's Options menus that F1 was opened over reads
+    // its values again when this has moved (pc_settings_row.cpp).
+    uint32_t closeCount();
+    // Opens the menu from the game thread (the Options pages' Advanced row: pc_settings_row.h).
+    void requestOpen();
     // The player's own key layout (controls.txt over the defaults), also while the menus' or the car's keys are in
     // (those overlays move Enter, Space and Escape): the one the game's hints describe. Any thread.
     std::string playerKeyLayout();

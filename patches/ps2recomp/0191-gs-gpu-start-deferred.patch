@@ -1,0 +1,107 @@
+Subject: [PATCH] Runtime: the GS's GPU renderer's start can be put off until the emulated drawing is needed (TODO 308)
+
+The GPU renderer (OpenGL) links its programs on the GS thread the first time it draws: on Intel's UHD 620 ~9 s, the GS
+thread held - a save state made then (downloadFromGpu + drain) waits for all of it. A host whose own renderer takes over
+the drawing a few seconds in (Transformers' native renderer alone) never needed it. ps2_gpu::setStartDeferred(true): until
+cleared, GSGpuRenderer::Impl::begin() answers "not ready" without starting, so the software renderer draws (as before the
+window is up). Cleared by the host (its renderer could not start), by setEmulatedDrawing(true) after a false (the
+emulated drawing back after the host's renderer drew: a lost device), or PS2X_GPU_DEFER_S seconds (default 30) after
+the first deferred draw with the emulated drawing still on. The context the window makes for it is not touched.
+
+--- a/ps2xRuntime/include/runtime/gs/gs_gpu.h
++++ b/ps2xRuntime/include/runtime/gs/gs_gpu.h
+@@ -35,6 +35,16 @@
+     bool requested();
+     bool mirrored(); // PS2X_GPU_MIRROR: the software renderer draws as well
+ 
++    // (TODO 308) The GPU renderer's start put off: its programs linked on the GS thread the first time it draws (Intel's
++    // UHD 620: ~9 s, the GS thread held - a save state waits for it). A host whose own renderer takes over the drawing
++    // in a few seconds (the native renderer alone) defers it from the start: until then the software renderer draws, as
++    // before the window is up, and the GPU renderer starts only when the emulated drawing is needed after all - it comes
++    // back after the host's renderer drew (setEmulatedDrawing(true) after a false clears this), or the host clears it
++    // (its renderer could not start), or PS2X_GPU_DEFER_S seconds (default 30) after the first deferred draw with the
++    // emulated drawing still on. Any thread.
++    void setStartDeferred(bool deferred);
++    bool startDeferred();
++
+     // Main thread, the window's GL context current: creates the GPU renderer's context,
+     // sharing textures with the window's. False when GPU rendering is off or impossible.
+     bool createContext();
+--- a/ps2xRuntime/src/lib/gs/gs_gpu.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_gpu.cpp
+@@ -240,6 +240,45 @@
+     return enabled;
+ }
+ 
++namespace
++{
++    std::atomic<bool> g_startDeferred{false};
++    std::atomic<int64_t> g_deferredSinceNs{0}; // (the first draw put off, steady clock; 0: none yet)
++}
++
++void ps2_gpu::setStartDeferred(bool deferred)
++{
++    if (g_startDeferred.exchange(deferred) != deferred)
++        std::fprintf(stderr, "[gpu] the GPU renderer's start %s\n",
++                     deferred ? "put off: the software renderer draws until the host's renderer takes over (TODO 308)"
++                              : "no longer put off: it starts when the GS next draws");
++}
++
++bool ps2_gpu::startDeferred()
++{
++    if (!g_startDeferred.load(std::memory_order_relaxed))
++        return false;
++    // (the host's renderer never took over: the GPU renderer starts after all)
++    static const int64_t limitNs = []()
++    {
++        const char *env = std::getenv("PS2X_GPU_DEFER_S");
++        const double s = env && *env ? std::atof(env) : 30.0;
++        return static_cast<int64_t>((s > 0.0 ? s : 30.0) * 1e9);
++    }();
++    const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    int64_t since = g_deferredSinceNs.load(std::memory_order_relaxed);
++    if (since == 0)
++    {
++        g_deferredSinceNs.compare_exchange_strong(since, now);
++        return true;
++    }
++    if (now - since < limitNs || !ps2_host_display::emulatedDrawing())
++        return true;
++    std::fprintf(stderr, "[gpu] the host's renderer has not taken over after %.0f s: ", limitNs / 1e9);
++    setStartDeferred(false);
++    return false;
++}
++
+ bool ps2_gpu::createContext()
+ {
+     if (!requested())
+@@ -2261,6 +2300,8 @@
+ 
+ bool GSGpuRenderer::Impl::begin()
+ {
++    if (!tried && ps2_gpu::startDeferred())
++        return false; // (TODO 308: not started yet - the software renderer draws)
+     if (!init())
+         return false;
+     if (invalidatePending.load(std::memory_order_relaxed) && invalidatePending.exchange(false))
+--- a/ps2xRuntime/src/lib/ps2_host_display.cpp
++++ b/ps2xRuntime/src/lib/ps2_host_display.cpp
+@@ -1,4 +1,5 @@
+ #include "runtime/ps2_host_display.h"
++#include "runtime/gs/gs_gpu.h" // (TODO 308: the GPU renderer's put-off start)
+ 
+ #include <algorithm>
+ #include <array>
+@@ -743,7 +744,11 @@
+ 
+     void setEmulatedDrawing(bool on)
+     {
+-        g_emulatedDrawing.store(on, std::memory_order_release);
++        const bool was = g_emulatedDrawing.exchange(on, std::memory_order_acq_rel);
++        // (TODO 308) The emulated drawing back after the host's renderer drew (its device lost, or its 2D handed back):
++        // the GPU renderer's put-off start is due now.
++        if (on && !was)
++            ps2_gpu::setStartDeferred(false); // (logs only when it was put off)
+     }
+ 
+     bool emulatedDrawing()

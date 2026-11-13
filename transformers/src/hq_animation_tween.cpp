@@ -119,6 +119,72 @@ void blendMegatronTreads(uint8_t* ram, float dt)
     }
 }
 
+// TF_HQ_GESTURE_TRACE=1: one stderr line per HQ actor update while a UI clip
+// controller of a seated actor plays (clock, clip length, fade state). Read only.
+bool gestureTracing()
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char* value = std::getenv("TF_HQ_GESTURE_TRACE");
+        cached = value && value[0] == '1' && !value[1];
+    }
+    return cached == 1;
+}
+
+void clipName(const uint8_t* r, uint32_t p, char (&out)[24])
+{
+    out[0] = 0;
+    if (!span(ram_size, p, 12)) return;
+    uint32_t data = p + 1, n = r[p] >> 1;
+    if (r[p] & 1) { n = word(r, p + 4); data = word(r, p + 8); }
+    if (n > 22 || data < 0x100000 || data > ram_size - 24) return;
+    std::memcpy(out, r + data, n);
+    out[n] = 0;
+}
+
+void traceGestures(uint8_t* r, float dt)
+{
+    static unsigned lines = 0, frame = 0;
+    ++frame;
+    if (lines > 20000) return;
+    uint32_t models = 0, count = 0;
+    const uint32_t hq = word(r, 0x6cf688);
+    if (!g_decepticonHQ || !g_decepticonHQ(r) || !span(ram_size, hq, 0x54) || word(r, hq) != 0x6b7360 ||
+        !vector(r, ram_size, word(r, 0x6cf7e0), models, count)) return;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t model = word(r, models + 4 * i);
+        if (!span(ram_size, model, 0x24) || word(r, model) != 0x6bb320) continue;
+        char who[24];
+        clipName(r, model + 4, who);
+        if (std::strncmp(who, "Char_", 5)) continue;
+        const uint32_t actor = word(r, model + 0x20);
+        uint32_t list = 0, used = 0;
+        if (!span(ram_size, actor, 0xa0) || word(r, actor) != 0x6af490 || !vector(r, ram_size, actor + 0x64, list, used)) continue;
+        char line[512];
+        int at = std::snprintf(line, sizeof line, "[HQ gesture] f=%u dt=%.4f %s", frame, dt, who + 5);
+        bool ack = false;
+        for (uint32_t k = 0; k < used && at < 440; ++k) {
+            const uint32_t c = word(r, list + 4 * k);
+            if (!span(ram_size, c, 0x34) || word(r, c) != 0x6af250) continue;
+            const uint32_t source = word(r, c + 0xc);
+            if (!span(ram_size, source, 0x1c)) continue;
+            char clip[24];
+            clipName(r, source + 4, clip);
+            if (std::strncmp(clip, "UI", 2)) continue;
+            if (!std::strncmp(clip, "UIAck", 5)) ack = true;
+            float time = 0, length = 0;
+            std::memcpy(&time, r + c + 4, 4);
+            std::memcpy(&length, r + source + 0x18, 4);
+            at += std::snprintf(line + at, sizeof line - at, " | %s t=%.3f/%.3f f%02x s%d p%d/%d", clip, time, length,
+                                r[c + 0x14], r[c + 0x16], half(r, c + 0x1c), half(r, c + 0x20));
+        }
+        static int tail[3] = {};
+        const unsigned slot = who[5] == 'O' ? 0 : who[5] == 'H' ? 1 : 2;
+        if (ack) tail[slot] = 90;  // keep tracing the hand-off back to the idle
+        if (tail[slot] > 0) { std::fprintf(stderr, "%s\n", line); ++lines; if (!ack) --tail[slot]; }
+    }
+}
+
 void updateTreads(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime)
 {
     const uint32_t caller = getRegU32(ctx, 31);
@@ -129,7 +195,10 @@ void updateTreads(uint8_t* ram, R5900Context* ctx, PS2Runtime* runtime)
     originalUpdate(ram, ctx, runtime);
     if (hqUpdate && ctx->pc == caller && getRegU32(ctx, 29) == stack &&
         runtime->eeScheduler().currentThreadId() == thread)
+    {
         blendMegatronTreads(ram, dt);
+        if (gestureTracing()) traceGestures(ram, dt);
+    }
 }
 #endif
 bool preserve_pending(const uint8_t*r,std::size_t size,uint32_t c,uint32_t caller){

@@ -1,0 +1,34 @@
+diff --git a/ps2xRuntime/src/lib/ps2_host_present_dxgi.cpp b/ps2xRuntime/src/lib/ps2_host_present_dxgi.cpp
+index 74b4ed1..8ddd368 100644
+--- a/ps2xRuntime/src/lib/ps2_host_present_dxgi.cpp
++++ b/ps2xRuntime/src/lib/ps2_host_present_dxgi.cpp
+@@ -134,6 +134,12 @@ namespace ps2_host_present::dxgi
+             // NT handle: Intel's and NVIDIA's WGL_NV_DX_interop2 refuse to register the NT-handle ones (ERROR_OPEN_FAILED,
+             // 6e). Tried when the NT-handle ones fail; PS2X_PRESENT_SHARE=nt / legacy: that one only.
+             bool legacyShare = false;
++            // (TODO 311) The adapter is Intel's (0x8086): the legacy-handle retry is not made there, so its DXGI attempt
++            // ends in GL's own swap. Measured on the ThinkPad's UHD 620 (2026-11-13): the full DXGI path costs ~30 ms
++            // from a frame to the screen in a level (GPU-bound, its present thread waits behind the game's GPU work),
++            // while a swap chain made and then dropped already ends the movies' 150-200 ms holds (3 runs: 0, 2, 2 of
++            // ~33 windows against 13-14 with GL alone) at GL's latency. PS2X_PRESENT_SHARE=legacy: the retry anyway.
++            bool intel = false;
+             GLuint source = 0u; // (a framebuffer on the window's drawing)
+             // Handing over
+             std::thread thread;
+@@ -250,7 +256,7 @@ namespace ps2_host_present::dxgi
+                 if (forced && std::string(forced) == "legacy")
+                     g.legacyShare = true;
+             }
+-            const bool canSwitch = !forced || !*forced;
++            const bool canSwitch = (!forced || !*forced) && !g.intel;
+             DWORD lastError = 0;
+             const auto makePictures = [&]() -> bool
+             {
+@@ -828,6 +834,7 @@ namespace ps2_host_present::dxgi
+         }
+         DXGI_ADAPTER_DESC1 adapterDesc{};
+         chosen->GetDesc1(&adapterDesc);
++        g.intel = adapterDesc.VendorId == 0x8086u;
+         const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+         const auto createDevice = [&](ID3D11Device *&device, ID3D11DeviceContext *&context)
+         {

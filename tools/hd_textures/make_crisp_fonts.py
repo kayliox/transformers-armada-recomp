@@ -25,8 +25,9 @@ The PlayStation sets, selected by the existing settings (TF_CRISP_TEXT x TF_BUTT
 path in the converted tree (TFA2/FONTS/DECK) - the native renderer finds the image by the same name
 and content checks as the upscaled set (transformers/native_render/nr_hires.cpp).
 
-Xbox sets: text_xbox / xbox; keyboard sets: text_keys / keys. Xbox labels use original geometric
-line work, without platform artwork or font files.
+Xbox sets: text_xbox / xbox (the Xbox One and Series pads) and text_xbox360 / xbox360 (the Xbox 360 pad);
+keyboard sets: text_keys / keys. Xbox labels use original geometric line work, without platform artwork or
+font files.
 
 Everything it writes is made from YOUR disc (the atlases and glyph tables, read from the extracted
 archives and converted textures of tools/make_hd_textures.ps1): game data, never commit or share it.
@@ -52,7 +53,7 @@ from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import trace_glyphs  # noqa: E402
 
-VERSION = 2
+VERSION = 3
 SCALE = 8          # the new atlases' size over the game's
 SS = 4             # supersampling of the drawn glyphs and symbols (drawn at SCALE*SS, box-filtered down)
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -479,10 +480,40 @@ STROKES = {
     "E": [[(1,0),(0,0),(0,1),(1,1)],[(0,.5),(.8,.5)]],
     "W": [[(0,0),(.2,1),(.5,.5),(.8,1),(1,0)]], "M": [[(0,1),(0,0),(.5,.5),(1,0),(1,1)]],
     "N": [[(0,1),(0,0),(1,1),(1,0)]], "U": [[(0,0),(0,1),(1,1),(1,0)]]}
+FACE_KINDS = ("cross", "circle", "square", "triangle")
+# The two Xbox looks (the pad's model: the renderer picks the set, nr_hires.cpp). "one": the Xbox One and Series pads -
+# dark buttons with coloured letters, VIEW and MENU as their small icons. "360": the Xbox 360 pad - coloured buttons
+# with a pale letter of their own colour, BACK and START as the small buttons with their arrows. Both keep the grey
+# rim of every other prompt; the shoulder keys (LB / RB / LT / RT / LS / RS) are the same in both.
+XBOX_LETTER = {"A": (92, 200, 70), "B": (236, 62, 54), "X": (46, 130, 240), "Y": (250, 198, 28)}
+XBOX_GEM = {"A": (64, 168, 52), "B": (206, 40, 36), "X": (36, 100, 214), "Y": (232, 176, 18)}
 
 
-def draw_xbox(kind, w, h, ink_box_px, top_alpha):
-    """Original geometric buttons, clipped to the same cell as the source symbol."""
+def _strokes(d, label, box, colour, weight):
+    """The label in the geometric alphabet, centred in box (x0, y0, x1, y1), its strokes weight x its height."""
+    x0, y0, x1, y1 = box
+    height = min((y1-y0)*.5, (x1-x0)*.72/(len(label)*.72))
+    cw, gap = height*.55, height*.17
+    left = (x0+x1-(cw*len(label)+gap*(len(label)-1)))/2
+    top = (y0+y1-height)/2
+    for i, ch in enumerate(label):
+        for stroke in STROKES[ch]:
+            d.line([(left+i*(cw+gap)+x*cw, top+y*height) for x,y in stroke],
+                   fill=colour, width=max(1,round(height*weight)), joint="curve")
+
+
+def _shaded_disc(d, cx, cy, r, edge, centre, lift=0.0, steps=20):
+    """A disc shaded from its edge's colour to its centre's, the centre lifted up by lift x r (a domed button)."""
+    for i in range(steps):
+        t = i / (steps - 1)
+        rr = r * (1 - .88*t)
+        c = tuple(int(round(e + (m - e)*t)) for e, m in zip(edge, centre)) + (255,)
+        oy = -r * lift * t
+        d.ellipse((cx-rr, cy-rr+oy, cx+rr, cy+rr+oy), fill=c)
+
+
+def draw_xbox(kind, w, h, ink_box_px, top_alpha, style="one"):
+    """Original geometric buttons, clipped to the same cell as the source symbol (style: "one" or "360")."""
     img, d, _ = _supersampled(w, h)
     x0, y0, x1, y1 = [v * SS for v in ink_box_px]
     # Leave space for antialiasing and keep even tiny source cells valid.
@@ -491,25 +522,49 @@ def draw_xbox(kind, w, h, ink_box_px, top_alpha):
     if x1 <= x0 or y1 <= y0:
         return np.zeros((h, w, 4), dtype=np.float32)
     label = XBOX_LABELS[kind]
-    face = kind in ("cross", "circle", "square", "triangle")
     rim = max(1, round(min(x1-x0, y1-y0)*.055))
-    if face:
+    if kind in FACE_KINDS:
         side = min(x1-x0, y1-y0)
         cx, cy = (x0+x1)/2, (y0+y1)/2
         x0, y0, x1, y1 = cx-side/2, cy-side/2, cx+side/2, cy+side/2
-        d.ellipse((x0,y0,x1,y1), fill=DISC, outline=RIM, width=rim)
+        d.ellipse((x0,y0,x1,y1), fill=RIM)
+        r = side/2 - rim
+        if style == "360":
+            gem = XBOX_GEM[label]
+            _shaded_disc(d, cx, cy, r, tuple(c*.55 for c in gem), tuple(min(255, c*1.12 + 18) for c in gem), lift=.12)
+            colour = tuple(int(c + (255-c)*.72) for c in gem) + (255,)
+            # (a pale letter on a bright button - A and Y most - reads better with a thin edge in a deep shade of it)
+            _strokes(d, label, (x0,y0,x1,y1), tuple(int(c*.38) for c in gem) + (255,), .31)
+        else:
+            _shaded_disc(d, cx, cy, r, (52, 53, 58), (18, 18, 22))
+            colour = XBOX_LETTER[label] + (255,)
+        _strokes(d, label, (x0,y0,x1,y1), colour, .19)
+    elif kind in ("select", "start"):
+        if style == "360":
+            # BACK / START: a small dark round button with its arrow
+            side = min(x1-x0, y1-y0)
+            cx, cy = (x0+x1)/2, (y0+y1)/2
+            d.ellipse((cx-side/2, cy-side/2, cx+side/2, cy+side/2), fill=DISC, outline=RIM, width=rim)
+            a = side*.2
+            pts = [(cx-a, cy), (cx+a*.8, cy-a), (cx+a*.8, cy+a)] if kind == "select" else [(cx+a, cy), (cx-a*.8, cy-a), (cx-a*.8, cy+a)]
+            d.polygon(pts, fill=INK)
+        else:
+            d.rounded_rectangle((x0,y0,x1,y1), min(x1-x0,y1-y0)*.18, fill=DISC, outline=RIM, width=rim)
+            cx, cy = (x0+x1)/2, (y0+y1)/2
+            u = min(x1-x0, y1-y0)*.5
+            lw = max(1, round(u*.09))
+            if kind == "select":
+                # VIEW: two overlapping squares, the front one filled
+                b = u*.72
+                d.rounded_rectangle((cx-b*.75, cy-b*.75, cx+b*.25, cy+b*.25), b*.12, outline=INK, width=lw)
+                d.rounded_rectangle((cx-b*.25, cy-b*.25, cx+b*.75, cy+b*.75), b*.12, fill=DISC, outline=INK, width=lw)
+            else:
+                # MENU: three lines
+                for k in (-1, 0, 1):
+                    d.line([(cx-u*.36, cy+k*u*.26), (cx+u*.36, cy+k*u*.26)], fill=INK, width=lw)
     else:
         d.rounded_rectangle((x0,y0,x1,y1), min(x1-x0,y1-y0)*.18, fill=DISC, outline=RIM, width=rim)
-    colour = {"A": (100,225,115,255), "B": (245,100,100,255),
-              "X": (105,175,255,255), "Y": (245,215,90,255)}.get(label, INK)
-    height = min((y1-y0)*.5, (x1-x0)*.72/(len(label)*.72))
-    cw, gap = height*.55, height*.17
-    left = (x0+x1-(cw*len(label)+gap*(len(label)-1)))/2
-    top = (y0+y1-height)/2
-    for i, ch in enumerate(label):
-        for stroke in STROKES[ch]:
-            d.line([(left+i*(cw+gap)+x*cw, top+y*height) for x,y in stroke],
-                   fill=colour, width=max(1,round(height*.10)), joint="curve")
+        _strokes(d, label, (x0,y0,x1,y1), INK, .10)
     out = _down(img, w, h)
     out[...,3] *= top_alpha
     return out
@@ -750,7 +805,7 @@ def main():
     manifest["controls"] = {b: shown_key(k) for b, k in sorted(layout.items())}
     if not args.only:
         # (made whole again: an atlas an older version made and this one does not is not left behind)
-        for name in (("text_keys", "keys") if args.keys_only else ("text_ps5", "text_ps2", "ps5", "text_xbox", "xbox", "text_keys", "keys")):
+        for name in (("text_keys", "keys") if args.keys_only else ("text_ps5", "text_ps2", "ps5", "text_xbox", "xbox", "text_xbox360", "xbox360", "text_keys", "keys")):
             shutil.rmtree(os.path.join(args.out, name), ignore_errors=True)
     for atlas, fonts in sorted(by_atlas.items()):
         if args.only and atlas != args.only.upper():
@@ -903,7 +958,10 @@ def main():
                 top = float(a.max()) if a.max() > 0 else 1.0
                 cov = resize_plane(a / top, ((x1 - x0) * SCALE, (y1 - y0) * SCALE))
                 ob = ink_box(cov, 0.3) or (0, 0, X1 - X0, Y1 - Y0)
-                sym = (draw_xbox if ps5 == "xbox" else draw_symbol)(kind, X1 - X0, Y1 - Y0, ob, top)
+                if ps5 in ("xbox", "xbox360"):
+                    sym = draw_xbox(kind, X1 - X0, Y1 - Y0, ob, top, "360" if ps5 == "xbox360" else "one")
+                else:
+                    sym = draw_symbol(kind, X1 - X0, Y1 - Y0, ob, top)
                 out[Y0:Y1, X0:X1] = sym
             return out
 
@@ -924,6 +982,8 @@ def main():
             sets["ps5"] = with_symbols(base, True)
             sets["xbox"] = with_symbols(base, "xbox")
             sets["text_xbox"] = with_symbols(crisp, "xbox")
+            sets["xbox360"] = with_symbols(base, "xbox360")
+            sets["text_xbox360"] = with_symbols(crisp, "xbox360")
             notes["symbols"] = len(ps5_cells)
         if ps5_cells:
             # (the keyboard's keys: with the crisp text, and with the text as it was)

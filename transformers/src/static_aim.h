@@ -13,4 +13,8 @@ namespace static_aim
     // (TODO 292 A) The third-person camera's pivot as the game last placed it (GetThirdPersonCameraPivotPoint, from the
     // crosshair's update each frame): the centre the camera turns about. False when none came lately.
     bool cameraPivot(float point[3]);
+    // (TODO 322) The crosshair pinned to one point of the screen now (mouse and keyboard on foot): `share` = its height as a
+    // share of half the view's height above the centre (0: the centre - first person, the aiming view). photo_mode places
+    // the game's crosshair model on the camera's ray through it, small_crosshair draws there. Any thread.
+    bool pinned(float &share);
 }

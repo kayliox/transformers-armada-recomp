@@ -1,7 +1,10 @@
 // The mod menu (F1): mod_menu.h has the long form.
 
 #include "mod_menu.h"
+#include "game_menu_list.h"
+#include "pc_settings_row.h"
 
+#include "apex_keys.h"
 #include "camera_mode.h"
 #include "graphics_driver.h"
 #include "gpu_recovery.h"
@@ -19,6 +22,7 @@
 #include "port_ext.h"
 #include "dev_tree.h"
 #include "speedrun_timer.h"
+#include "objective_guide.h"
 #include "start_screens.h"
 #include "game_config.h"
 #include "save_io.h"
@@ -80,6 +84,23 @@ namespace mod_menu
 {
     namespace
     {
+        // The controller layout used when settings.ini has none: on a Steam Deck the triggers fire and jump (its
+        // bumpers are hard to reach in a hand-held grip), elsewhere each game button on its own controller button.
+        const char *padDefault()
+        {
+#if defined(__linux__)
+            static const bool deck = []
+            {
+                std::ifstream in("/sys/class/dmi/id/sys_vendor");
+                std::string vendor;
+                return std::getline(in, vendor) && vendor == "Valve";
+            }();
+            if (deck)
+                return "l1=l2;l2=l1;r1=r2;r2=r1"; // (as "Triggers fire")
+#endif
+            return "";
+        }
+
         // ---------------------------------------------------------------------------------
         // The 32 cheat codes (docs/CHEATS.md of the mods repository:
         // decoded from the game's own table, the same in the PAL and USA releases).
@@ -362,6 +383,8 @@ namespace mod_menu
         }
 
         bool g_open = std::getenv("TF_MOD_MENU") != nullptr; // TF_MOD_MENU=1: open from the start
+        std::atomic<bool> g_openRequest{false}; // (requestOpen: asked from the game thread, taken by draw)
+        std::atomic<uint32_t> g_closeCount{0};  // (closeCount: the menu was open, and is not any more)
         bool g_modRestarting = false;
         std::string g_modRestartError;
 
@@ -914,7 +937,8 @@ namespace mod_menu
             Car,
             Menu,
             MenuPaused,
-            MenuPauseTop
+            MenuPauseTop,
+            Apex // (TODO 300 (6): the Apex mod's keys off the game's layout - apex_keys.h)
         };
         Overlay g_overlay = Overlay::None;
         std::string g_userLayout;  // the player's own layout, under an overlay
@@ -987,6 +1011,8 @@ namespace mod_menu
                 want = menu == 1 ? Overlay::Menu : (menu == 3 ? Overlay::MenuPauseTop : Overlay::MenuPaused);
             else if (g_carKeys.load(std::memory_order_relaxed) && !g_open && camera_mode::inVehicle())
                 want = Overlay::Car;
+            else if (!g_open && apex_keys::active() && !camera_mode::inVehicle())
+                want = Overlay::Apex;
             if (want == g_overlay)
                 return;
             // (not while Enter, Space or Escape is held: the key that paused or picked would read as a
@@ -1001,7 +1027,8 @@ namespace mod_menu
                 std::lock_guard<std::mutex> lock(g_playerLayoutMutex);
                 g_playerLayoutCopy.clear();
             }
-            static const char *const kOverlayNames[] = {"the player's", "the car's", "the menus'", "the pause screen's pages'", "the pause screen's"};
+            static const char *const kOverlayNames[] = {"the player's", "the car's", "the menus'", "the pause screen's pages'", "the pause screen's",
+                                                        "the Apex mod's"};
             std::fprintf(stderr, "[mod menu] keys: %s layout\n", kOverlayNames[static_cast<int>(want)]);
             g_overlay = want;
             if (want == Overlay::None)
@@ -1017,6 +1044,8 @@ namespace mod_menu
                 ps2_host_input::setKeyBindings(g_userLayout + ";cross=" + joined(listFor(g_userLayout, "cross"), forward) +
                                                ";square=" + joined(listFor(g_userLayout, "square"), back) + ";lup=;ldown=");
             }
+            else if (want == Overlay::Apex)
+                ps2_host_input::setKeyBindings(apex_keys::layoutWithout(g_userLayout));
             else
                 ps2_host_input::setKeyBindings(menuLayout(g_userLayout, want == Overlay::Menu, want == Overlay::MenuPauseTop));
             g_overlaySet = ps2_host_input::keyBindings();
@@ -1204,7 +1233,7 @@ namespace mod_menu
                 if (list != name)
                     out += (out.empty() ? "" : ";") + std::string(name) + "=" + list;
             }
-            return out;
+            return out.empty() && *padDefault() ? "l1=l1" : out; // (the plain layout kept when the default is another)
         }
 
         void setPadLayout(const std::string &layout)
@@ -1285,7 +1314,7 @@ namespace mod_menu
                 menu_style::setHelp("Fire and jump on the triggers (R2, L2), the Mini-Con abilities on the bumpers (R1, L1).");
             ImGui::SameLine();
             if (menu_style::button("Reset to default"))
-                setPadLayout("");
+                setPadLayout(padDefault());
         }
 
         // ---------------------------------------------------------------------------------
@@ -1303,6 +1332,7 @@ namespace mod_menu
             Levels,
             Saves,
             Mods,
+            Apex, // (TODO 300: the Apex movement mod's own page, the overlay's)
             Other,
             About,
         };
@@ -1315,6 +1345,7 @@ namespace mod_menu
         // features, the unlocks and the cheats on one page under headings.)
         const PageInfo kPages[] = {{Page::Display, "Display"}, {Page::Graphics, "Graphics"}, {Page::Controls, "Controls"},
                                    {Page::Sound, "Sound"},     {Page::Gameplay, "Gameplay"}, {Page::Mods, "Mods & cheats"},
+                                   {Page::Apex, "Apex movement"},
                                    {Page::Saves, "Saves"},     {Page::Other, "Debug"},      {Page::About, "About"}};
         // (TODO 286 c) Quit game is a button at the bottom right (the footer), no longer a tab; the pad reaches it from the
         // last tab (down).
@@ -1370,10 +1401,14 @@ namespace mod_menu
                 return Page::Sound;
             if (r.section == "Gameplay" || r.section == "Debug")
                 return Page::Gameplay;
-            if (r.section == "Cheats" || r.section == "Prototype" || r.section == "Jet bike" || r.section == "Apex movement")
+            if (r.section == "Apex movement")
+                return Page::Apex;
+            if (r.section == "Cheats" || r.section == "Prototype" || r.section == "Jet bike")
                 return Page::Mods;
             if (r.section == "Updates")
                 return Page::About; // (the update check: updates.h)
+            if (r.section == "Save profile")
+                return Page::Saves; // (TODO 316: the overlay's Normal / Cheats profile, save_profile.cpp)
             return Page::Other;
         }
 
@@ -1425,6 +1460,16 @@ namespace mod_menu
         // TF_MOD_MENU_LIST=1 logs this layout (listTabs): g_list then collects the rows instead of drawing them.
         std::string *g_list = nullptr;
         std::vector<SettingRow> g_listRows;
+        // (listing too: the rows F1 shows by default - keys and merged-row ids, outside "Advanced" - for the check against the
+        // game's menu list, game_menu_list.h)
+        std::vector<std::string> g_listDefaults;
+        int g_listAdvanced = 0;
+        bool g_listSettingsTab = false; // (the tab being listed is one of the settings tabs: the game's menus are about those)
+        void listDefault(const std::string &id)
+        {
+            if (g_listSettingsTab && g_listAdvanced == 0 && std::find(g_listDefaults.begin(), g_listDefaults.end(), id) == g_listDefaults.end())
+                g_listDefaults.push_back(id);
+        }
 
         const std::vector<SettingRow> &rowsNow() { return g_list ? g_listRows : rows(); }
 
@@ -1510,6 +1555,7 @@ namespace mod_menu
             {"TF_NATIVE_SOUND", "Sound engine", "Native or the emulated PS2 sound chip."},
             {"TF_CFG_showHUD", "HUD", "Show the in-game HUD."},
             {"TF_START_SCREENS", "Start-up", "What shows when the game starts."},
+            {"TF_OBJECTIVE_GUIDE", "Objective guide", "An arrow at the bottom of the screen to the level's next story place, with its name and distance."},
             {"PS2X_THREAD_PLACEMENT", "CPU thread placement", "Auto: the busiest threads each get a core, the ones that share work on cores that share a cache. Can steady the frame rate on 6+ core CPUs, Ryzen especially. Off: Windows decides. Takes a restart."},
         };
         const Words *wordsFor(const std::string &key)
@@ -1573,6 +1619,7 @@ namespace mod_menu
             if (g_list)
             {
                 listItem(label + " (" + r.key + ")");
+                listDefault(r.key);
                 return;
             }
             std::vector<std::string> labels;
@@ -1604,6 +1651,7 @@ namespace mod_menu
             if (g_list)
             {
                 *g_list += " [advanced:";
+                ++g_listAdvanced;
                 return true; // (listed: advancedEnd closes the bracket)
             }
             g_inAdvanced = showAll();
@@ -1614,7 +1662,11 @@ namespace mod_menu
         {
             g_inAdvanced = false;
             if (g_list)
+            {
                 *g_list += " ]";
+                if (g_listAdvanced > 0)
+                    --g_listAdvanced;
+            }
         }
 
         // A merged row: one choice that sets several keys.
@@ -1688,6 +1740,7 @@ namespace mod_menu
                         break;
                     }
                 listItem(std::string(label) + " = " + now + " (merged: " + keys + ")");
+                listDefault(id);
                 return;
             }
             int current = -1;
@@ -1791,7 +1844,7 @@ namespace mod_menu
         }
 
         // The keys the layouts place (the merged rows' too): left out of the leftover rows.
-        const char *const kPlaced[] = {"PS2X_MOUSE_INVERT_Y", "PS2X_PRESENT_SYNC", "TF_NATIVE_BLOOM", 
+        const char *const kPlaced[] = {"PS2X_MOUSE_INVERT_Y", "PS2X_PRESENT_SYNC", "TF_SCREEN_SYNC_STATUS", "TF_NATIVE_BLOOM",
             "PS2X_FULLSCREEN", "PS2X_MONITOR", "PS2X_WIDESCREEN", "TF_ASPECT", "TF_FOV", "TF_HQ_FOV", "TF_FPS_CAP", "PS2X_SHOW_FPS",
             "TF_FRAME_RATE", "TF_FPS_LOCK", "TF_FRAME_PACING", "TF_CRISP_TEXT", "TF_BUTTON_SYMBOLS", "TF_KEY_PROMPTS", "TF_PAD_PROMPTS",
             "TF_SMALL_CROSSHAIR", "TF_HQ_PANELS", "TF_DISTANCE_METER", "TF_SPEEDRUN_TIMER", "TF_RENDERER", "PS2X_GPU_SCALE",
@@ -1802,11 +1855,14 @@ namespace mod_menu
             "PS2X_STICK_LEFT_DEADZONE", "PS2X_STICK_RIGHT_DEADZONE",
             "PS2X_STICK_RESPONSE", "PS2X_STICK_VEHICLE_MODE", "PS2X_STICK_LEFT_LIFT", "PS2X_STICK_LEFT_SENSITIVITY",
             "PS2X_STICK_RIGHT_LIFT", "PS2X_STICK_VEHICLE_LIFT", "PS2X_STICK_VEHICLE_RESPONSE",
-            "TF_CAR_KEYS", "PS2X_AUDIO", "PS2X_AUDIO_VOLUME", "TF_NATIVE_SOUND", "TF_CFG_showHUD", "TF_START_SCREENS",
+            "TF_CAR_KEYS", "PS2X_AUDIO", "PS2X_AUDIO_VOLUME", "TF_NATIVE_SOUND", "TF_CFG_showHUD", "TF_START_SCREENS", "TF_OBJECTIVE_GUIDE",
             "TF_ENEMY_WAVES", "TF_PLAY_RECORDING", "TF_UPDATE_CHECK",
             // (Kept in settings.ini only, never a row: the HD texture pack's folder and the HD set's - the Graphics
             // page's pack button and the setup set them; without these "Show all settings" listed them as raw rows.)
-            "TF_HD_PACK", "TF_HIRES_DIR"};
+            "TF_HD_PACK", "TF_HIRES_DIR",
+            // (TODO 300: the Apex movement page's own rows - the rest of its section under "Show all settings")
+            "TF_APEX", "TF_APEX_FOV", "TF_APEX_ADS_TOGGLE", "TF_APEX_SPRINT_KEY", "TF_APEX_SPRINT_TOGGLE", "TF_APEX_CROUCH_KEY",
+            "TF_APEX_SLIDE_KEY"};
         bool laidOut(const std::string &key)
         {
             return std::find_if(std::begin(kPlaced), std::end(kPlaced), [&](const char *k) { return key == k; }) != std::end(kPlaced);
@@ -1845,6 +1901,7 @@ namespace mod_menu
             pageHeading("Frame rate");
             keyRow("TF_FPS_CAP");
             keyRow("PS2X_PRESENT_SYNC"); // (TODO 286 d: beside the limit it works with)
+            keyRow("TF_SCREEN_SYNC_STATUS"); // (TODO 323: the screen's refresh and its FreeSync, told)
             keyRow("PS2X_SHOW_FPS");
             if (advanced("display-rate"))
             {
@@ -1874,8 +1931,10 @@ namespace mod_menu
         {
             driverWarning();
             mergedRow("preset", "Preset",
-                      "One choice for all the graphics settings. On built-in graphics, the Render scale setting "
-                      "makes by far the biggest difference to the frame rate.",
+                      "One choice for all the graphics settings. Built-in graphics start on Low, drawn at a render scale "
+                      "of 67% and enlarged with FSR 1 (still sharper than the PS2); stronger built-in graphics (Iris Xe, "
+                      "recent AMD) can raise the preset. On built-in graphics, the Render scale setting makes by far the "
+                      "biggest difference to the frame rate.",
                       presets(), true);
             if (advanced("graphics-renderer"))
                 keyRow("TF_RENDERER");
@@ -2164,6 +2223,7 @@ namespace mod_menu
                       buttonPrompts(), false);
             keyRow("TF_SMALL_CROSSHAIR");
             keyRow("TF_START_SCREENS");
+            keyRow("TF_OBJECTIVE_GUIDE"); // (TODO 315: objective_guide.h)
             if (advanced("game-more"))
             {
                 keyRow("TF_HQ_PANELS");
@@ -2186,6 +2246,89 @@ namespace mod_menu
                 drawCheats();
         }
 
+        // (TODO 300, the Apex movement mod's page) Its switch, its field of view, the camera (the Gameplay page's, mirrored), aim
+        // Hold / Toggle and its keys - each a layout key name, off the game's layout while the mod is on and the robot on foot
+        // (apex_keys.h); what the game had on them is said, and what has no other key is shown. The speeds and the rest of
+        // its section (lane A's: fatigue, wall bounce, hang, ledge, glide window, bunny hop) under "Show all settings".
+        void pageApex()
+        {
+            pageHeading("Apex movement");
+            keyRow("TF_APEX");
+            keyRow("TF_APEX_FOV");
+            if (g_list)
+                listItem("Camera (first / third person, as Gameplay's)");
+            else
+            {
+                const int current = camera_mode::firstPerson() ? 1 : 0;
+                const int chosen = menu_style::choiceRow("apexcamera", "Camera", {"Third person", "First person"}, current, true, nullptr,
+                                                         "The same as Gameplay > Camera: the robot's view. Apex movement is made for first person.");
+                if (chosen >= 0 && chosen != current)
+                {
+                    camera_mode::setFirstPerson(chosen != 0);
+                    if (chosen != 0)
+                        camera_mode::setAim(false);
+                }
+            }
+            keyRow("TF_APEX_ADS_TOGGLE");
+            pageHeading("Keys while it is on");
+            keyRow("TF_APEX_SPRINT_KEY");
+            keyRow("TF_APEX_SPRINT_TOGGLE");
+            keyRow("TF_APEX_CROUCH_KEY");
+            keyRow("TF_APEX_SLIDE_KEY");
+            keyRow("TF_APEX_JUMP_EXTRA_KEY");    // (TODO 326: the wheel down jumps too, apex_keys.h)
+            keyRow("TF_APEX_FORWARD_EXTRA_KEY"); // (TODO 326: the wheel up moves forward too)
+            if (!g_list)
+            {
+                ImGui::TextWrapped("Walk: the move keys (W A S D). Jump: Space, and the extra jump key (the wheel down). Move forward: W, and "
+                                   "the extra key (the wheel up). A wheel notch is a short press; while these use the wheel, the right-click "
+                                   "aim's zoom steps leave it to them. Aim down sights: the right mouse button. A gamepad keeps its own "
+                                   "buttons, and the stick's tilt walks or sprints.");
+                // What the game had on the mod's keys: its other keys, or none (then give it one in Controls > Keys). (TODO 326:
+                // an extra key leaves the game's other inputs too - not its own, jump or move forward.)
+                const std::string layout = playerKeyLayout();
+                const std::pair<apex_keys::Key, const char *> kModKeys[] = {
+                    {apex_keys::Key::Sprint, ""}, {apex_keys::Key::Crouch, ""}, {apex_keys::Key::Slide, ""},
+                    {apex_keys::Key::JumpExtra, "l1"}, {apex_keys::Key::ForwardExtra, "lup"}};
+                for (const auto &[k, own] : kModKeys)
+                {
+                    const int code = apex_keys::key(k);
+                    if (code < 0)
+                        continue;
+                    const std::string name = ps2_host_input::keyName(code);
+                    for (const ControlRow &c : kControls)
+                    {
+                        if (std::string(c.input) == own)
+                            continue;
+                        const std::string list = listFor(layout, c.input);
+                        bool has = false;
+                        std::string others;
+                        for (size_t at = 0; at <= list.size();)
+                        {
+                            size_t end = list.find(',', at);
+                            if (end == std::string::npos)
+                                end = list.size();
+                            const std::string key = list.substr(at, end - at);
+                            at = end + 1;
+                            if (key == name)
+                                has = true;
+                            else if (!key.empty())
+                                others += (others.empty() ? "" : ", ") + key;
+                        }
+                        if (!has)
+                            continue;
+                        if (others.empty())
+                            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "%s: only on %s - it has no key while Apex movement is on (Controls > Keys)",
+                                               c.label, name.c_str());
+                        else
+                            ImGui::TextDisabled("%s moves to %s (it was also on %s)", c.label, others.c_str(), name.c_str());
+                    }
+                }
+            }
+            if (advanced("apex-more"))
+                settingRows(Page::Apex);
+            advancedEnd();
+        }
+
         // Mods & cheats (TODO 73): what changes the game, in one place.
         void pageMods()
         {
@@ -2194,8 +2337,6 @@ namespace mod_menu
                 ext::menuSection("Prototype"); // (an extension's controls: the jet bike's Summon, port_ext.h)
             settingRows(Page::Mods, "Prototype");
             settingRows(Page::Mods, "Jet bike"); // (TODO 92: its own settings)
-            pageHeading("Apex movement"); // (TODO 300: the overlay's apex_mod.cpp)
-            settingRows(Page::Mods, "Apex movement");
             pageHeading("Gameplay");
             keyRow("TF_ENEMY_WAVES");
             keyRow("TF_PLAY_RECORDING");
@@ -2231,6 +2372,10 @@ namespace mod_menu
                 drawSaves();
             else
                 listItem("Open saves folder (button)");
+            // (TODO 316) The save profile (an extension's: Normal / Cheats, save_profile.cpp); nothing without it.
+            settingRows(Page::Saves, "Save profile");
+            if (!g_list)
+                ext::menuSection("Save profile");
             // (TODO 156) Save states by name (state_manager.h)
             pageHeading("Save states");
             if (!g_list)
@@ -2270,7 +2415,7 @@ namespace mod_menu
             return page != Page::Other || showAll(); // (TODO 286 d: Debug with "Show all settings")
 #else
             // The public build (no overlay): no Mods & cheats page and no Debug page - their rows are the overlay's.
-            return page != Page::Mods && page != Page::Other;
+            return page != Page::Mods && page != Page::Apex && page != Page::Other;
 #endif
         }
 
@@ -2314,6 +2459,9 @@ namespace mod_menu
             case Page::Mods:
                 pageMods();
                 break;
+            case Page::Apex:
+                pageApex();
+                break;
             case Page::Other:
                 pageOther();
                 break;
@@ -2342,13 +2490,52 @@ namespace mod_menu
         // TF_MOD_MENU_LIST=1 (testing aid): the tabs and each one's settings, once, to the log - the
         // overlay's layout without a picture of it (from mod_menu::frame: a hidden test window draws
         // no overlay).
+        // The game's menu list (game_menu_list.h) against F1: every entry must be something F1 has, and every row F1 shows by default
+        // must be in the list (a page of the game's menus, or F1Only). The differences are logged; none is the aim.
+        void checkGameMenuList()
+        {
+            static const char *const kMergedIds[] = {"aspect", "preset", "antialiasing", "volume", "prompts"};
+            const auto isMerged = [&](const std::string &id)
+            { return std::find_if(std::begin(kMergedIds), std::end(kMergedIds), [&](const char *m) { return id == m; }) != std::end(kMergedIds); };
+            int differences = 0;
+            for (const game_menu_list::Entry &e : game_menu_list::kEntries)
+            {
+                const std::string id = e.id;
+                const bool known = isMerged(id) || std::any_of(g_listRows.begin(), g_listRows.end(), [&](const SettingRow &r) { return r.key == id; });
+                if (!known)
+                {
+                    ++differences;
+                    std::fprintf(stderr, "[mod menu] game menus: the list has \"%s\" (%s), which F1 does not have in this build\n", e.id, e.label);
+                }
+            }
+            for (const std::string &id : g_listDefaults)
+            {
+                const bool listed = std::any_of(std::begin(game_menu_list::kEntries), std::end(game_menu_list::kEntries),
+                                                [&](const game_menu_list::Entry &e) { return id == e.id; });
+                if (!listed)
+                {
+                    ++differences;
+                    std::fprintf(stderr,
+                                 "[mod menu] game menus: F1 shows \"%s\" by default and game_menu_list.h does not have it (add it to a page, or to F1Only)\n",
+                                 id.c_str());
+                }
+            }
+            std::fprintf(stderr, "[mod menu] game menus: %u list entries, %zu rows F1 shows by default, %d difference%s\n",
+                         game_menu_list::kEntryCount, g_listDefaults.size(), differences, differences == 1 ? "" : "s");
+        }
+
         void listTabs()
         {
             g_listRows = ps2_settings::detail::rows();
+            g_listDefaults.clear();
+            g_listAdvanced = 0;
             for (const PageInfo &p : kPages)
             {
                 std::string line;
                 g_list = &line;
+                // (Mods & cheats, Saves and Debug are not settings tabs: what they list is not for the game's menus)
+                g_listSettingsTab = p.page == Page::Display || p.page == Page::Graphics || p.page == Page::Controls ||
+                                    p.page == Page::Sound || p.page == Page::Gameplay || p.page == Page::About;
                 switch (p.page)
                 {
                 case Page::Display: pageDisplay(); break;
@@ -2358,6 +2545,7 @@ namespace mod_menu
                 case Page::Gameplay: pageGameplay(); break;
                 case Page::Saves: pageSaves(nullptr); break;
                 case Page::Mods: pageMods(); break;
+                case Page::Apex: pageApex(); break;
                 case Page::Other: pageOther(); break;
                 case Page::About: keyRow("TF_UPDATE_CHECK"); settingRows(Page::About); break;
                 default: break;
@@ -2365,6 +2553,8 @@ namespace mod_menu
                 g_list = nullptr;
                 std::fprintf(stderr, "[mod menu] tab \"%s\":%s\n", p.name, line.c_str());
             }
+            g_listSettingsTab = false;
+            checkGameMenuList();
             g_listRows.clear();
         }
 
@@ -2843,7 +3033,7 @@ namespace mod_menu
             const float gap = size * 0.5f;
             const float quitWidth = quitAsked ? buttonWidth("Yes, quit") + gap + buttonWidth("No, keep playing") : buttonWidth("Quit game");
             const bool modRestart = ext::restartPending();
-            const std::string helpText = quitAsked ? std::string("Quit the game and go back to Windows? Your settings are kept; what you did since "
+            const std::string helpText = quitAsked ? std::string("Quit the game? Your settings are kept; what you did since "
                                                                  "the game last saved is lost.")
                                          : modRestart ? std::string("Mod changes need a restart. Save your game first; restart returns to the title screen.")
                                          : help().empty() && hd_progress::readyToRestart() && !anyPending()
@@ -2951,6 +3141,10 @@ namespace mod_menu
         distance_meter::addSettings(); // Mods & cheats: the prototype's distance meter (distance_meter.h)
         boss_cheat::addSettings(); // Mods & cheats: one-hit kills on bosses (boss_cheat.h, TODO 199)
         speedrun_timer::addSettings(); // Display, On screen: the speedrun timer (speedrun_timer.h)
+        objective_guide::addSettings(); // Gameplay: the objective guide (objective_guide.h, TODO 315)
+#if defined(TF_OVERLAY)
+        apex_keys::addSettings(); // Apex movement: the extra jump and move forward keys (apex_keys.h, TODO 326)
+#endif
         hd_pack::addSettings();        // (no rows: the pack's folder, kept in the settings file)
         start_screens::addSettings();  // Gameplay: what the game shows from boot to its main menu (start_screens.h, TODO 110)
         {
@@ -2980,7 +3174,15 @@ namespace mod_menu
             pad.key = "PS2X_PADMAP";
             pad.section = "Controller";
             pad.label = "Controller buttons";
-            pad.defaultValue = "";
+            pad.defaultValue = padDefault();
+#if defined(__linux__)
+            if (*padDefault() && !std::getenv("PS2X_PADMAP"))
+            {
+                setenv("PS2X_PADMAP", padDefault(), 1); // (no saved layout: the default, as the runtime reads it)
+                ps2_host_input::setPadBindings(padDefault());
+                std::fprintf(stderr, "[pad] controller buttons: %s (a Steam Deck's default)\n", ps2_host_input::padBindings().c_str());
+            }
+#endif
             pad.apply = [](const std::string &value)
             {
                 ps2_host_input::setPadBindings(value);
@@ -3050,6 +3252,52 @@ namespace mod_menu
 #endif
     }
 
+    uint32_t closeCount()
+    {
+#if defined(PS2X_ENABLE_DEBUG_UI)
+        return g_closeCount.load();
+#else
+        return 0u;
+#endif
+    }
+
+    void requestOpen()
+    {
+#if defined(PS2X_ENABLE_DEBUG_UI)
+        g_openRequest.store(true);
+#endif
+    }
+
+    std::vector<MergedOption> mergedOptions(const std::string &id)
+    {
+        std::vector<MergedOption> out;
+#if defined(PS2X_ENABLE_DEBUG_UI)
+        std::vector<Option> list;
+        if (id == "aspect")
+            list = aspectRatios();
+        else if (id == "preset")
+            list = presets();
+        else if (id == "antialiasing")
+            list = antiAliasing();
+        else if (id == "volume")
+            list = volumes();
+        else if (id == "prompts")
+            list = buttonPrompts();
+        for (const Option &o : list)
+        {
+            MergedOption m;
+            m.label = o.label;
+            for (const Pair &p : o.pairs)
+                if (const SettingRow *r = rowFor(p.key)) // (a key this build does not register is left out, as F1 leaves it out)
+                    m.pairs.push_back({p.key, wanted(p, *r), p.accepted});
+            out.push_back(std::move(m));
+        }
+#else
+        (void)id;
+#endif
+        return out;
+    }
+
     void draw(PS2Runtime &runtime)
     {
 #if defined(PS2X_ENABLE_DEBUG_UI)
@@ -3057,9 +3305,17 @@ namespace mod_menu
         // before this frame, and misses a quick tap); Ctrl+F1 is the runtime's debugger.
         static const bool watching = (ps2_host_input::watchKey(KEY_F1), true);
         (void)watching;
+        // (closed since the last frame: counted for the Options pages, which read their values again, closeCount)
+        static bool closeWatch = false;
+        if (closeWatch && !g_open)
+            g_closeCount.fetch_add(1u);
+        closeWatch = g_open;
         const bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
         if ((ps2_host_input::takeKeyPresses(KEY_F1) % 2) == 1 && !ctrl)
             g_open = !g_open;
+        pc_settings_row::pump(); // the settings the Options pages asked for (pc_settings_row.h)
+        if (g_openRequest.exchange(false))
+            g_open = true;
         // (TODO 208) The PlayStation button of a DualSense / DualShock 4 opens and closes it too (the pad read natively,
         // ps2_sony_pad.h; the game never gets that button), and so do View + Menu held together on another gamepad
         // (an Xbox pad: Windows keeps its guide button; the game gets neither Select nor Start meanwhile, ps2_pad.cpp).
@@ -3127,6 +3383,7 @@ namespace mod_menu
         typeTestFrame(runtime.eeScheduler().currentVSyncTick());
         clickTestFrame(runtime.eeScheduler().currentVSyncTick(), g_open);
         loadControls(); // (controls.txt, once)
+        apex_keys::windowFrame(); // (TODO 300 (6): the Apex mod's sprint key)
         updateCarKeys(); // (W / S drive the car)
         if (!g_open)
             photo_mode::windowFrame(); // (its keys, and its hint: photo_mode.h)
@@ -3134,6 +3391,7 @@ namespace mod_menu
         small_crosshair::draw(runtime); // (the small crosshair, when chosen: small_crosshair.h)
         if (!clean)
         {
+            objective_guide::draw(); // (TODO 315: the arrow at the bottom, when on - objective_guide.h)
             // The distance meter (distance_meter.h): above the crosshair, at the screen's centre.
             // Not in the car (its view has no crosshair to read it by). Placed over the crosshair: the
             // game puts its model in the world (photo_mode records where), projected here with the
@@ -3152,7 +3410,12 @@ namespace mod_menu
                                                         ps2_host_display::displayAspect(), cx, cy);
                 // (above the crosshair: the game's ring reaches about a twelfth of the picture's height over
                 // its middle, the small cross a sixtieth)
-                const float above = small_crosshair::enabled() ? GetScreenHeight() / 60.0f + 4.0f : GetScreenHeight() / 12.0f;
+                // (TODO 307 h: the ring's own top as drawn this moment, plus a gap, so the text never sits on its top bracket)
+                float ring = 0.0f, above = GetScreenHeight() / 12.0f;
+                if (small_crosshair::enabled())
+                    above = GetScreenHeight() / 60.0f + 4.0f;
+                else if (photo_mode::crosshairTop(static_cast<float>(GetScreenHeight()), ring) && ring < GetScreenHeight() * 0.45f)
+                    above = ring * 1.15f + GetScreenHeight() / 45.0f; // (its notch and the text's descent: a clear gap at any size)
                 const int x = static_cast<int>(cx) - width / 2;
                 const int y = static_cast<int>(cy - above) - size;
                 DrawText(text, x + 2, y + 2, size, Color{0, 0, 0, 170});
@@ -3465,7 +3728,10 @@ namespace mod_menu
     {
         void pauseInputFn(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
-            g_pauseInputFrame.store(g_gameFrames.load()); // (before the call: it may stop mid-way)
+            // (before the call: it may stop mid-way. Not while one of the Options pages is up: they run through this handler too,
+            // but the screen's top is not what is shown - Escape goes back a page there, it does not resume.)
+            if (!pc_settings_row::pausePagesUp())
+                g_pauseInputFrame.store(g_gameFrames.load());
             g_pauseInput(rdram, ctx, runtime);
         }
     }

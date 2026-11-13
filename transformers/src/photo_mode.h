@@ -33,6 +33,9 @@ namespace photo_mode
     // The game's crosshair model kept out of the picture (small_crosshair draws its own).
     void setHideCrosshair(bool hide);
     bool crosshair(float point[3]);
+    // (TODO 307 h) How far above the crosshair's centre its ring's top bracket reaches on a screen `screenHeight` pixels
+    // tall (from the scale and distance it was drawn with this moment, and the field of view); false: not known.
+    bool crosshairTop(float screenHeight, float &pixels);
     // (TODO 292 B) Where the game's camera stood when it last placed the view (world): false before it has.
     bool viewPosition(float point[3]);
     // (TODO 292 B) The view's axes as the camera last placed it (world: ahead, left, up) and the tangent of half its

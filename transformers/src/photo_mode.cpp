@@ -29,6 +29,7 @@
 #include "photo_mode.h"
 
 #include "camera_mode.h"
+#include "static_aim.h" // (TODO 322: the crosshair pinned to one screen point)
 #include "game_config.h"
 #include "menu_mouse.h"
 #include "port_ext.h"
@@ -79,6 +80,9 @@ namespace photo_mode
         // frame (the first try: 1.2 to 1e38 in a second).
         float g_crosshairGameScale = 1.0f;
         bool g_crosshairScaled = false;
+        // (TODO 307 g) The distance from the eye the model is drawn at this frame (0: not known), for its constant size.
+        float g_crosshairDrawnAt = 0.0f;
+        std::atomic<float> g_crosshairTopK{0.0f}; // (TODO 307 h: the top bracket's height over the half screen, for the meter)
 
         std::atomic<bool> g_want{false}; // what the player asked for (the window thread)
         std::atomic<bool> g_on{false};   // in effect (the game thread: only in a level)
@@ -151,8 +155,57 @@ namespace photo_mode
         std::mutex g_seenLock;
         constexpr uint32_t kWidescreenOption = 0x006CF004u; // the game's own 16:9 switch (option 4)
 
+        // (TODO 322) The ray from the view through the crosshair's pinned screen point: the view's ahead raised by `share` of half
+        // the view's height (its turn and field of view as seen this frame - the camera's SetPosition / SetOrientation come
+        // before the crosshair's Update in a frame). False with TF_XHAIR_PIN=0 or no view yet.
+        bool pinRay(float share, float ray[3])
+        {
+            static const bool off = std::getenv("TF_XHAIR_PIN") && *std::getenv("TF_XHAIR_PIN") == '0';
+            if (off)
+                return false;
+            Seen v;
+            {
+                std::lock_guard<std::mutex> guard(g_seenLock);
+                v = g_seen;
+            }
+            if (!(v.fov > 1.0f && v.fov < 179.0f))
+                return false;
+            const float w = v.turn[0], qx = v.turn[1], qy = v.turn[2], qz = v.turn[3];
+            const float ahead[3] = {1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy + w * qz), 2 * (qx * qz - w * qy)};
+            const float up[3] = {2 * (qx * qz + w * qy), 2 * (qy * qz - w * qx), 1 - 2 * (qx * qx + qy * qy)};
+            const float tanUp = std::tan(v.fov * 0.5f * kPi / 180.0f) / (v.widescreen ? 16.0f / 9.0f : 4.0f / 3.0f);
+            float n = 0.0f;
+            for (int i = 0; i < 3; ++i)
+            {
+                ray[i] = ahead[i] + up[i] * share * tanUp;
+                n += ray[i] * ray[i];
+            }
+            n = std::sqrt(n);
+            if (!(n > 1e-4f) || !std::isfinite(n))
+                return false;
+            for (int i = 0; i < 3; ++i)
+                ray[i] /= n;
+            return true;
+        }
+
         void setPosition(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
+            if (static const bool adsTrace = std::getenv("TF_ADS_EYE_TRACE") != nullptr; adsTrace && camera_mode::adsFovFactor() < 1.0f)
+            {
+                // (a measuring aid, TODO 300: the SetPosition callers while aim down sights is in - which one places its camera)
+                static uint32_t seen[32];
+                static int count = 0;
+                const uint32_t ra = getRegU32(ctx, 31);
+                bool known = false;
+                for (int i = 0; i < count; ++i)
+                    known |= seen[i] == ra;
+                if (!known && count < 32)
+                {
+                    seen[count++] = ra;
+                    std::fprintf(stderr, "[ads eye] SetPosition from %08x (node %08x) at %.2f %.2f %.2f\n", ra, getRegU32(ctx, 4),
+                                 loadFloat(rdram, getRegU32(ctx, 5)), loadFloat(rdram, getRegU32(ctx, 5) + 4u), loadFloat(rdram, getRegU32(ctx, 5) + 8u));
+                }
+            }
             if (static const bool trace = std::getenv("TF_PHOTO_TRACE") != nullptr; trace && g_on.load())
             {
                 static uint32_t seen[64];
@@ -182,6 +235,7 @@ namespace photo_mode
                 constexpr float kNear = 8.0f;
                 float aim[3];
                 g_crosshairScale = 1.0f;
+                g_crosshairDrawnAt = 0.0f;
                 const bool bike = ext::aimPoint(rdram, aim); // (an extension's aim point: the jet bike's, port_ext.h)
                 if (!bike)
                     for (int i = 0; i < 3; ++i)
@@ -201,12 +255,32 @@ namespace photo_mode
                 before = std::sqrt(before);
                 after = std::sqrt(after);
                 const bool eyeKnown = eye[0] != 0.0f || eye[1] != 0.0f || eye[2] != 0.0f;
-                if (eyeKnown && before > 1.0e-2f && after > 1.0e-2f && std::isfinite(after))
+                float pinShare = 0.0f, ray[3];
+                if (!bike && eyeKnown && before > 1.0e-2f && static_aim::pinned(pinShare) && pinRay(pinShare, ray))
+                {
+                    // (TODO 322) Mouse and keyboard: the model on this frame's camera ray through the crosshair's one screen
+                    // point (static_aim::pinned) - the same place on the screen every frame, whatever the aim meets (before, the
+                    // aim point's own place, which drifted with the camera's lag and the line's learnt height). As before at most
+                    // kNear ahead (TODO 193); its scale times its distance over the game's: the game's size on the screen. The
+                    // pictures between frames leave its draws unturned (view_turn, TODO 292 B: found by this place).
+                    // TF_XHAIR_PIN=0: as before.
+                    const float d = std::isfinite(after) ? (nearOff ? after : std::min(after, kNear)) : kNear;
+                    if (std::isfinite(d) && d > 0.1f)
+                    {
+                        g_crosshairScale = std::clamp(d / before, 0.01f, 50.0f);
+                        g_crosshairDrawnAt = d;
+                        for (int i = 0; i < 3; ++i)
+                            storeFloat(rdram, at + 4u * i, eye[i] + ray[i] * d);
+                    }
+                }
+                else if (eyeKnown && before > 1.0e-2f && after > 1.0e-2f && std::isfinite(after))
                 {
                     const float d = nearOff ? after : std::min(after, kNear);
+                    g_crosshairDrawnAt = before;
                     if (bike || d < after)
                     {
                         g_crosshairScale = std::clamp(d / before, 0.01f, 50.0f);
+                        g_crosshairDrawnAt = d;
                         for (int i = 0; i < 3; ++i)
                             storeFloat(rdram, at + 4u * i, eye[i] + (aim[i] - eye[i]) * (d / after));
                     }
@@ -327,6 +401,8 @@ namespace photo_mode
                 }
                 ctx->f[12] = std::clamp(ctx->f[12] * scale, 10.0f, 150.0f);
             }
+            if (!g_on.load(std::memory_order_relaxed) && getRegU32(ctx, 31) == kSetFieldOfViewFromCamera)
+                ctx->f[12] = camera_mode::fieldOfView(ctx->f[12]); // (TODO 300: the Apex mod's field of view and aim down sights)
             if (getRegU32(ctx, 31) == kSetFieldOfViewFromCamera)
             {
                 std::lock_guard<std::mutex> guard(g_seenLock);
@@ -343,7 +419,38 @@ namespace photo_mode
                 g_crosshairGameScale = ctx->f[12];
                 g_crosshairScaled = g_crosshairScale != 1.0f;
             }
-            if (from == kCrosshairSetScaleReturn && g_crosshairScale != 1.0f)
+            // (TODO 307 g) One size on the screen, near or far, in first person: the game sizes the reticle by the aim's distance
+            // (2 t^2 with t = (500 - d) / 500, clamped 1.3..4, x fov / 90 - taModelPredictionCrosshair::Update) and places it
+            // nearer for a near aim, so it changed size as the aim swept from a wall to the distance. Here its scale is the
+            // distance it is drawn at times one factor, the size it has at 16 units for a 2.0 game size, kept for the field of
+            // view (tan of its half). TF_CROSSHAIR_CONSTANT=0: the game's sizes; =2: in third person too.
+            static const int constantMode = [] {
+                const char *e = std::getenv("TF_CROSSHAIR_CONSTANT");
+                return e && *e ? std::atoi(e) : 1;
+            }();
+            if (from == kCrosshairSetScaleReturn && constantMode > 0 && g_crosshairDrawnAt > 0.01f &&
+                (constantMode >= 2 || camera_mode::firstPerson()))
+            {
+                float fov = 0.0f;
+                {
+                    std::lock_guard<std::mutex> guard(g_seenLock);
+                    fov = g_seen.fov;
+                }
+                const float half = std::clamp(fov > 1.0f && fov < 179.0f ? fov : 90.0f, 10.0f, 170.0f) * 0.5f * kPi / 180.0f;
+                ctx->f[12] = 0.125f * std::tan(half) * g_crosshairDrawnAt;
+                g_crosshairScaled = true;
+                if (static const bool log = std::getenv("TF_XHAIR_LOG") != nullptr; log)
+                {
+                    static auto last = std::chrono::steady_clock::time_point{};
+                    if (std::chrono::steady_clock::now() - last > std::chrono::seconds(1))
+                    {
+                        last = std::chrono::steady_clock::now();
+                        std::fprintf(stderr, "[crosshair] one size: game %.3f, drawn %.3f at %.2f (fov %.1f)\n", g_crosshairGameScale, ctx->f[12],
+                                     g_crosshairDrawnAt, fov);
+                    }
+                }
+            }
+            else if (from == kCrosshairSetScaleReturn && g_crosshairScale != 1.0f)
             {
                 // (TF_XHAIR_LOG=1: the factor, once a second)
                 if (static const bool log = std::getenv("TF_XHAIR_LOG") != nullptr; log)
@@ -356,6 +463,20 @@ namespace photo_mode
                     }
                 }
                 ctx->f[12] *= g_crosshairScale;
+            }
+            if (from == kCrosshairSetScaleReturn)
+            {
+                // (TODO 307 h) The ring's top bracket over the half screen's height: its model reaches 1.39 units above its
+                // centre (measured: 125 of 720 half-lines at a scale of 0.0871 a unit away, fov 69.7), seen at the drawn
+                // scale over the distance, through the field of view's tan.
+                float fov = 0.0f;
+                {
+                    std::lock_guard<std::mutex> guard(g_seenLock);
+                    fov = g_seen.fov;
+                }
+                const float half = std::clamp(fov > 1.0f && fov < 179.0f ? fov : 90.0f, 10.0f, 170.0f) * 0.5f * kPi / 180.0f;
+                g_crosshairTopK.store(g_crosshairDrawnAt > 0.01f ? 1.389f * ctx->f[12] / g_crosshairDrawnAt / std::tan(half) : 0.0f,
+                                      std::memory_order_relaxed);
             }
             g_setScale(rdram, ctx, runtime);
         }
@@ -396,6 +517,20 @@ namespace photo_mode
     bool hudHidden() { return g_on.load(std::memory_order_relaxed) && !g_hudOn.load(std::memory_order_relaxed); }
 
     void setHideCrosshair(bool hide) { g_hideCrosshair.store(hide); }
+
+    bool crosshairTop(float screenHeight, float &pixels)
+    {
+        {
+            std::lock_guard<std::mutex> guard(g_seenLock);
+            if (std::chrono::steady_clock::now() - g_seen.crosshairAt > std::chrono::milliseconds(200))
+                return false;
+        }
+        const float k = g_crosshairTopK.load(std::memory_order_relaxed);
+        if (!(k > 0.0f) || !std::isfinite(k))
+            return false;
+        pixels = k * screenHeight * 0.5f;
+        return true;
+    }
 
     bool crosshair(float point[3])
     {

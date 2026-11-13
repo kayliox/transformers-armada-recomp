@@ -1,0 +1,169 @@
+diff --git a/ps2xRuntime/src/lib/ps2_host_present_dxgi.cpp b/ps2xRuntime/src/lib/ps2_host_present_dxgi.cpp
+index 9c43504..74b4ed1 100644
+--- a/ps2xRuntime/src/lib/ps2_host_present_dxgi.cpp
++++ b/ps2xRuntime/src/lib/ps2_host_present_dxgi.cpp
+@@ -130,6 +130,10 @@ namespace ps2_host_present::dxgi
+             std::array<Picture, 3> pictures{};
+             uint32_t next = 0u;
+             bool fitted = false;
++            // (TODO 311) The pictures' textures shared by a legacy handle (D3D11_RESOURCE_MISC_SHARED alone) instead of an
++            // NT handle: Intel's and NVIDIA's WGL_NV_DX_interop2 refuse to register the NT-handle ones (ERROR_OPEN_FAILED,
++            // 6e). Tried when the NT-handle ones fail; PS2X_PRESENT_SHARE=nt / legacy: that one only.
++            bool legacyShare = false;
+             GLuint source = 0u; // (a framebuffer on the window's drawing)
+             // Handing over
+             std::thread thread;
+@@ -236,52 +240,95 @@ namespace ps2_host_present::dxgi
+             desc.SampleDesc.Count = 1u;
+             desc.Usage = D3D11_USAGE_DEFAULT;
+             desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+-            desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED;
+             ID3D11Device1 *device1 = nullptr;
+             g.device->QueryInterface(__uuidof(ID3D11Device1), reinterpret_cast<void **>(&device1));
+-            for (auto &picture : g.pictures)
++            static const char *forced = std::getenv("PS2X_PRESENT_SHARE");
++            static bool decided = false;
++            if (!decided)
+             {
+-                bool ok = device1 && SUCCEEDED(g.shareDevice->CreateTexture2D(&desc, nullptr, &picture.texture));
+-                if (ok)
+-                {
+-                    IDXGIResource1 *resource = nullptr;
+-                    HANDLE handle = nullptr;
+-                    ok = SUCCEEDED(picture.texture->QueryInterface(__uuidof(IDXGIResource1), reinterpret_cast<void **>(&resource))) &&
+-                         SUCCEEDED(resource->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &handle)) &&
+-                         SUCCEEDED(device1->OpenSharedResource1(handle, __uuidof(ID3D11Texture2D), reinterpret_cast<void **>(&picture.shown)));
+-                    release(resource);
+-                    if (handle)
+-                        CloseHandle(handle);
+-                }
+-                if (ok)
+-                {
+-                    glGenRenderbuffers(1, &picture.renderbuffer);
+-                    picture.object = g.registerObject(g.interopDevice, picture.texture, picture.renderbuffer, GL_RENDERBUFFER, kAccessWriteDiscard);
+-                    ok = picture.object != nullptr;
+-                }
+-                if (ok)
++                decided = true;
++                if (forced && std::string(forced) == "legacy")
++                    g.legacyShare = true;
++            }
++            const bool canSwitch = !forced || !*forced;
++            DWORD lastError = 0;
++            const auto makePictures = [&]() -> bool
++            {
++                desc.MiscFlags = g.legacyShare ? D3D11_RESOURCE_MISC_SHARED : D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED;
++                for (auto &picture : g.pictures)
+                 {
+-                    glGenFramebuffers(1, &picture.framebuffer);
+-                    ok = g.lockObjects(g.interopDevice, 1, &picture.object) != FALSE;
++                    bool ok = device1 && SUCCEEDED(g.shareDevice->CreateTexture2D(&desc, nullptr, &picture.texture));
++                    if (ok && g.legacyShare)
++                    {
++                        IDXGIResource *resource = nullptr;
++                        HANDLE handle = nullptr;
++                        ok = SUCCEEDED(picture.texture->QueryInterface(__uuidof(IDXGIResource), reinterpret_cast<void **>(&resource))) &&
++                             SUCCEEDED(resource->GetSharedHandle(&handle)) && handle &&
++                             SUCCEEDED(g.device->OpenSharedResource(handle, __uuidof(ID3D11Texture2D), reinterpret_cast<void **>(&picture.shown)));
++                        release(resource); // (a legacy handle is not closed)
++                    }
++                    else if (ok)
++                    {
++                        IDXGIResource1 *resource = nullptr;
++                        HANDLE handle = nullptr;
++                        ok = SUCCEEDED(picture.texture->QueryInterface(__uuidof(IDXGIResource1), reinterpret_cast<void **>(&resource))) &&
++                             SUCCEEDED(resource->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &handle)) &&
++                             SUCCEEDED(device1->OpenSharedResource1(handle, __uuidof(ID3D11Texture2D), reinterpret_cast<void **>(&picture.shown)));
++                        release(resource);
++                        if (handle)
++                            CloseHandle(handle);
++                    }
+                     if (ok)
+                     {
+-                        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, picture.framebuffer);
+-                        glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, picture.renderbuffer);
+-                        ok = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+-                        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0u);
+-                        g.unlockObjects(g.interopDevice, 1, &picture.object);
++                        glGenRenderbuffers(1, &picture.renderbuffer);
++                        picture.object = g.registerObject(g.interopDevice, picture.texture, picture.renderbuffer, GL_RENDERBUFFER, kAccessWriteDiscard);
++                        ok = picture.object != nullptr;
++                    }
++                    if (ok)
++                    {
++                        glGenFramebuffers(1, &picture.framebuffer);
++                        ok = g.lockObjects(g.interopDevice, 1, &picture.object) != FALSE;
++                        if (ok)
++                        {
++                            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, picture.framebuffer);
++                            glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, picture.renderbuffer);
++                            ok = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
++                            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0u);
++                            g.unlockObjects(g.interopDevice, 1, &picture.object);
++                        }
++                    }
++                    if (!ok)
++                    {
++                        lastError = GetLastError();
++                        dropPictures();
++                        return false;
+                     }
+                 }
+-                if (!ok)
+-                {
+-                    std::fprintf(stderr, "[present] GL cannot draw into Direct3D's %dx%d textures (%08lx)\n", width, height,
+-                                 static_cast<unsigned long>(GetLastError()));
+-                    release(device1);
+-                    dropPictures();
+-                    return false;
+-                }
++                return true;
++            };
++            bool made = makePictures();
++            if (!made && canSwitch)
++            {
++                std::fprintf(stderr, "[present] GL cannot draw into Direct3D's %dx%d textures shared by %s handle (%08lx): trying %s one\n", width,
++                             height, g.legacyShare ? "a legacy" : "an NT", static_cast<unsigned long>(lastError), g.legacyShare ? "an NT" : "a legacy");
++                g.legacyShare = !g.legacyShare;
++                made = makePictures();
++                if (!made)
++                    g.legacyShare = !g.legacyShare;
+             }
+             release(device1);
++            if (!made)
++            {
++                std::fprintf(stderr, "[present] GL cannot draw into Direct3D's %dx%d textures (%08lx)\n", width, height,
++                             static_cast<unsigned long>(lastError));
++                return false;
++            }
++            static bool told = false;
++            if (!told)
++            {
++                told = true;
++                std::fprintf(stderr, "[present] the pictures' textures shared by %s handle\n", g.legacyShare ? "a legacy" : "an NT");
++            }
+             g.fitted = true;
+             return true;
+         }
+@@ -680,8 +727,20 @@ namespace ps2_host_present::dxgi
+                 return false;
+             using CreateContextAttribs = HGLRC(WINAPI *)(HDC, HGLRC, const int *);
+             const auto createContext = reinterpret_cast<CreateContextAttribs>(wglGetProcAddress("wglCreateContextAttribsARB"));
++            // (TODO 311) A context sharing with the window's must be robust as the window's is (TODO 202, patch 0088:
++            // raylib's made robust unless PS2X_GL_ROBUST=0): Intel's driver refuses the mix with
++            // ERROR_INCOMPATIBLE_DEVICE_CONTEXTS_ARB (c0072054) and every Intel PC lost the swap chain to GL's swap.
++            GLint strategy = 0;
++            glGetIntegerv(0x8256 /* GL_RESET_NOTIFICATION_STRATEGY */, &strategy);
++            while (glGetError() != GL_NO_ERROR)
++            {
++            }
++            const bool robust = strategy == 0x8252 /* GL_LOSE_CONTEXT_ON_RESET */;
+             const int attributes[] = {0x2091 /* WGL_CONTEXT_MAJOR_VERSION_ARB */, 3, 0x2092 /* MINOR */, 3,
+-                                      0x9126 /* WGL_CONTEXT_PROFILE_MASK_ARB */, 0x1 /* core */, 0};
++                                      0x9126 /* WGL_CONTEXT_PROFILE_MASK_ARB */, 0x1 /* core */,
++                                      // (not robust: the list ends here, as before)
++                                      robust ? 0x2094 /* WGL_CONTEXT_FLAGS_ARB */ : 0, 0x4 /* ROBUST_ACCESS_BIT */,
++                                      0x8256 /* WGL_CONTEXT_RESET_NOTIFICATION_STRATEGY_ARB */, 0x8252 /* LOSE_CONTEXT_ON_RESET */, 0};
+             g.partContext = createContext ? createContext(g.partDc, windowContext, attributes) : nullptr;
+             if (!g.partContext || !wglMakeCurrent(g.partDc, g.partContext))
+                 return false;

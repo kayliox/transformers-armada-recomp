@@ -119,6 +119,9 @@ namespace nr::movie
         };
         std::mutex g_mutex;
         std::unordered_map<uint32_t, Picture> g_pictures; // by the game's buffer (kRamMask)
+        // (N5, TF_N5_SETCACHE) How many it holds, for holds() to answer without the lock while no movie plays (every
+        // textured draw asks). Kept with each change, under g_mutex.
+        std::atomic<size_t> g_pictureCount{0};
         uint64_t g_nextSerial = 1;
 
         // The log (TF_NATIVE_MOVIELOG): per period, and per movie (by its decoder).
@@ -213,6 +216,7 @@ namespace nr::movie
                 // (the decoder deleted: its pictures are no longer drawn from here)
                 for (auto it = g_pictures.begin(); it != g_pictures.end();)
                     it = it->second.mpegAddr == p.mpegAddr ? g_pictures.erase(it) : std::next(it);
+                g_pictureCount.store(g_pictures.size(), std::memory_order_release);
                 if (auto s = g_streams.find(p.mpegAddr); s != g_streams.end())
                 {
                     report(true);
@@ -222,6 +226,7 @@ namespace nr::movie
                 return false;
             }
             Picture &pic = g_pictures[p.imageAddr & kRamMask];
+            g_pictureCount.store(g_pictures.size(), std::memory_order_release);
             if (pic.mpegAddr != p.mpegAddr)
                 pic = Picture{};
             pic.mpegAddr = p.mpegAddr;
@@ -313,6 +318,8 @@ namespace nr::movie
     {
         if (g_mode != Mode::Native && g_mode != Mode::Check)
             return false;
+        if (g_pictureCount.load(std::memory_order_acquire) == 0u && nr::setCacheOn())
+            return false; // (none: as the find below would answer)
         std::lock_guard<std::mutex> lock(g_mutex);
         auto it = g_pictures.find(data & kRamMask);
         if (it == g_pictures.end() || it->second.rgba.empty())
@@ -561,6 +568,7 @@ namespace nr::movie
             }
             it = g_pictures.erase(it);
         }
+        g_pictureCount.store(g_pictures.size(), std::memory_order_release);
     }
 
     bool skipsSnapshot(uint32_t data)

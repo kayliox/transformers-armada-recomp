@@ -11,11 +11,13 @@
 // same ticks, the GS picture beside it). TF_NATIVE_TRACE=<n>: the layout of the first n geometry sets.
 // TF_NATIVE_DUMP=1: each saved frame's draws, as text beside the picture (runs\native_<tick>.txt).
 #include "nr_types.h"
+#include "port_ext.h" // (ext::renderHooks: an extension's own player, e.g. Playable Decepticons in the overlay)
 #include "nr_backend.h"
 #include "nr_install.h"
 #include "nr_policy.h"
 #include "game_version.h" // (TF_GA: the code addresses that differ in the PAL release)
 #include "hd_progress.h"
+#include "graphics_driver.h" // (TODO 295: the low-end defaults)
 #include "nr_frame_texture_policy.h"
 #include "view_turn.h"
 #include "nr_shader.h"
@@ -36,6 +38,7 @@
 #include "runtime/gs/ps2_gs_psmct16.h"
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "runtime/ps2_host_display.h"
+#include "runtime/gs/gs_gpu.h" // (TODO 308: the GS's GPU renderer started later)
 #include "runtime/ps2_host_input.h"
 #include "runtime/ps2_settings.h"
 
@@ -62,12 +65,21 @@
 namespace tf::port
 {
     bool moviePlaying(); // (overrides.cpp)
+    int vblankRate();    // (overrides.cpp)
 }
 
 namespace nr
 {
     namespace
     {
+        // An extension's own player (port_ext.h RenderHooks: Playable Decepticons in the private overlay): its hooks when it is
+        // set and active now, else null - and the renderer runs as without it.
+        const ext::RenderHooks *playerHooks()
+        {
+            const ext::RenderHooks *h = ext::renderHooks();
+            return h && h->active && h->active() ? h : nullptr;
+        }
+
         constexpr uint32_t kBeginFrame = 0x0025BE20u;       // vlRenderDevicePS2::BeginFrame (slot 3)
         constexpr uint32_t kEndFrame = 0x0025B050u;         // vlRenderDevicePS2 slot 4
         constexpr uint32_t kRenderGeometrySet = 0x00260A70u; // vlRenderDevicePS2 slot 25 (this, set, state block)
@@ -98,6 +110,12 @@ namespace nr
         PS2Runtime::RecompiledFunction g_endFrame = nullptr;
         PS2Runtime::RecompiledFunction g_setTexture = nullptr, g_applyStateBlock = nullptr, g_uploadLevel = nullptr,
                                        g_captureStateBlock = nullptr;
+        // (N5, TODO 94) Trims of the geometry-set hook's own time on the game thread (renderGeometrySet): the scratchpad
+        // read directly (the GS register shadow), the texture table's entries found through a small direct-mapped table,
+        // a draw's textures under one take of their lock, the set's TEX0 binding not written again when it is already
+        // there, the movies' pictures not asked under their lock while there are none - the same draws, measured on the
+        // Testbench. TF_N5_SETCACHE=0: off (as before).
+        bool g_setCache = true; // (set at install)
         // The texture each state block was captured with (the material's: SetTexture just before the
         // capture, while the level's state blocks are compiled) - the native binding of a material.
         std::unordered_map<uint32_t, uint32_t> g_blockTextures, g_blockTextures2; // (TEX0_1's, TEX0_2's)
@@ -267,6 +285,30 @@ namespace nr
         // trees' sprite textures, put in GS memory by a path the upload map does not see - the map
         // still names what was there before, a temple wall).
         std::unordered_map<uint64_t, uint32_t> g_tex0Textures;
+        // (N5, TF_N5_SETCACHE) Its one writer (the geometry-set hook) through a direct-mapped table of what it last wrote:
+        // the same texture at the same TEX0 is not written again (cleared: g_tex0Gen).
+        uint64_t g_tex0Gen = 1;
+        struct Tex0Slot
+        {
+            uint64_t key = 0u, gen = 0u;
+            uint32_t bound = 0u;
+        };
+        Tex0Slot g_tex0Slots[1024];
+        void setTex0Texture(uint64_t key, uint32_t bound)
+        {
+            if (!g_setCache)
+            {
+                g_tex0Textures[key] = bound;
+                return;
+            }
+            Tex0Slot &s = g_tex0Slots[(key * 0x9E3779B97F4A7C15ull) >> 54];
+            if (s.gen == g_tex0Gen && s.key == key && s.bound == bound)
+                return;
+            g_tex0Textures[key] = bound;
+            s.key = key;
+            s.bound = bound;
+            s.gen = g_tex0Gen;
+        }
         constexpr uint64_t kTex0SampleMask = ~((1ull << 34) | (3ull << 35) | (7ull << 61)); // (TCC, TFX, CLD out)
         uint64_t g_setTextureCalls = 0;
         uint32_t g_packetEnd = 0;     // where the display list stood after the last draw
@@ -406,6 +448,14 @@ namespace nr
             if (const uint32_t ram = addr & ~0x20000000u; ram <= PS2_RAM_SIZE - 4u && rdram)
             {
                 std::memcpy(&v, rdram + ram, 4);
+                return v;
+            }
+            // (N5, TF_N5_SETCACHE) The scratchpad too - the GS register shadow, the packet pointer: ~30 words a drawn
+            // geometry set. The same bytes getConstMemPtr finds at these addresses.
+            if (const uint32_t sp = addr - PS2_SCRATCHPAD_BASE; g_setCache && sp <= PS2_SCRATCHPAD_SIZE - 4u && rdram)
+            {
+                if (const uint8_t *s = ps2GetScratchpadHostPtr())
+                    std::memcpy(&v, s + sp, 4);
                 return v;
             }
             const uint8_t *p = getConstMemPtr(rdram, addr);
@@ -799,6 +849,28 @@ namespace nr
             bool largeLost = false;
         };
         std::unordered_map<uint64_t, TextureEntry> g_textures; // by TEX0
+        // (N5, TF_N5_SETCACHE) Its entries found through a direct-mapped table per thread: the map's nodes stay put while
+        // nothing is erased (g_textureEraseGen, bumped with each erase - under g_texMutex, as the map's users are).
+        uint64_t g_textureEraseGen = 1;
+        struct EntrySlot
+        {
+            uint64_t key = 0u, gen = 0u;
+            TextureEntry *entry = nullptr;
+        };
+        thread_local EntrySlot t_entrySlots[1024];
+        TextureEntry &textureEntry(uint64_t key)
+        {
+            if (!g_setCache)
+                return g_textures[key];
+            EntrySlot &s = t_entrySlots[(key * 0x9E3779B97F4A7C15ull) >> 54];
+            if (s.entry && s.key == key && s.gen == g_textureEraseGen)
+                return *s.entry;
+            TextureEntry &e = g_textures[key];
+            s.key = key;
+            s.gen = g_textureEraseGen;
+            s.entry = &e;
+            return e;
+        }
         uint64_t g_lastTicket = 0;
         // The frame's moment for TextureEntry::lastTick and the evictions: 60ths of a second of the host's clock
         // (TODO 124). It was the VBlank count - 60 a second at the console's rate, at 240 frames a second four
@@ -1166,6 +1238,7 @@ namespace nr
                             ++kept;
                         }
                     it = g_textures.erase(it);
+                    ++g_textureEraseGen;
                     ++dropped;
                 }
                 else
@@ -1974,7 +2047,7 @@ namespace nr
             // (Roadmap N6: a movie's picture comes from the decoder, named by its own generation - nr_movie.cpp.)
             uint64_t movieGeneration = 0;
             const bool moviePicture = !key.clut && movie::holds(key.texture, data, movieGeneration);
-            TextureEntry &e = g_textures[tex0 ^ (static_cast<uint64_t>(key.texture) << 32)];
+            TextureEntry &e = textureEntry(tex0 ^ (static_cast<uint64_t>(key.texture) << 32));
             // (TODO 94: the levels' generations asked only when one changed since this entry last asked, or its key did)
             const uint64_t epoch = snapshotEpoch();
             const bool sameLevels = e.tried && e.epoch == epoch && e.key.image == key.image && e.key.clut == key.clut;
@@ -2057,6 +2130,8 @@ namespace nr
                     if (generation != 0u) // (a level uploaded again - a movie's picture among them: its time for the movie log)
                         movie::oldConversion(data, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - convertStart).count());
                 }
+                if (const ext::RenderHooks *h = playerHooks(); h && h->noteTexture && key.texture) // (an extension's texture guard: e.g. the base Autobot's textures left out)
+                    h->noteTexture(key.texture, guestString(rdram, key.texture + 0x18u));
                 e.ticket = 0;
                 e.game.reset();
                 e.largeLost = false;
@@ -3537,6 +3612,71 @@ namespace nr
                         }
                     }
             }
+            // (TODO 305 (3)) 0x1410, the transform and kick, draws both fields itself: its block's q8-q10 is field A's GIF tag
+            // and register writes (SCISSOR_1 among them; q12-q14 field B's - docs/RENDERER.md), sent with the strip, so the
+            // GS draws it with them, not with the register shadow's. The shadow holds what the last direct packet set: after
+            // the sun's lens flare, whose second copy is field B's (rows 224-447), SCISSOR_1 stayed field B's, and every 3D
+            // draw after it in the frame - the warp gate's light, the crosshair, shots, blasts, the sun itself - was cut to
+            // rows the picture never shows (the weave takes field A's). TF_NATIVE_FIELDSCISSOR=0: the shadow's, as before.
+            static const bool fieldScissorOff = std::getenv("TF_NATIVE_FIELDSCISSOR") && *std::getenv("TF_NATIVE_FIELDSCISSOR") == '0';
+            for (uint32_t k = 0; k < d.shader.count && !fieldScissorOff; ++k)
+            {
+                if ((d.shader.address[k] != 0x1410u && d.shader.routine[k] != Routine::TransformKick) || d.shader.first[k] + 11u > d.shader.data.size())
+                    continue;
+                const Qword *b = d.shader.data.data() + d.shader.first[k];
+                uint32_t tag[4];
+                std::memcpy(tag, b[8].v, 16u);
+                const uint32_t nloop = tag[0] & 0x7FFFu, flg = (tag[1] >> 26) & 3u, nreg = (tag[1] >> 28) & 0xFu;
+                if (flg != 0u || nreg != 1u || (tag[2] & 0xFu) != 0xEu || nloop == 0u || nloop > 2u)
+                    break;
+                const int context = static_cast<int>((d.mesh->prim >> 9) & 1u);
+                static int rawLog = std::getenv("TF_NATIVE_FIELDSCISSORLOG") ? std::atoi(std::getenv("TF_NATIVE_FIELDSCISSORLOG")) : 0;
+                if (rawLog > 0)
+                {
+                    --rawLog;
+                    uint32_t w9[4], w10[4];
+                    std::memcpy(w9, b[9].v, 16u);
+                    std::memcpy(w10, b[10].v, 16u);
+                    std::fprintf(stderr, "[native render] 0x1410 block: tag %08x %08x %08x %08x | %08x %08x %08x %08x | %08x %08x %08x %08x, shadow rows %g..%g x %g..%g\n",
+                                 tag[0], tag[1], tag[2], tag[3], w9[0], w9[1], w9[2], w9[3], w10[0], w10[1], w10[2], w10[3], d.scissor[1], d.scissor[3],
+                                 d.scissor[0], d.scissor[2]);
+                }
+                // (Taken only when the block holds a whole field A screen - SCISSOR and XYOFFSET of the draw's context - whose
+                // offset is the shadow's: some images keep zeros or other writes there (Amazon's ground: SCISSOR 0, SCANMSK),
+                // which the GS never draws with this way.)
+                float sc[4] = {};
+                bool haveScissor = false, sameOffset = false;
+                for (uint32_t i = 0; i < nloop; ++i)
+                {
+                    uint32_t w[4];
+                    std::memcpy(w, b[9u + i].v, 16u);
+                    const uint64_t data = static_cast<uint64_t>(w[0]) | static_cast<uint64_t>(w[1]) << 32;
+                    const uint32_t reg = w[2] & 0xFFu;
+                    if (reg == 0x40u + static_cast<uint32_t>(context)) // SCISSOR_1 / _2
+                    {
+                        sc[0] = static_cast<float>(data & 0x7FFu), sc[1] = static_cast<float>((data >> 32) & 0x7FFu);
+                        sc[2] = static_cast<float>((data >> 16) & 0x7FFu), sc[3] = static_cast<float>((data >> 48) & 0x7FFu);
+                        haveScissor = sc[2] > sc[0] && sc[3] > sc[1];
+                    }
+                    else if (reg == 0x18u + static_cast<uint32_t>(context)) // XYOFFSET_1 / _2
+                        sameOffset = std::fabs(static_cast<float>(data & 0xFFFFu) / 16.0f - d.originX) < 0.01f &&
+                                     std::fabs(static_cast<float>((data >> 32) & 0xFFFFu) / 16.0f - d.originY) < 0.01f;
+                }
+                if (haveScissor && sameOffset)
+                {
+                    static int told = 4;
+                    if (told > 0 && std::memcmp(sc, d.scissor, sizeof(sc)) != 0)
+                    {
+                        --told;
+                        std::fprintf(stderr, "[native render] a 3D draw's scissor from its block (field A's): rows %g..%g, not the shadow's %g..%g\n", sc[1],
+                                     sc[3], d.scissor[1], d.scissor[3]);
+                    }
+                    std::memcpy(d.scissor, sc, sizeof(sc));
+                    d.width = d.scissor[2] + 1.0f - d.scissor[0];
+                    d.height = d.scissor[3] + 1.0f - d.scissor[1];
+                }
+                break;
+            }
             // (Debug: TF_NATIVE_OCEANLOG=<n>: the first n ocean patches after tick 9000 - routines, blocks, state.)
             static int oceanLog = std::getenv("TF_NATIVE_OCEANLOG") ? std::atoi(std::getenv("TF_NATIVE_OCEANLOG")) : 0;
             // (TF_NATIVE_WATERLOG=<n>: the same for the first n water draws - 0x1df0 then 0x2cc0.)
@@ -3545,9 +3685,10 @@ namespace nr
             if (((oceanLog > 0 && d.mesh && d.mesh->ocean) || (waterLog > 0 && isWater && d.mesh)) && g_expandTick > 9000u)
             {
                 --(isWater ? waterLog : oceanLog);
-                std::fprintf(stderr, "[native render] (water: set %08x tick %llu, context 2 tex0 %016llx alpha %llx test %llx texture %d)\n", d.mesh->source,
+                std::fprintf(stderr, "[native render] (water: set %08x tick %llu, context 2 tex0 %016llx alpha %llx test %llx clamp %llx texture %d)\n", d.mesh->source,
                              static_cast<unsigned long long>(g_expandTick), static_cast<unsigned long long>(d.tex02),
-                             static_cast<unsigned long long>(d.alpha2), static_cast<unsigned long long>(d.test2), d.texture2 != nullptr);
+                             static_cast<unsigned long long>(d.alpha2), static_cast<unsigned long long>(d.test2),
+                             static_cast<unsigned long long>(d.clamp2), d.texture2 != nullptr);
                 std::fprintf(stderr, "[native render] ocean patch %08x: %zu vertices %zu triangles, type %u prim %x/%x, routines %u, target %08x tex0 %016llx alpha %llx test %llx zbuf %llx clamp %llx texture %d, tail %08x %08x %08x %08x\n",
                              d.mesh->source, d.mesh->vertices.size(), d.mesh->indices.size() / 3u, d.mesh->type, d.mesh->prim, d.mesh->prim2,
                              d.shader.count, d.target, static_cast<unsigned long long>(d.tex0), static_cast<unsigned long long>(d.alpha),
@@ -4082,10 +4223,17 @@ namespace nr
                 }
                 {
                     PartTimer timer(3);
+                    // (TF_N5_SETCACHE: the texture tables' lock taken once for the draw's three - not round slats::remap,
+                    // which takes a lock of its own)
+                    std::unique_lock<std::recursive_mutex> texLock(g_texMutex, std::defer_lock);
+                    if (g_setCache)
+                        texLock.lock();
                     d.texture = textureOf(rdram);
                     d.topPalette = topPaletteOf(rdram);
                     if (d.mesh && d.mesh->prim2)
                         d.texture2 = textureOf(rdram, 2);
+                    if (texLock.owns_lock())
+                        texLock.unlock();
                     slats::remap(rdram, d); // (TODO 240 follow-up: the HQ loadout slots' labels follow the controller layout)
                     if (d.texture && g_stateBlock && word(rdram, g_stateBlock + 0x38u) == 0x06u)
                     {
@@ -4094,10 +4242,13 @@ namespace nr
                         if (auto bound = g_blockTextures.find(g_stateBlock); bound != g_blockTextures.end() && bound->second)
                         {
                             if (g_tex0Textures.size() > 8192u)
+                            {
                                 g_tex0Textures.clear();
+                                ++g_tex0Gen;
+                            }
                             const uint64_t blockTex0 = static_cast<uint64_t>(word(rdram, g_stateBlock + 0x30u)) |
                                                        static_cast<uint64_t>(word(rdram, g_stateBlock + 0x34u)) << 32;
-                            g_tex0Textures[blockTex0 & kTex0SampleMask] = bound->second;
+                            setTex0Texture(blockTex0 & kTex0SampleMask, bound->second);
                         }
                     }
                     // (Debug: TF_NATIVE_SETTEXLOG=<n>: the first n sprite sets' (type 1) textures - the
@@ -4130,6 +4281,8 @@ namespace nr
                 d.camera = view_turn::cameraIndex();
                 if (!framesDeferred())
                     finishDrawImpl(d); // (on the renderer's thread after its shader state, else here)
+                if (const ext::RenderHooks *h = playerHooks(); h && h->tagDraw)
+                    h->tagDraw(d); // (an extension's receipt for a player draw)
             }
         }
 
@@ -4857,7 +5010,10 @@ namespace nr
                 ++g_destroyedSince; // (prefetchByScan's cue)
                 for (auto it = g_textures.begin(); it != g_textures.end();)
                     if (it->second.key.texture == texture)
+                    {
                         it = g_textures.erase(it);
+                        ++g_textureEraseGen;
+                    }
                     else
                         ++it;
             }
@@ -5448,6 +5604,8 @@ namespace nr
                     flatBefore = flat;
                 }
                 const bool emulate = (emu2D && !g_frame.has3D) || !backend().drawsPictures(); // (the device lost: the GS draws again)
+                if (!backend().drawsPictures() && !backend().startingNow())
+                    ps2_gpu::setStartDeferred(false); // (TODO 308: Direct3D 12 did not start - the GS draws, on the GPU)
                 if (emulate != ps2_host_display::emulatedDrawing())
                 {
                     ps2_host_display::setEmulatedDrawing(emulate);
@@ -5475,6 +5633,8 @@ namespace nr
                     static double spent = 0.0, worst = 0.0;
                     static uint32_t frames = 0u;
                     const auto start = std::chrono::steady_clock::now();
+                    if (const ext::RenderHooks *h = playerHooks(); h && h->sealCapture)
+                        h->sealCapture(g_frame);
                     warp::gameFrame(); // (TODO 27: the game's frames back - a native warp tunnel's pictures stop)
                     submitFrame(std::move(g_frame), std::string());
                     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
@@ -5554,7 +5714,7 @@ namespace nr
                                 std::fprintf(f, "%08x: %08x %08x\n", a, word(rdram, a + 4u), word(rdram, a));
                         std::fclose(f);
                     }
-                    dumpFrame("runs\\native_" + std::to_string(asked) + ".txt");
+                    dumpFrame("runs/native_" + std::to_string(asked) + ".txt"); // ('/': Windows takes it, Linux needs it)
                 }
                 {
                     // The shader combos the frame drew with (routine addresses, ? = not identified).
@@ -5580,8 +5740,10 @@ namespace nr
                     for (size_t i = 0; i < sorted.size() && i < 20; ++i)
                         std::fprintf(stderr, "[native render]   %4d draws: %s\n", sorted[i].first, sorted[i].second.c_str());
                 }
+                if (const ext::RenderHooks *h = playerHooks(); h && h->sealCapture)
+                    h->sealCapture(g_frame);
                 warp::gameFrame();
-                submitFrame(std::move(g_frame), "runs\\native_" + std::to_string(asked) + ".bmp");
+                submitFrame(std::move(g_frame), "runs/native_" + std::to_string(asked) + ".bmp");
             }
             g_frame.draws.clear();
             g_frame.list.clear();
@@ -5647,6 +5809,9 @@ namespace nr
                     std::fprintf(stderr, "[native render] begin frame (tick %llu): list ended at %08x, begins at %08x\n",
                                  static_cast<unsigned long long>(tick), endedAt, g_packetEnd);
             }
+            if (const ext::RenderHooks *h = playerHooks(); h && h->beginCapture) // (an extension's player, read on the game's thread)
+                h->beginCapture(rdram, tick, word(rdram, 0x006CF2B8u) != 0u && !tf::port::moviePlaying(),
+                                tf::port::vblankRate() > 0 ? tf::port::vblankRate() : 60);
             if (listLog > 0 && tick > 9000u)
             {
                 --listLog;
@@ -5802,6 +5967,8 @@ namespace nr
     {
         g_placeChanged.store(true, std::memory_order_release);
     }
+
+    bool setCacheOn() { return g_setCache; }
 
     void deviceRegister(const uint8_t *rdram, uint32_t reg, uint64_t value)
     {
@@ -6340,6 +6507,28 @@ namespace nr
                 finishDrawImpl(d);
                 t_logPrimitives = false;
                 {
+                    // (Debug, TODO 31: TF_NATIVE_RIMLOG=<n>[,<from tick>]: the first n draws with routine 0x2920 (the rim
+                    // reflection - the cloak?) - their texture, state and block)
+                    static int rimLog = std::getenv("TF_NATIVE_RIMLOG") ? std::atoi(std::getenv("TF_NATIVE_RIMLOG")) : 0;
+                    static const uint64_t rimFrom = [] {
+                        const char *e = std::getenv("TF_NATIVE_RIMLOG");
+                        const char *comma = e ? std::strchr(e, ',') : nullptr;
+                        return comma ? std::strtoull(comma + 1, nullptr, 10) : 0ull;
+                    }();
+                    const Qword *rim = d.shader.blockOf(Routine::RimReflection);
+                    if (rim && rimLog > 0 && frame.tick >= rimFrom)
+                    {
+                        --rimLog;
+                        std::fprintf(stderr, "[native render] rim draw %zu (tick %llu): %s, %zu vertices, target %08x tex0 %016llx texture %d alpha %llx test %llx "
+                                             "clamp %llx, q4 %g %g %g, q5 %g %g %g %g, q6 %g %g %g, q7 %g %g %g %g\n",
+                                     k, static_cast<unsigned long long>(frame.tick), d.mesh ? "drawn" : "LEFT OUT", d.mesh ? d.mesh->vertices.size() : 0u,
+                                     d.target, static_cast<unsigned long long>(d.tex0), d.texture != nullptr, static_cast<unsigned long long>(d.alpha),
+                                     static_cast<unsigned long long>(d.test), static_cast<unsigned long long>(d.clamp), rim[4].v[0], rim[4].v[1], rim[4].v[2],
+                                     rim[5].v[0], rim[5].v[1], rim[5].v[2], rim[5].v[3], rim[6].v[0], rim[6].v[1], rim[6].v[2], rim[7].v[0], rim[7].v[1],
+                                     rim[7].v[2], rim[7].v[3]);
+                    }
+                }
+                {
                     // (Debug, TODO 295: TF_NATIVE_DEVPRIMLOG=<n>[,<from tick>]: the first n draws of the render device's own
                     // primitive - their state, routines and where their vertices land)
                     static int devLog = std::getenv("TF_NATIVE_DEVPRIMLOG") ? std::atoi(std::getenv("TF_NATIVE_DEVPRIMLOG")) : 0;
@@ -6617,6 +6806,8 @@ namespace nr
         t_out = nullptr;
         t_useView = false;
         frame.draws = std::move(out);
+        if (const ext::RenderHooks *h = playerHooks(); h && h->replaceFrame)
+            h->replaceFrame(frame); // (an extension's player: all of its draws or none)
         frame.ranges.clear();
         waitFrameTextures(frame); // (TODO 164: the textures its workers convert)
         if (frame.firstAfterLoad)
@@ -6666,12 +6857,20 @@ namespace nr
             s.help = "Native (DX12, preview): the game drawn by the PC renderer (Direct3D 12) - more frames, sharper "
                      "pictures; menus and movies too, the PS2 graphics chip left with nothing to draw. Emulated: the PS2's "
                      "graphics chip emulated, as before. Takes a restart.";
-            s.choices = {{"emulated", "Emulated (PS2)"}, {"native", "Native (DX12, preview)"}};
-            s.defaultValue = "native"; // (TODO 163: the port's renderer; main.cpp sets TF_RENDERER=native when nothing chose)
+            if (nr::nativeBackendChosen())
+            {
+                s.choices = {{"emulated", "Emulated (PS2)"}, {"native", "Native (DX12, preview)"}};
+                s.defaultValue = "native"; // (TODO 163: the port's renderer; main.cpp sets TF_RENDERER=native when nothing chose)
+            }
+            else
+            {
+                s.choices = {{"emulated", "Emulated (PS2)"}}; // (no native backend built, or TF_GFX_API names none here: nr_none.cpp)
+                s.defaultValue = "emulated";
+            }
             s.apply = [](const std::string &) { return false; }; // (takes a restart)
             ps2_settings::add(s);
-            const char *chosen = std::getenv("TF_RENDERER");
-            if (chosen && std::string(chosen) == "native" && !std::getenv("TF_NATIVE_RENDER"))
+            const std::string chosen = ps2_settings::choice("TF_RENDERER");
+            if (chosen == "native" && !std::getenv("TF_NATIVE_RENDER"))
             {
                 // (TF_NATIVE_FROM_SETTINGS: these four are the settings' - a process started again from this one makes them
                 // anew, main.cpp, TODO 294)
@@ -6749,6 +6948,28 @@ namespace nr
             s.defaultValue = "0";
             s.apply = [](const std::string &value) {
                 frame::setBloom(value == "1" ? 1 : 0);
+                return true;
+            };
+            s.available = []() {
+                const char *on = std::getenv("TF_NATIVE_RENDER");
+                return ps2_settings::choice("TF_RENDERER") == "native" || (on && *on && *on != '0');
+            };
+            s.unavailableHelp = "Only for the native renderer (Display: Renderer).";
+            ps2_settings::add(s);
+        }
+        // (TODO 305 (7)) The motion trails' look (flyers, dashes: the 0x2220 after-image; nr_passes.cpp), live.
+        {
+            ps2_settings::Setting s;
+            s.key = "TF_MOTION_TRAILS";
+            s.section = "Graphics";
+            s.label = "Motion trails (native renderer)";
+            s.order = 58;
+            s.help = "Native renderer: the see-through trail behind fast flyers and dashing robots. Smooth: a soft blur along the "
+                     "way they move. Original: the game's own stretched trail (long sharp slivers). Off: no trail.";
+            s.choices = {{"smooth", "Smooth"}, {"original", "Original"}, {"off", "Off"}};
+            s.defaultValue = "smooth";
+            s.apply = [](const std::string &value) {
+                setMotionTrails(value == "original" ? 0 : value == "soft" ? 1 : value == "ghost" ? 2 : value == "off" ? 3 : -1);
                 return true;
             };
             s.available = []() {
@@ -6895,7 +7116,22 @@ namespace nr
                      "softer, but much lighter for the graphics card. For integrated graphics that cannot keep up at the "
                      "screen's resolution. 100%: the window's own resolution.";
             s.choices = {{"100", "100%"}, {"85", "85%"}, {"75", "75%"}, {"67", "67%"}, {"50", "50%"}};
-            s.defaultValue = "100";
+            // (TODO 299) With the Upscaler on FSR 3 / 4: FSR's presets, the render size the window's divided by AMD's ratios
+            // (frame::renderRatio) - Native AA 1, Quality 1.5, Balanced 1.7, Performance 2, Ultra Performance 3.
+            s.makeChoices = []() -> std::vector<ps2_settings::Choice> {
+                if (taa::sdkPresent() && ps2_settings::choice("TF_NATIVE_UPSCALER") == "fsr")
+                    return {{"100", "Native AA (100%)"},
+                            {"67", "Quality (67%)"},
+                            {"58", "Balanced (58%)"},
+                            {"50", "Performance (50%)"},
+                            {"33", "Ultra Performance (33%)"}};
+                return {{"100", "100%"}, {"85", "85%"}, {"75", "75%"}, {"67", "67%"}, {"50", "50%"}};
+            };
+            if (taa::sdkPresent())
+                s.help += " With the Upscaler on FSR 3 / 4, its presets: Native AA (FSR's edge smoothing at the window's resolution), "
+                          "Quality, Balanced, Performance and Ultra Performance (drawn at 67%, 58%, 50% and 33% and brought up "
+                          "to the window by FSR).";
+            s.defaultValue = graphics_driver::defaultFor("TF_NATIVE_RENDER_SCALE", "100"); // (TODO 295: 67% on built-in graphics)
             s.apply = [](const std::string &value) {
                 frame::setRenderScale(std::atoi(value.c_str()));
                 return true;
@@ -6927,11 +7163,13 @@ namespace nr
                     c.push_back({"fsr", "FSR 3 / 4"});
                 return c;
             };
-            s.defaultValue = "bilinear";
+            s.defaultValue = graphics_driver::defaultFor("TF_NATIVE_UPSCALER", "bilinear"); // (TODO 295: FSR 1 on built-in graphics)
             if (taa::sdkPresent())
-                s.help += " FSR 3 / 4 (AMD FidelityFX, temporal: FSR 4 on Radeon RX 9000, FSR 3 elsewhere): the sharpest picture "
-                          "from a render scale under 100%, and at 100% the best edge smoothing (it replaces Smooth edges). Costs "
-                          "GPU time: for graphics cards, not built-in graphics (there FSR 1 is the better choice). Takes a restart.";
+                s.help += " FSR 3 / 4 (AMD FidelityFX, temporal: FSR 4 where the Radeon driver offers it - RX 7000 and 9000 - "
+                          "FSR 3.1 elsewhere): the sharpest picture from a render scale under 100%, and at 100% the best edge "
+                          "smoothing (it replaces Smooth edges). Its presets are on the Render scale row (Native AA, Quality, "
+                          "Balanced, Performance, Ultra Performance). Costs GPU time: for graphics cards, not built-in graphics "
+                          "(there FSR 1 is the better choice). Takes a restart.";
             s.apply = [](const std::string &value) {
                 // (FSR 3 / 4 sizes the picture and the GS targets at the start: a restart, on or off)
                 if (value == "fsr" || taa::upscalerOn())
@@ -7012,6 +7250,8 @@ namespace nr
             g_noGrass = *grass == '0';
         if (const char *it = std::getenv("TF_NATIVE_ITERATOR"))
             g_iterator = *it == '1';
+        if (const char *sc = std::getenv("TF_N5_SETCACHE"))
+            g_setCache = *sc != '0';
         if (const char *pk = std::getenv("TF_NATIVE_PACKET"))
         {
             g_packets = std::atoi(pk);
@@ -7132,6 +7372,20 @@ namespace nr
         // pairs of the same frames, the GS's shot and the native one)
         if (std::getenv("TF_NATIVE_LOOSE_COMPARE") && *std::getenv("TF_NATIVE_LOOSE_COMPARE") == '1')
             ps2_host_display::setGifObserverAlways(true);
+        // (TODO 308) The native renderer drawing alone takes over from the GS a few seconds in (Direct3D 12 made on its
+        // thread), and the GS's own GPU renderer (OpenGL, the Emulated renderer's) was started anyway for those first
+        // frames: its programs linked on the GS thread - on Intel's UHD 620 ~9 s of the start, every save state of
+        // those seconds waiting behind it. Now its start is put off: the GS's software renderer draws the first frames
+        // (the start's screens), and the GPU renderer starts only if the emulated drawing is needed after all (the
+        // device lost, Direct3D 12 not starting: below and the runtime's setEmulatedDrawing). Not with the 2D handed
+        // back to the GS (TF_NATIVE_EMU2D=1) or compare mode's pairs, which draw emulated all session.
+        // TF_GS_GPU_LATER=0: started at once, as before.
+        {
+            const auto flag = [](const char *name) { const char *v = std::getenv(name); return v && *v == '1'; };
+            const char *later = std::getenv("TF_GS_GPU_LATER");
+            if (flag("TF_NATIVE_ONLY") && !flag("TF_NATIVE_EMU2D") && !flag("TF_NATIVE_LOOSE_COMPARE") && !(later && *later == '0'))
+                ps2_gpu::setStartDeferred(true);
+        }
         backend().prepare();
         startLivePicture();
     }

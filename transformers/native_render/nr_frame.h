@@ -40,7 +40,8 @@ namespace nr::frame
     inline std::atomic<int> g_ssaa{-1};           // supersampling: -1 not read yet, then 0/1
     inline std::atomic<int> g_bloom{-1};          // (TODO 108) the modern bloom (TF_NATIVE_BLOOM): -1 not read yet, 0 the game's glow, 1 on
     inline std::atomic<int> g_speedupsForced{-1}; // (TF_NATIVE_SHOTAB: the speed-ups that keep the picture forced on or off)
-    inline std::atomic<int> g_windowLines{0};     // the window's height (setWindowLines); 0 = not known yet
+    inline std::atomic<int> g_windowLines{0};     // the window's height (Linux: setWindowSize; Windows: setWindowLines); 0 = not known yet
+    inline std::atomic<int> g_windowWidth{0};     // the window's width (Linux: setWindowSize); 0 = not known yet
     inline uint32_t g_profWindow = 0;             // TF_NATIVE_PROFILE's windows so far (the "=alt" switches turn on it)
     // (TODO 94: the speed-ups that keep the picture, each TF_NATIVE_<name>=0 off, =alt by turns (a profile window
     // each), unset on; TF_NATIVE_SHOTAB's forcing over them.)
@@ -153,7 +154,42 @@ namespace nr::frame
         }
         return v;
     }
-    inline void setRenderScale(int percent) { g_renderScale.store(std::clamp(percent, 25, 100), std::memory_order_relaxed); }
+    // (TODO 295) The fewest lines a picture under render scale 100% is drawn with (TF_NATIVE_MIN_LINES; 0, the default: no
+    // floor): built-in graphics start at 67% with 480 (graphics_driver::applyLowEndDefaults - the PS2 shows 448), so a small
+    // window is never softer than the console's. Only while that scale is the default: the player's own choice of a render
+    // scale (setRenderScale, from the setting) takes it as it is.
+    inline std::atomic<int> g_minLines{-1};
+    inline int minLines()
+    {
+        int v = g_minLines.load(std::memory_order_relaxed);
+        if (v < 0)
+        {
+            const char *e = std::getenv("TF_NATIVE_MIN_LINES");
+            int expected = -1;
+            g_minLines.compare_exchange_strong(expected, e && *e ? std::clamp(std::atoi(e), 0, 4320) : 0);
+            v = g_minLines.load(std::memory_order_relaxed);
+        }
+        return v;
+    }
+    inline void setRenderScale(int percent)
+    {
+        g_renderScale.store(std::clamp(percent, 25, 100), std::memory_order_relaxed);
+        g_minLines.store(0, std::memory_order_relaxed);
+    }
+    // (TODO 299) The render scale as FSR 3 / 4's presets mean it: Native AA 1, Quality 1 / 1.5, Balanced 1 / 1.7, Performance
+    // 1 / 2, Ultra Performance 1 / 3 - the settings' 100, 67, 58, 50 and 33 - the share exactly (AMD's ratios); any other percent
+    // as it is.
+    inline float renderRatio(int percent)
+    {
+        switch (percent)
+        {
+        case 67: return 1.0f / 1.5f;
+        case 58: return 1.0f / 1.7f;
+        case 50: return 0.5f;
+        case 33: return 1.0f / 3.0f;
+        default: return static_cast<float>(percent) / 100.0f;
+        }
+    }
     // The sharpening (TF_NATIVE_SHARPEN, the F1 setting, live): 0 off, 1 auto (the default: only below render scale 100%,
     // where the picture is enlarged and comes out soft), 2 on. Drawn by the FXAA pass (TF_NATIVE_AA's default), as the
     // amount CAS takes: 0 none - the pass's result as before.

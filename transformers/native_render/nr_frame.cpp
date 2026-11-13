@@ -726,7 +726,7 @@ namespace nr::frame
             if (texture->keys && keyPromptsShown())
                 return textureFor(texture->keys, standInOk);
             if (texture->xbox && xboxPromptsShown())
-                return textureFor(texture->xbox, standInOk);
+                return textureFor(texture->xbox360 && xbox360PromptsShown() ? texture->xbox360 : texture->xbox, standInOk);
             auto it = g.textures.find(texture->id);
             if (it != g.textures.end())
                 return &it->second;
@@ -913,6 +913,7 @@ namespace nr::frame
             uint32_t g_sceneKey = 0;              // the scene's GS buffer this frame (the most of its 3D draws: render)
             bool g_sceneKnown = false;
             bool g_ok = false;
+            bool g_fractional = false;            // (the GS buffers at the render size's own scale this frame: the output the picture's)
 
             void frameStart()
             {
@@ -1017,10 +1018,21 @@ namespace nr::frame
                 g_ok = false;
                 // (the size the scene's target would have at the picture's own resolution - the GS targets' scale for it, a field
                 // buffer's rows doubled as the frame builder makes them)
-                const uint32_t fullX = std::max(2u, (g.pictureW + 511u) / 512u), fullY = std::max(2u, (g.pictureH + 447u) / 448u);
-                const uint32_t fullField = std::max(fullY, std::min(18u, (g.pictureH + 223u) / 224u));
-                const bool field = g.scaleYField != g.scaleY && source.h == static_cast<uint32_t>(source.gsH) * g.scaleYField;
-                const uint32_t ow = static_cast<uint32_t>(source.gsW) * fullX, oh = static_cast<uint32_t>(source.gsH) * (field ? fullField : fullY);
+                // (with the fractional scales - the presets - the picture's own size: a 512-wide buffer as wide as the picture, a
+                // field's 224 rows as tall)
+                const bool field = g.scaleYField != g.scaleY && source.h == targetPixels(source.gsH, g.scaleYField);
+                uint32_t ow = 0, oh = 0;
+                if (g_fractional)
+                {
+                    ow = targetPixels(source.gsW, static_cast<float>(g.pictureW) / 512.0f);
+                    oh = targetPixels(source.gsH, static_cast<float>(g.pictureH) / (field ? 224.0f : 448.0f));
+                }
+                else
+                {
+                    const uint32_t fullX = std::max(2u, (g.pictureW + 511u) / 512u), fullY = std::max(2u, (g.pictureH + 447u) / 448u);
+                    const uint32_t fullField = std::max(fullY, std::min(18u, (g.pictureH + 223u) / 224u));
+                    ow = static_cast<uint32_t>(source.gsW) * fullX, oh = static_cast<uint32_t>(source.gsH) * (field ? fullField : fullY);
+                }
                 // (a source larger than the picture's resolution - not FSR's to shrink; at render scale 100% FSR's anti-aliasing runs
                 // alone: native AA)
                 if (ow < source.w || oh < source.h)
@@ -2008,26 +2020,43 @@ namespace nr::frame
             }
         }
         // The picture is the PC's, not the GS's: the field (512x224, shown 4:3) maps to all of it.
-        // As many lines as the window has (2026-10-28, item 64: a fixed 1080 was stretched to the
-        // 3440x1440 screen, x1.33 - the blur), as wide as the picture shows on the screen (the
-        // game's widescreen picture is anamorphic: a wider window gets a wider picture, not a
-        // stretch). TF_NATIVE_HEIGHT=<n> fixes the lines (above the window's = supersampling).
+        // As many lines as the picture shows in the window: the window's lines, or its width over the picture's shape
+        // in a narrower, letterboxed window (a 16:9 picture on the Steam Deck's 16:10 screen). The extra lines were
+        // drawn and then scaled away (the Deck: 1424x801 for 1280x720 shown). As wide as the picture shows on the
+        // screen (the game's widescreen picture is anamorphic). TF_NATIVE_HEIGHT=<n> fixes the lines (above the window's
+        // = supersampling).
         static const int linesFixed = [] {
             const char *v = std::getenv("TF_NATIVE_HEIGHT");
             return v && *v ? std::atoi(v) : 0;
         }();
-        // (the render scale: that share of the window's lines, the picture shown enlarged - setRenderScale; 100 unless set)
+        // (the render scale: that share of the window's size, the picture shown enlarged - setRenderScale; 100 unless set)
         // (TODO 299: with the temporal upscaler the picture keeps the window's lines and the GS targets take the render scale -
         // the upscaler brings the scene up to the picture's)
-        const int window = g_windowLines.load(std::memory_order_relaxed) * (taa::upscalerOn() ? 100 : renderScale()) / 100;
+        const int scale = renderScale();
+        const int fullLines = g_windowLines.load(std::memory_order_relaxed);
+        // (TODO 295: never under the low-end default's floor of lines, nor above the window's own)
+        const int window = taa::upscalerOn() || scale >= 100 || minLines() <= 0 ? fullLines * (taa::upscalerOn() ? 100 : scale) / 100
+                                                                                : std::max(fullLines * scale / 100, std::min(fullLines, minLines()));
+#if defined(__linux__)
+        const int windowWidth = g_windowWidth.load(std::memory_order_relaxed) * (taa::upscalerOn() ? 100 : scale) / 100;
+#endif
         // (TODO 255) A movie shown as a band of the picture's rows (ps2_host_display::setPictureBand): the picture as
         // many lines taller as the band is short of it, so the band itself still has the window's lines.
         float bandTop = 0.0f, bandBottom = 1.0f;
         ps2_host_display::pictureBand(bandTop, bandBottom);
         const float bandLines = linesFixed > 0 ? 1.0f : 1.0f / std::max(0.25f, bandBottom - bandTop);
-        const uint32_t linesWanted = static_cast<uint32_t>(
-            std::clamp(static_cast<int>(std::lround((linesFixed > 0 ? linesFixed : window > 0 ? window : 1080) * bandLines)), 240, 4320));
         const float shape = input.displayAspect > 0.5f ? input.displayAspect : 4.0f / 3.0f;
+        const float tall = (window > 0 ? window : 1080) * bandLines;
+#if defined(__linux__)
+        // (Linux: the window's lines, or its width over the picture's shape in a narrower, letterboxed window - a 16:9
+        // picture on the Steam Deck's 16:10 screen - the extra lines would be drawn and then scaled away.)
+        const float lines = linesFixed > 0 ? static_cast<float>(linesFixed) :
+            windowWidth > 0 ? std::min(tall, windowWidth / shape) : tall;
+#else
+        const float lines = linesFixed > 0 ? static_cast<float>(linesFixed) : tall;
+#endif
+        const uint32_t linesWanted = static_cast<uint32_t>(
+            std::clamp(static_cast<int>(std::lround(lines)), 240, 4320));
         const uint32_t height = linesWanted, width = (static_cast<uint32_t>(std::lround(linesWanted * shape)) + 7u) & ~7u;
         // The GS buffers' targets at a scale to match (the 3D field is copied into the picture:
         // drawn at the picture's own resolution, not enlarged).
@@ -2043,8 +2072,11 @@ namespace nr::frame
         static const bool ssaaAlt = std::getenv("TF_NATIVE_SSAA") && *std::getenv("TF_NATIVE_SSAA") == 'a';
         // (TODO 299: not with FSR 3 / 4 - its anti-aliasing in place of the supersampling)
         const bool ssaa = !taa::upscalerOn() && (ssaaAlt ? (g_profWindow & 1u) != 0u : g_ssaa.load(std::memory_order_relaxed) > 0);
-        const uint32_t renderW = taa::upscalerOn() ? std::max(1u, width * static_cast<uint32_t>(renderScale()) / 100u) : width,
-                       renderH = taa::upscalerOn() ? std::max(1u, height * static_cast<uint32_t>(renderScale()) / 100u) : height;
+        // (TODO 299: FSR's presets - the render size the window's times the preset's ratio, rounded: 2293 x 960 for Quality at
+        // 3440 x 1440)
+        const float ratio = renderRatio(renderScale());
+        const uint32_t renderW = taa::upscalerOn() ? std::max(1u, static_cast<uint32_t>(std::lround(width * ratio))) : width,
+                       renderH = taa::upscalerOn() ? std::max(1u, static_cast<uint32_t>(std::lround(height * ratio))) : height;
         const uint32_t ssW = ssaa ? (renderW * 3u + 1u) / 2u : renderW, ssH = ssaa ? (renderH * 3u + 1u) / 2u : renderH;
         g.scaleX = static_cast<float>(std::max(2u, (ssW + 511u) / 512u));
         g.scaleY = static_cast<float>(std::max(2u, (ssH + 447u) / 448u));
@@ -2064,13 +2096,22 @@ namespace nr::frame
         {
             static const char *fracEnv = std::getenv("TF_NATIVE_FRACSCALE");
             const bool fracOn = !(fracEnv && *fracEnv && (*fracEnv == '0' || (*fracEnv == 'a' && !(g_profWindow & 1u))));
-            // (TODO 299: not with FSR 3 / 4 - its picture is at the window's size and its input at the whole-number scale of the
-            // render size above)
             if (fracOn && renderScale() < 100 && !ssaa && !taa::upscalerOn())
             {
                 g.scaleX = std::max(0.5f, static_cast<float>(width) / 512.0f);
                 g.scaleY = std::max(0.5f, static_cast<float>(height) / 448.0f);
                 g.scaleYField = fieldResOff ? g.scaleY : std::max(g.scaleY, static_cast<float>(height) / 224.0f);
+            }
+            // (TODO 299) With FSR 3 / 4 the GS buffers at the render size's own scale, at every preset (Native AA too): the scene's
+            // field exactly the preset's size - FSR's input - where the whole-number scale gave the next step up (3440 x 1440 at
+            // Quality: 2560 wide, not 2293; and 3584 at Native AA). Its output is the picture's size (upscaledSource).
+            // TF_NATIVE_FRACSCALE=0: the whole-number scales, as before.
+            taaUp::g_fractional = fracOn && taa::upscalerOn();
+            if (taaUp::g_fractional)
+            {
+                g.scaleX = std::max(0.5f, static_cast<float>(renderW) / 512.0f);
+                g.scaleY = std::max(0.5f, static_cast<float>(renderH) / 448.0f);
+                g.scaleYField = fieldResOff ? g.scaleY : std::max(g.scaleY, static_cast<float>(renderH) / 224.0f);
             }
         }
         static const bool frameDoneSet = [] {
@@ -2399,6 +2440,18 @@ namespace nr::frame
                              static_cast<unsigned long long>(d.zbuf), d.mesh ? d.mesh->vertices.size() : 0u,
                              d.mesh && d.mesh->sprites ? (d.mesh->primitive ? "primitive sprites" : "sprites") : d.mesh && d.mesh->primitive ? "primitive" : "mesh",
                              x0, x1, y0, y1, c0, d.texture != nullptr);
+                if (d.texture && !d.texture->pixels.empty())
+                {
+                    // (TODO 305 (2)) The texture's own texels: which copy, and what it holds (its first texel, how many are clear) -
+                    // to tell wrong texels made on the CPU from right ones the GPU samples wrong.
+                    size_t clear = 0;
+                    for (uint32_t p : d.texture->pixels)
+                        clear += (p >> 24) == 0u;
+                    std::fprintf(stderr, "[native render]   texture id %llu %ux%u hash %016llx first %08x clear %zu of %zu%s\n",
+                                 static_cast<unsigned long long>(d.texture->id), d.texture->width, d.texture->height,
+                                 static_cast<unsigned long long>(d.texture->pixelHash), d.texture->pixels[0], clear, d.texture->pixels.size(),
+                                 d.texture->upscaled ? " (large image)" : "");
+                }
                 static const bool drawVerts = std::getenv("TF_NATIVE_DRAWVERTS") != nullptr;
                 if (drawVerts && d.mesh && !d.mesh->immediate)
                     std::fprintf(stderr, "[native render]   clamp %llx fromList %d scissor %g,%g..%g,%g\n", static_cast<unsigned long long>(d.clamp), d.fromList ? 1 : 0,
@@ -4310,7 +4363,7 @@ namespace nr::frame
                             if (sigF)
                                 std::fclose(sigF);
                             sigTick = input.tick;
-                            sigF = std::fopen(("runs\\sig_" + std::to_string(input.tick) + ".txt").c_str(), "w");
+                            sigF = std::fopen(("runs/sig_" + std::to_string(input.tick) + ".txt").c_str(), "w");
                         }
                         if (sigF && draw.mesh)
                         {

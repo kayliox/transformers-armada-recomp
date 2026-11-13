@@ -29,13 +29,18 @@ recordings. Screenshots and short videos are fine.
 ### Changes to PS2Recomp
 
 The `PS2Recomp` folder is a submodule and is never committed to directly. Changes to it live as patch files in
-`patches/ps2recomp/`, which `build.ps1` applies. After editing the submodule, run:
+`patches/ps2recomp/`, which `build.ps1` and `build.sh` apply in sorted order. Write one patch file per change
+(upstream's patches keep their names through `0171`; this port adds `1001` and up), then check the whole series:
 
 ```powershell
 python tools\make_patches.py --verify
 ```
 
-and commit the updated patch files.
+It applies every patch to a clean checkout of the pinned commit and compares the result with the submodule's
+working tree. It never rewrites the patch files.
+
+The bare command is upstream's writer: it deletes all existing `.patch` files and replaces the series with five
+grouped area patches (`0001`–`0005`). Do not use it to update this hand-written series.
 
 ### No game data, ever
 
@@ -48,6 +53,18 @@ A commit check enforces this. Turn it on once in your clone:
 ```powershell
 git config core.hooksPath .githooks
 ```
+
+### Portable code
+
+The game is meant to reach Linux, the Steam Deck and later Android, so new code should not lock it to Windows or
+to x86:
+
+- Keep Windows-only calls inside the platform layer, not in game or renderer code.
+- When you write SSE or other x86-only code, add a plain C++ path next to it (an ARM build will need one).
+- Prefer code that builds with both MSVC and Clang.
+
+Small steps toward this are welcome in any pull request, especially Linux and Steam Deck ones, which share most
+of the work an Android build needs.
 
 ## Code style
 

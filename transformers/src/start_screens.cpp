@@ -1,6 +1,7 @@
 // The start-up screens setting (start_screens.h has the long form; TODO 110).
 
 #include "start_screens.h"
+#include "port_ext.h" // (ext::skipMovie)
 
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
@@ -211,7 +212,12 @@ namespace start_screens
             if (read32(rdram, self + 4u) == kIntroItemVtable && intro != 0u && read32(rdram, intro + kIntroMovie) != 0u)
             {
                 const std::string key = keyOf(stringAt(rdram, intro + kIntroPath));
-                const bool skip = g_mode.load(std::memory_order_relaxed) != kScripted && skipsKey(key);
+                // (An extension's skipped movie, port_ext.h skipMovie - e.g. the overlay's Playable Decepticons skips the
+                // start movies that show the Autobots whatever the setting; decided once a movie, at its first frame)
+                static bool extensionSkip = false;
+                if (key != g_lastMovie)
+                    extensionSkip = ext::skipMovie(key);
+                const bool skip = (g_mode.load(std::memory_order_relaxed) != kScripted && skipsKey(key)) || extensionSkip;
                 if (key != g_lastMovie)
                 {
                     g_lastMovie = key;

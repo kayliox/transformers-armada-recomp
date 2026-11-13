@@ -1,6 +1,6 @@
 #pragma once
 // (TODO 299) The temporal upscaler (FSR 3 / FSR 4 through the AMD FidelityFX SDK): its settings and what the renderer
-// gives it. docs/TEMPORAL_UPSCALER.md (the private repo's branch docs/temporal-upscaler) has the plan and the findings.
+// gives it. docs/TEMPORAL_UPSCALER.md has the plan and the findings.
 //
 // Step 1 a: the motion. Each draw's frame before's pose comes from the in-between pictures' matching (nr_thread.cpp
 // poses::prepare / assign: the draw's matrix the frame before, for a mesh made anew each frame its vertices then); the

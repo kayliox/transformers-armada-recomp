@@ -38,6 +38,48 @@ The first build compiles about 22,000 generated functions and takes 15 to 25 min
 After that, `.\build.ps1` rebuilds only what changed. `.\build.ps1 -SkipRecompile` skips the translation step,
 for changes to the runtime or the port's code only (under a minute).
 
+## Linux (and Steam Deck)
+
+The game also builds as a native Linux program, with both renderers. The native renderer's Direct3D 12 runs through
+vkd3d (Wine's Direct3D 12 on Vulkan): `build.sh` downloads vkd3d 2.1 once, checks it, and builds it statically into
+`out/vkd3d-2.1`; without vkd3d's tools (or with `--no-vkd3d`) the game has the emulated renderer only.
+`./setup.sh` sets up a player's copy (prerequisite checks, then this build), `./update.sh` updates it (also F1 >
+About > Update now), `./play.sh` starts it.
+
+You need CMake 3.21 or newer, Ninja, a C++ compiler (GCC or Clang), Python 3, Git, pkg-config, and the development
+packages for X11, OpenGL and FFmpeg; for the native renderer also curl, bison, flex, Perl's JSON module and the
+Vulkan and SPIR-V headers. On Ubuntu or Debian:
+
+```sh
+sudo apt install cmake ninja-build g++ python3 git pkg-config libgl-dev libx11-dev libxrandr-dev libxinerama-dev \
+  libxcursor-dev libxi-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev \
+  curl bison flex libjson-perl libvulkan-dev spirv-headers
+```
+
+Then:
+
+```sh
+git clone --recursive https://github.com/kayliox/transformers-armada-recomp
+cd transformers-armada-recomp
+./build.sh --iso "/path/to/Transformers (USA).iso"
+```
+
+`./build.sh --skip-recompile` rebuilds only the executable. Start the game with
+`out/build/transformers/TransformersRecomp`.
+
+The build copies the FFmpeg shared libraries it found beside the executable
+(`tools/bundle_libraries.cmake`) and the executable looks in its own folder first (`$ORIGIN`), so the build carries
+its movie decoding with it: a build made in a distribution's container runs on SteamOS, which has no FFmpeg or
+another ABI. glibc, libstdc++ and libgcc stay the host's, and so do the graphics, audio and input libraries (GL,
+EGL, Vulkan, X11/xcb, Wayland, DRM, ALSA, Pulse, udev and dbus): because the game's folder is a loader search path
+for the host's own GPU driver too, the container's older copies would be picked up first on a newer SteamOS. FFmpeg's
+other dependencies (the codec libraries and the like) travel with it. FFmpeg linked statically (no `libav*` in `ldd`)
+copies nothing.
+
+The emulated renderer's GPU path needs an OpenGL feature (`GL_ARB_fragment_shader_interlock`) that some drivers lack,
+AMD's among them (the Steam Deck too). The game then runs OpenGL through Mesa's Zink driver on Vulkan, which has it.
+`TF_ZINK=0` keeps the usual driver (the GS then draws on the CPU, slower); `TF_ZINK=1` always uses Zink.
+
 ## HD textures and sharp fonts
 
 ```powershell
@@ -68,6 +110,19 @@ first, and the game uses each one as soon as it is ready. While the game runs th
 graphics card) and carries on when you close it; `"while_playing": true` in `hd_textures\hd_options.json` keeps it
 going. If you close the window before it is done, the game carries on with it the next time it starts, in a small
 window of its own (F1 shows how far it is).
+
+On Linux, run `./tools/make_hd_textures.sh` instead (or add `--fonts-only` for fonts and prompts
+alone). It needs Python 3 with Pillow and numpy, plus curl, unzip and a Vulkan driver for upscaling.
+The native renderer loads them (the emulated one does not, as on Windows).
+
+To check an existing set without upscaling, run `./tools/make_hd_textures.sh --verify`. It needs
+Pillow and the existing `hd_textures/converted/textures` and `hd_textures/upscaled` folders.
+It writes a report and a check cache, but does not change the images. After a check reports missing
+or broken images, `./tools/make_hd_textures.sh --remake` removes those entries and resumes making them;
+good images are kept.
+
+On Linux, F1's HD buttons show these terminal commands; they do not start a background job.
+Close the game before making or remaking textures to keep the two from sharing the graphics card.
 
 ## Play
 

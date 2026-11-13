@@ -86,7 +86,7 @@ namespace nr
                 float rect[4] = {}, dest[4] = {};
                 uint32_t source = 0u, sourceW = 0u, sourceH = 0u, node = 0u, threshold = 0u, count = 0u;
                 uint8_t onScreen = 0u;
-                float visibility = -1.0f;
+                float visibility = -1.0f, fraction = -1.0f;
             } g_seen;
 
             uint32_t word(const uint8_t *rdram, uint32_t addr)
@@ -105,10 +105,74 @@ namespace nr
                 return f;
             }
 
+            // (TODO 307 (n)) The sun's visibility from the fraction of the probe's samples that see it. The game counts
+            // the host copy's first pixel only (D_006CD9CC is 1), so its visibility is 0 or 1 and, with a leaf or a
+            // screen edge crossing the sun, toggles; its smoothing (UpdateVisibility: + 0.3 of the difference a frame,
+            // D_006CB648, not scaled for the frame rate) eases that over about 3 frames at 30 fps, and hardly at all at
+            // 60 and above: the glare popped on and off. Here, while the native answer feeds the host copy, the
+            // visibility Test leaves in node + 0x64 is replaced by the share of the 64 x 64 samples at or behind the sun
+            // (the same threshold), eased in time (TF_SUN_EASE seconds, default 0.08 - about the PS2's own 0.3 a frame
+            // at 30 fps): a leaf passing over the sun fades the glare instead of switching it. (The test's area is small -
+            // a 2 x 2 rect of the 512 x 448 scene - so a leaf mostly covers all of it or none: the easing does most of
+            // the work, the share gives the in-between values at a covering edge.) TF_SUN_SAMPLES=0: the PS2's
+            // single-point test as before.
+            bool g_samples = true;
+            float g_easeSeconds = 0.08f;
+            bool g_counted = false;   // (Test called the count this time)
+            uint32_t g_threshold = 0u; // (the threshold it counted with)
+            struct Eased
+            {
+                uint32_t node = 0u;
+                uint64_t tick = 0u;
+                float value = 0.0f;
+            };
+            std::array<Eased, 4> g_eased{};
+
+            void sampleVisibility(uint8_t *rdram, PS2Runtime *runtime, uint32_t node)
+            {
+                uint32_t under = 0u;
+                {
+                    std::lock_guard<std::mutex> lock(g_answerMutex);
+                    if (!g_answers)
+                        return; // (no native answer yet: the game's own)
+                    for (uint32_t z : g_answer)
+                        under += z <= g_threshold ? 1u : 0u;
+                }
+                const float target = static_cast<float>(under) / static_cast<float>(kPixels);
+                Eased *e = nullptr;
+                for (Eased &c : g_eased)
+                    if (c.node == node)
+                        e = &c;
+                if (!e)
+                {
+                    e = &g_eased[0];
+                    for (Eased &c : g_eased)
+                        if (c.tick < e->tick)
+                            e = &c;
+                    *e = Eased{};
+                    e->node = node;
+                }
+                const uint64_t tick = runtime->eeScheduler().currentVSyncTick();
+                if (!e->tick || tick < e->tick || tick - e->tick > 30u || g_easeSeconds <= 0.0f)
+                    e->value = target; // (first sight, or back after half a second away: no fade in from an old value)
+                else if (tick > e->tick)
+                {
+                    const float dt = static_cast<float>(tick - e->tick) / 59.94f;
+                    e->value += (target - e->value) * (1.0f - std::exp(-dt / g_easeSeconds));
+                }
+                e->tick = tick;
+                if (uint8_t *p = getMemPtr(rdram, node + 0x64u))
+                    std::memcpy(p, &e->value, 4);
+                g_seen.fraction = target;
+            }
+
             void test(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
             {
                 const uint32_t node = getRegU32(ctx, 4);
+                g_counted = false;
                 g_test(rdram, ctx, runtime);
+                if (g_samples && g_on && g_counted && !ps2_host_display::emulatedDrawing())
+                    sampleVisibility(rdram, runtime, node);
                 ++g_seen.tests;
                 g_seen.node = node;
                 if (const uint8_t *p = getConstMemPtr(rdram, node + 0x70u))
@@ -170,6 +234,8 @@ namespace nr
             {
                 const uint32_t threshold = getRegU32(ctx, 4);
                 g_count(rdram, ctx, runtime);
+                g_counted = true;
+                g_threshold = threshold;
                 ++g_seen.counts;
                 g_seen.threshold = threshold;
                 g_seen.count = getRegU32(ctx, 2);
@@ -203,7 +269,7 @@ namespace nr
                 std::fprintf(stderr,
                              "[occlusion] tick %llu (%s, %s): %llu tests, %llu copies, %llu counts, %llu transfers, %llu answered natively, %.1f us avg %.1f max | "
                              "last: node %08x on screen %u, copy from %08x (%ux%u) rect %.1f,%.1f-%.1f,%.1f to %.0f,%.0f-%.0f,%.0f, threshold %06x "
-                             "count %u of %d, visibility %.3f | host z %06x..%06x mean %06llx (%u zero, %u under the threshold) | native frame %llu (%llu answers): "
+                             "count %u of %d, visibility %.3f (samples %.3f) | host z %06x..%06x mean %06llx (%u zero, %u under the threshold) | native frame %llu (%llu answers): "
                              "z %06x..%06x, %u under\n",
                              static_cast<unsigned long long>(tick), ps2_host_display::emulatedDrawing() ? "emulated drawing on" : "native only",
                              gsTransfer ? "GS transfer" : "native answer", static_cast<unsigned long long>(s.tests),
@@ -211,7 +277,7 @@ namespace nr
                              static_cast<unsigned long long>(s.transfers), static_cast<unsigned long long>(s.native),
                              (s.transfers + s.native) ? s.transferUs / static_cast<double>(s.transfers + s.native) : 0.0, s.transferMaxUs, s.node, s.onScreen, s.source, s.sourceW, s.sourceH, s.rect[0],
                              s.rect[1], s.rect[2], s.rect[3], s.dest[0], s.dest[1], s.dest[2], s.dest[3], s.threshold, s.count,
-                             static_cast<int32_t>(word(rdram, kPixelCount)), s.visibility, lo, hi,
+                             static_cast<int32_t>(word(rdram, kPixelCount)), s.visibility, s.fraction, lo, hi,
                              static_cast<unsigned long long>(sum / kPixels), zeros, under, static_cast<unsigned long long>(answerTick),
                              static_cast<unsigned long long>(answers), nlo, nhi, nativeUnder);
                 g_seen.tests = g_seen.copies = g_seen.counts = g_seen.transfers = g_seen.native = 0u;
@@ -285,6 +351,10 @@ namespace nr
                 g_log = static_cast<uint32_t>(std::max(0, std::atoi(log)));
             if (const char *shots = std::getenv("TF_NATIVE_OCCSHOT"))
                 g_shotsLeft = static_cast<uint32_t>(std::max(0, std::atoi(shots)));
+            if (const char *samples = std::getenv("TF_SUN_SAMPLES"))
+                g_samples = *samples != '0';
+            if (const char *ease = std::getenv("TF_SUN_EASE"))
+                g_easeSeconds = std::max(0.0f, static_cast<float>(std::atof(ease)));
             if (!g_on && !g_log && !g_shotsLeft)
                 return;
             for (uint32_t a : {kTest, kCopySurfaceRect, kCount, kTransfer})
@@ -297,7 +367,7 @@ namespace nr
                 }
             g_copy = wrap(runtime, kCopySurfaceRect, copy);
             g_transfer = wrap(runtime, kTransfer, transfer);
-            if (g_log)
+            if (g_log || (g_on && g_samples))
             {
                 g_test = wrap(runtime, kTest, test);
                 g_count = wrap(runtime, kCount, count);

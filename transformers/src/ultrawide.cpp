@@ -2,6 +2,8 @@
 
 #include "ultrawide.h"
 
+#include "camera_mode.h"
+
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
@@ -20,7 +22,12 @@
 // Every other build links the default below (MSVC /alternatename).
 extern "C" uint32_t tfCallerReturnAddress(R5900Context *ctx);
 extern "C" uint32_t tfCallerReturnAddressDefault(R5900Context *ctx) { return GPR_U32(ctx, 31); }
+#if defined(_MSC_VER)
 #pragma comment(linker, "/alternatename:tfCallerReturnAddress=tfCallerReturnAddressDefault")
+#else
+extern "C" uint32_t tfCallerReturnAddress(R5900Context *ctx)
+    __attribute__((weak, alias("tfCallerReturnAddressDefault")));
+#endif
 #include <set>
 #include <string>
 #include <tuple>
@@ -108,6 +115,8 @@ namespace ultrawide
         {
             const float zoom = g_panelZoom.load(std::memory_order_relaxed);
             float fov = g_fovFactor.load(std::memory_order_relaxed);
+            if (camera_mode::apexFovActive())
+                fov = 1.0f; // (TODO 300: the Apex mod's own field of view in force - in degrees, the factor left out)
             if (g_inHq.load(std::memory_order_relaxed))
             {
                 // In the HQ: the game's own (off), or the setting's - given back to the game's own as a menu panel's
@@ -357,6 +366,12 @@ namespace ultrawide
         const float step = (1.0f - kPanelZoom) * dt / 0.2f; // (the whole way in a fifth of a second)
         zoom = zoom < target ? std::min(target, zoom + step) : std::max(target, zoom - step);
         g_panelZoom.store(zoom, std::memory_order_relaxed);
+    }
+
+    bool panelSettled()
+    {
+        return g_inHq.load(std::memory_order_relaxed) && g_panelsLarger.load(std::memory_order_relaxed) &&
+               g_panelZoom.load(std::memory_order_relaxed) <= kPanelZoom + 0.002f;
     }
 
     void noteWindow(int width, int height)

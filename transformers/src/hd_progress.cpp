@@ -106,6 +106,48 @@ namespace hd_progress
             return text.substr(at, end - at);
         }
 
+#if defined(__linux__)
+        // Older Linux makers finished the colours and fonts but left the status at "upscaled".
+        void finishLegacySet(const fs::path &file, Status &s, std::string &text)
+        {
+            if (s.state != "upscaled" || s.total <= 0 || s.done != s.total)
+                return;
+            const fs::path dir = file.parent_path();
+            std::error_code ec;
+            const auto upscaledAt = fs::last_write_time(file, ec);
+            if (ec)
+                return;
+            if (fs::file_size(dir / "upscaled_precolour" / "colour_gains.json", ec) == 0 || ec)
+                return;
+            const auto coloursAt = fs::last_write_time(dir / "upscaled_precolour" / "colour_gains.json", ec);
+            if (ec || coloursAt < upscaledAt)
+                return;
+            // Sharp fonts may already have been installed before the upscale.
+            if (fs::file_size(dir / "crisp_fonts" / "manifest.json", ec) == 0 || ec)
+                return;
+            // The colour ledger ends the offline match; the renderer's BC7 cache is not a finishing step.
+            const size_t at = text.find("\"upscaled\"", text.find("\"state\""));
+            if (at == std::string::npos)
+                return;
+            text.replace(at, sizeof("\"upscaled\"") - 1, "\"done\"");
+            fs::path tmp = file;
+            tmp += ".finished.tmp";
+            std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+            out << text;
+            out.close();
+            if (out)
+                fs::rename(tmp, file, ec);
+            if (!out || ec)
+            {
+                fs::remove(tmp, ec);
+                std::fprintf(stderr, "[hd textures] could not mark the finished Linux set done\n");
+                return;
+            }
+            s.state = "done";
+            std::fprintf(stderr, "[hd textures] the older Linux set's colours and fonts were already finished: marked done\n");
+        }
+#endif
+
         Status readStatus(const fs::path &file)
         {
             Status s;
@@ -114,12 +156,16 @@ namespace hd_progress
                 return s;
             std::stringstream ss;
             ss << in.rdbuf();
-            const std::string text = ss.str();
+            std::string text = ss.str();
             s.state = field(text, "state");
             s.done = std::atoll(field(text, "done").c_str());
             s.total = std::atoll(field(text, "total").c_str());
             s.quality = field(text, "quality");
             s.ok = !s.state.empty();
+#if defined(__linux__)
+            in.close();
+            finishLegacySet(file, s, text);
+#endif
             return s;
         }
 
@@ -190,6 +236,13 @@ namespace hd_progress
             g_corner = std::move(corner);
         }
 
+        // (TODO 338, game-breaking; a one-line switch) false: the window that makes the rest of the set WAITS while the game
+        // runs and makes them once it is closed - not in the game's job, so it outlives the game (TODO 219's way). On
+        // SirCebollo's GTX 1660 SUPER (public 0.7.0) the upscaler working beside the game held the graphics card for
+        // seconds: "the GPU has not finished a frame in 3 s", then DXGI_ERROR_DEVICE_HUNG - crashes and black loads.
+        // true: made beside the game while it is open, ended with it (TODO 267). hd_options.json's "while_playing": true
+        // still makes them during play, the player's own choice.
+        constexpr bool kMakerBesideGame = false;
 #if defined(_WIN32)
         HANDLE g_running = INVALID_HANDLE_VALUE;
         DWORD g_ourMaker = 0; // (the window this game started: closed by the player, it is not started again)
@@ -257,8 +310,11 @@ namespace hd_progress
             std::error_code ec;
             if (!fs::exists(script, ec))
                 return;
-            std::wstring cmd = L"powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File \"" + script.wstring() + L"\" " + mode + L" -GamePid " +
-                               std::to_wstring(GetCurrentProcessId());
+            // (TODO 338: waiting for the game - no -GamePid, so the script waits while the game runs and goes on after it; a
+            // verify still runs beside the game, as before)
+            const bool beside = kMakerBesideGame || std::wstring(mode) == L"-Verify";
+            std::wstring cmd = L"powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File \"" + script.wstring() + L"\" " + mode +
+                               (beside ? L" -GamePid " + std::to_wstring(GetCurrentProcessId()) : std::wstring());
             STARTUPINFOW si{};
             si.cb = sizeof si;
             si.dwFlags = STARTF_USESHOWWINDOW;
@@ -273,15 +329,19 @@ namespace hd_progress
                 if (CreateProcessW(nullptr, line.data(), nullptr, nullptr, FALSE,
                                    CREATE_NEW_CONSOLE | BELOW_NORMAL_PRIORITY_CLASS | CREATE_SUSPENDED | extra, nullptr, dir.c_str(), &si, &pi))
                 {
-                    const HANDLE job = makerJob();
+                    const HANDLE job = beside ? makerJob() : nullptr; // (TODO 338: a waiting maker outlives the game)
                     const bool held = job && AssignProcessToJobObject(job, pi.hProcess);
                     ResumeThread(pi.hThread);
                     g_ourMaker = pi.dwProcessId;
                     g_ourMode = std::wstring(mode) == L"-Verify" ? Mode::Verify : Mode::Make;
                     CloseHandle(pi.hThread);
                     CloseHandle(pi.hProcess);
-                    std::fprintf(stderr, "[hd textures] the set is not finished: a window makes the rest while the game is open%s\n",
-                                 held ? "" : " (not held by the game: it stops on its own when the game closes)");
+                    if (beside)
+                        std::fprintf(stderr, "[hd textures] the set is not finished: a window makes the rest while the game is open%s\n",
+                                     held ? "" : " (not held by the game: it stops on its own when the game closes)");
+                    else
+                        std::fprintf(stderr, "[hd textures] the set is not finished: a window makes the rest once the game is closed (it waits while "
+                                             "you play - TODO 338)\n");
                     return;
                 }
             }
@@ -432,9 +492,15 @@ namespace hd_progress
         setLine(s);
         // (TODO 242) A finished set made before the maker checked its images (black ones from a GTX 16-series card):
         // checked once, in the window that carries on - the maker's own .images_checked_3 says it was.
+#if defined(_WIN32)
         std::error_code ec;
         const bool unchecked = s.state == "done" && fs::exists(g_dir / "upscaled" / "upscale_manifest.jsonl", ec) &&
                                !fs::exists(g_dir / ".images_checked_3", ec);
+#else
+        // (no window carries on here to check it: make_hd_textures.sh checks a set once when it runs. Watched, the
+        // finished set only read as news: "HD textures ready, restart" at every start)
+        const bool unchecked = false;
+#endif
         if (upToDate(s, g_dir) && !unchecked)
             return; // (a finished set, for the preset chosen: nothing to do)
         std::fprintf(stderr, unchecked ? "[hd textures] checking the set's images once (%lld of %lld, %s)\n"
@@ -453,7 +519,8 @@ namespace hd_progress
     {
 #if defined(_WIN32)
         // (TODO 267: the game's own window at work - Stop; stopped this session - Resume; TODO 281: a verify at work)
-        if (!g_stopped && g_ourMaker && pidAlive(g_ourMaker))
+        // (TODO 338: only a maker in the game's job can be stopped from here - a waiting one is closed in its own window)
+        if (!g_stopped && g_ourMaker && pidAlive(g_ourMaker) && g_makerJob)
             return g_ourMode == Mode::Verify ? "Verifying HD textures" : "Stop making HD textures";
         if (g_stopped)
             return "Resume making HD textures";
@@ -524,10 +591,13 @@ namespace hd_progress
         std::string t = ss.str();
         t.erase(std::remove_if(t.begin(), t.end(), [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }), t.end());
         const bool whilePlaying = t.find("\"while_playing\":true") != std::string::npos;
+        if (!kMakerBesideGame)
+            return whilePlaying ? "Making them in a small window, also while you play (your choice in the HD settings)."
+                                : "Made in a small window: it waits while you play and works once the game is closed.";
         (void)whilePlaying; // (TODO 267: the game's own window never waits for the game - it is made while the game is open)
         return "Making them in a small window while the game is open. Closing the game stops it; the next start carries on.";
 #else
-        return "Run tools/make_hd_textures.ps1";
+        return "Run tools/make_hd_textures.sh";
 #endif
     }
 
@@ -677,8 +747,8 @@ namespace hd_progress
             startMaker(g_dir.parent_path(), mode);
             return {};
 #else
-            (void)mode;
-            return "Run tools/make_hd_textures.ps1";
+            // (Linux) F1 names the command; make_hd_textures.sh passes the same options to upscale_textures.py.
+            return std::wstring(mode) == L"-Verify" ? "Run tools/make_hd_textures.sh --verify" : "Run tools/make_hd_textures.sh --remake";
 #endif
         }
     }
@@ -704,7 +774,8 @@ namespace hd_progress
                 g_line = "HD TEXTURES: STARTING";
         }
         startWatch(true, true);
-        return "Making them again in a small window while the game is open.";
+        return kMakerBesideGame ? "Making them again in a small window while the game is open."
+                                : "Made again in a small window: it waits while you play and works once the game is closed.";
     }
 
     int presetIndex()
@@ -756,7 +827,7 @@ namespace hd_progress
         return index < 2 ? "Saved. Larger images are shrunk in a small window (no graphics card needed); restart once it is done. " + started
                          : "Saved. " + started;
 #else
-        return "Saved. Run tools/make_hd_textures.ps1";
+        return "Saved. Run tools/make_hd_textures.sh to shrink or make what the preset needs";
 #endif
     }
 

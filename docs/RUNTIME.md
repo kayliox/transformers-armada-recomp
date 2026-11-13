@@ -26,17 +26,20 @@ find all of this in [DEBUGGING.md](DEBUGGING.md), where things stand in [STATUS.
 
 ## The patches
 
-The submodule's working tree is where the work happens; the patch files are generated from
-it and must be regenerated before every commit of this repository:
+The submodule's working tree is where the work happens; each patch file is written by hand, one
+per change (upstream's patches keep their names through `0171`; this port adds `1001` and up), and
+the series is checked before every commit of this repository:
 
 ```powershell
 python tools\make_patches.py --verify
 ```
 
-This writes one patch per area from the difference between the pinned commit and the working
-tree, new files included, then checks out the pinned commit into `out\patch_verify`, applies
-the patches there and compares every changed and new file with the working tree. It reads
-the submodule without touching its files or its index.
+It checks out the pinned commit into `out\patch_verify`, applies every patch there in sorted
+order and compares every changed and new file with the working tree (line endings aside). It
+reads the submodule without touching its files or its index, and it never rewrites the patches.
+
+The bare command keeps upstream's writer behavior: it deletes all existing `.patch` files and replaces the series
+with five grouped area patches (`0001`–`0005`). Do not run it to maintain this hand-written series.
 
 | Patch | Covers |
 |---|---|
@@ -1753,3 +1756,12 @@ GPU id (bits 61 and 62 respectively) and original-texture fallback. A draw check
 then the live controller style (`TF_PAD_PROMPTS`); PlayStation continues using `TF_BUTTON_SYMBOLS`.
 The emulated texture pack's `keyboard/` handling is unchanged. Fonts are made from decoded local
 RGBA atlases, so drawing never precedes palette availability.
+
+The Xbox labels come in two looks, as the pads have them: the Xbox One / Series pad's (dark buttons, coloured
+letters, View and Menu icons: `text_xbox` / `xbox`) and the Xbox 360 pad's (coloured buttons, pale letters,
+Back and Start arrows: `text_xbox360` / `xbox360`, a third twin with GPU id bit 60). GLFW names both pads
+"Xbox Controller", so the runtime (patch 0181, `ps2_host_input::xbox360Pads`) reads the USB ids in the Windows
+device path of each XInput pad (raw input, `IG_` in the path): when every one is a Microsoft 360 pad
+(045E:028E, 028F, 0291, 02A1, 0719) the 360 look is drawn, otherwise (One / Series, other makers, a mix, not
+Windows) the One / Series look. Looked at when a gamepad appears and every 3 s while one is there. Fonts made
+before the 360 look keep the One / Series look for every Xbox pad.

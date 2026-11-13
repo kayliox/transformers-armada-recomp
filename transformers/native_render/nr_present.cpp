@@ -1,10 +1,11 @@
 // The native picture shown live in the window (README.md, stage 4): each frame the renderer reads
-// its picture back (nr_d3d.cpp: publish) and the window's thread, before it draws, takes the newest
-// into a GL texture of its own, which the window shows in place of the GS's picture
+// its picture back (nr_d3d.cpp: publish) and the window's thread, before it draws, takes the next one
+// handed over into a GL texture of its own, which the window shows in place of the GS's picture
 // (ps2_host_display::setPictureProvider) - the overlays (FPS, the settings panel) still over it.
 // TF_NATIVE_LIVE=1 (with TF_NATIVE_RENDER=1). Where the driver can, the picture is a D3D12 texture
-// the window's GL reads itself (nr_glshare.h: no copy through the CPU); otherwise a CPU hand-over
-// (about 11 MB a frame at 2520 x 1080). TF_NATIVE_SHARE=0 keeps the CPU hand-over.
+// the window's GL reads itself (nr_glshare.h: no copy through the CPU); otherwise the CPU hand-over
+// uploads straight from the renderer's mapped readback (no copy on the render side), which the window
+// gives back once the upload has returned. TF_NATIVE_SHARE=0 keeps the CPU hand-over.
 #include "graphics_driver.h"
 #include "nr_types.h"
 #include "nr_backend.h"
@@ -281,7 +282,6 @@ namespace nr
         bool provide(unsigned int &texture, int &width, int &height)
         {
             static Texture2D shown{};
-            static std::vector<uint32_t> pixels;
             static uint64_t serial = 0;
             static bool asked = false;
             if (!asked)
@@ -299,7 +299,11 @@ namespace nr
             }
             uint32_t w = 0, h = 0;
             static bool has3D = false;
+#if defined(__linux__)
+            backend().setWindowSize(GetRenderWidth(), GetRenderHeight()); // (the picture drawn at the size shown in the window)
+#else
             backend().setWindowLines(GetRenderHeight()); // (the picture drawn at the window's own lines)
+#endif
             // The shared textures, on the first frame (the window's GL context is current here).
             static int share = 0;
             if (share == 0)
@@ -323,6 +327,13 @@ namespace nr
             static int sharedShown = -1;
             static uint32_t sharedW = 0, sharedH = 0;
             d3d::SharedPicture sp;
+#if defined(__linux__)
+            const uint8_t *src = nullptr;
+            uint32_t pitch = 0;
+            int readback = -1;
+#else
+            static std::vector<uint32_t> pixels;
+#endif
             const uint64_t serialBefore = serial;
             bool fresh = false;
             // (Milestone 3) The backend presents the window itself (Vulkan in SDL3's window): its picture is a texture of
@@ -412,12 +423,46 @@ namespace nr
                 else
                     backend().sharedHeld(sharedShown); // (not imported: the one still shown stays held - latestShared marked the new one)
             }
+            // (TODO 284) The picture taken, as the shared path marks it: the paced hand-over (paceWait) waits for one
+            // newer than this. Unmarked, every wait found the CPU hand-over's picture "new" again - the window drew
+            // as fast as it could and counted each draw: the FPS counter read 600-1500 (TF_NATIVE_SHARE=0, Proton, the
+            // Intel fallback). (PR #18, TheBrousse: and marked fresh, so it is paced and logged as a shared picture is, below.)
+#if defined(__linux__)
+            else if (share != 1 && backend().latestPicture(src, pitch, readback, serial, sp))
+            {
+                fresh = true;
+                g_takenSerial.store(serial, std::memory_order_relaxed);
+                w = sp.width;
+                h = sp.height;
+                has3D = sp.has3D;
+                // (The rows as raylib takes them: one copy only when a readback row is padded - widths not a
+                // multiple of 64 - since UpdateTexture sets no GL_UNPACK_ROW_LENGTH.)
+                const uint8_t *tight = src;
+                if (pitch != w * 4u)
+                {
+                    static std::vector<uint32_t> rows;
+                    rows.resize(static_cast<size_t>(w) * h);
+                    for (uint32_t y = 0; y < h; ++y)
+                        std::memcpy(rows.data() + static_cast<size_t>(y) * w, src + static_cast<size_t>(y) * pitch, w * 4u);
+                    tight = reinterpret_cast<const uint8_t *>(rows.data());
+                }
+                if (shown.id == 0u || shown.width != static_cast<int>(w) || shown.height != static_cast<int>(h))
+                {
+                    if (shown.id != 0u)
+                        UnloadTexture(shown);
+                    Image image{const_cast<uint8_t *>(tight), static_cast<int>(w), static_cast<int>(h), 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+                    shown = LoadTextureFromImage(image);
+                    SetTextureFilter(shown, TEXTURE_FILTER_BILINEAR);
+                    std::fprintf(stderr, "[native render] live picture: %ux%u\n", w, h);
+                }
+                else
+                    UpdateTexture(shown, tight);
+                // (The upload has its copy: the readback is the renderer's again.)
+                backend().pictureShown(readback);
+            }
+#else
             else if (share != 1 && backend().latestPicture(pixels, w, h, serial, has3D))
             {
-                // (TODO 284) The picture taken, as the shared path marks it: the paced hand-over (paceWait) waits for one
-                // newer than this. Unmarked, every wait found the CPU hand-over's picture "new" again - the window drew
-                // as fast as it could and counted each draw: the FPS counter read 600-1500 (TF_NATIVE_SHARE=0, Proton, the
-                // Intel fallback). (PR #18, TheBrousse: and marked fresh, so it is paced and logged as a shared picture is, below.)
                 fresh = true;
                 g_takenSerial.store(serial, std::memory_order_relaxed);
                 if (shown.id == 0u || shown.width != static_cast<int>(w) || shown.height != static_cast<int>(h))
@@ -432,6 +477,7 @@ namespace nr
                 else
                     UpdateTexture(shown, pixels.data());
             }
+#endif
             // (No new native picture for a while - a movie, a screen the native renderer does not draw
             // yet: the GS's is shown, not a stale one.)
             static auto lastNew = std::chrono::steady_clock::time_point{};
@@ -626,6 +672,28 @@ namespace nr
                 height = static_cast<int>(sharedH);
                 return true;
             }
+#if defined(__linux__)
+            // (N9: the CPU hand-over too is shown as each picture is handed over, not at the next VBlank - the
+            // window's pacer waits for the serial, and while no picture comes the 100 ms rule takes it back.)
+            {
+                const uint64_t skipped = serialBefore != 0u && serial > serialBefore + 1u ? serial - serialBefore - 1u : 0u;
+                if (fresh)
+                {
+                    if (g_pacerOn)
+                    {
+                        // (logged once presented: pacePresented)
+                        g_pendingShown = true;
+                        g_pendingPicture = sp;
+                        g_pendingSkipped = skipped;
+                    }
+                    else
+                        noteShown(sp, skipped);
+                    g_pacedLive.store(true, std::memory_order_relaxed);
+                }
+                else if (pacingLogOn())
+                    ++g_pacing.repeats;
+            }
+#else
             // The CPU hand-over's picture: paced and logged as a shared one (shown when it is handed over). (PR #18, TheBrousse)
             {
                 const uint64_t skipped = serialBefore != 0u && serial > serialBefore + 1u ? serial - serialBefore - 1u : 0u;
@@ -641,6 +709,7 @@ namespace nr
                     ++g_pacing.repeats;
                 g_pacedLive.store(true, std::memory_order_relaxed);
             }
+#endif
             texture = shown.id;
             width = shown.width;
             height = shown.height;

@@ -1,0 +1,168 @@
+Subject: [PATCH] Runtime: PS2X_THREAD_PLACEMENT=best - the EE thread alone on the best core (TODO 312, an A/B)
+
+Builds on the thread placement of patch 0165 (adapted from galaxyawesome/tfps2-recomp, GPL-3.0). A third value, best, set by the environment only (not among the setting's choices): through Windows CPU sets the EE thread gets the processor's best core to itself (the highest EfficiencyClass, then Windows' SchedulingClass ranking, then not core 0) and the process default set - every other thread, the graphics driver's and the sound system's included - is the other cores. 4 or more cores in processor group 0; the CPU-set functions are looked up at run time. Logs the chosen core and the cores' classes. Measured (2026-11-13): no gain at 60 on two laptops and a 6-core desktop, uncapped even there and ~20% fewer frames on an 8-core Ryzen - kept as an A/B only.
+
+--- a/ps2xRuntime/include/runtime/ps2_thread_placement.h
++++ b/ps2xRuntime/include/runtime/ps2_thread_placement.h
+@@ -19,6 +19,11 @@
+ //        one L3 - EE, VIF1, read, render and GS feed on cores 1 to 5.
+ //        Each may run on both SMT threads of its core. The helpers (sound mixer, movie decoder, HD texture uploads and
+ //        loaders, the controller thread) may run anywhere but the EE's and the render thread's cores.
++//   best (TODO 312) the EE thread alone on the processor's best core (the highest EfficiencyClass, then Windows'
++//        SchedulingClass ranking, then not core 0), every other thread of the process (the graphics driver's too) on
++//        the other cores - through CPU sets (Windows 10+, 4 or more cores in processor group 0). Logs the cores. An A/B
++//        by the environment only (not in the setting's choices): no gain at 60 on two laptops and the Testbench,
++//        uncapped even on the Testbench and ~20% fewer frames on an 8-core Ryzen (2026-11-13).
+ // PS2X_THREAD_CPUS=<ee>,<vif1>,<read>,<render>,<gsfeed> (with auto, for trying placements on a bench): a logical
+ // processor for each instead (its core's SMT threads with it); negative or left out: auto's choice for that one.
+ namespace ps2_thread_placement
+--- a/ps2xRuntime/src/lib/ps2_thread_placement.cpp
++++ b/ps2xRuntime/src/lib/ps2_thread_placement.cpp
+@@ -43,6 +43,12 @@ namespace ps2_thread_placement
+             return value && std::strcmp(value, "auto") == 0;
+         }
+ 
++        bool bestChosen()
++        {
++            const char *value = std::getenv("PS2X_THREAD_PLACEMENT");
++            return value && std::strcmp(value, "best") == 0;
++        }
++
+         struct Core
+         {
+             uint64_t mask = 0;  // its logical processors (SMT threads)
+@@ -191,6 +197,112 @@ namespace ps2_thread_placement
+             }();
+             return chosen;
+         }
++
++#if defined(_WIN32)
++        // PS2X_THREAD_PLACEMENT=best (TODO 312): the EE thread alone on the processor's best core, every other thread
++        // of the process (the port's, the sound system's, the graphics driver's) kept off it. Through CPU sets, which
++        // are a preference Windows keeps (not a hard affinity): the EE thread's selected set is its best core, the
++        // process's default set all the other cores. The best core: the highest EfficiencyClass (a P core on Intel's
++        // hybrid processors), then the highest SchedulingClass (Windows' own ranking of the cores, from the
++        // processor's preferred-core order where it has one), then not core 0 (interrupts), then the first. 4 or more
++        // cores needed. The functions are looked up at run time (Windows 10 and later).
++        using GetCpuSetsFn = BOOL(WINAPI *)(PSYSTEM_CPU_SET_INFORMATION, ULONG, PULONG, HANDLE, ULONG);
++        using SetThreadCpuSetsFn = BOOL(WINAPI *)(HANDLE, const ULONG *, ULONG);
++        using SetProcessCpuSetsFn = BOOL(WINAPI *)(HANDLE, const ULONG *, ULONG);
++
++        void placeEeOnBestCore()
++        {
++            HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
++            auto getSets = kernel ? reinterpret_cast<GetCpuSetsFn>(reinterpret_cast<void *>(GetProcAddress(kernel, "GetSystemCpuSetInformation"))) : nullptr;
++            auto setThread = kernel ? reinterpret_cast<SetThreadCpuSetsFn>(reinterpret_cast<void *>(GetProcAddress(kernel, "SetThreadSelectedCpuSets"))) : nullptr;
++            auto setProcess = kernel ? reinterpret_cast<SetProcessCpuSetsFn>(reinterpret_cast<void *>(GetProcAddress(kernel, "SetProcessDefaultCpuSets"))) : nullptr;
++            if (!getSets || !setThread || !setProcess)
++            {
++                std::fprintf(stderr, "[threads] best core: no CPU sets on this Windows - left to Windows\n");
++                return;
++            }
++            ULONG length = 0;
++            getSets(nullptr, 0, &length, GetCurrentProcess(), 0);
++            if (length == 0)
++                return;
++            std::vector<uint8_t> buffer(length);
++            if (!getSets(reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buffer.data()), length, &length, GetCurrentProcess(), 0))
++                return;
++            struct CoreSets
++            {
++                int index = -1;
++                int efficiency = 0;
++                int scheduling = 0;
++                bool hasProcessor0 = false;
++                std::vector<ULONG> ids;
++                std::vector<int> processors;
++            };
++            std::vector<CoreSets> cores;
++            bool otherGroup = false;
++            for (ULONG offset = 0; offset + sizeof(DWORD) * 2 <= length;)
++            {
++                const auto *item = reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION *>(buffer.data() + offset);
++                if (item->Size == 0)
++                    break;
++                if (item->Type == CpuSetInformation)
++                {
++                    if (item->CpuSet.Group != 0)
++                        otherGroup = true;
++                    else
++                    {
++                        CoreSets *core = nullptr;
++                        for (CoreSets &c : cores)
++                            if (c.index == item->CpuSet.CoreIndex)
++                                core = &c;
++                        if (!core)
++                        {
++                            cores.push_back(CoreSets{});
++                            core = &cores.back();
++                            core->index = item->CpuSet.CoreIndex;
++                        }
++                        core->efficiency = std::max<int>(core->efficiency, item->CpuSet.EfficiencyClass);
++                        core->scheduling = std::max<int>(core->scheduling, item->CpuSet.SchedulingClass);
++                        core->hasProcessor0 = core->hasProcessor0 || item->CpuSet.LogicalProcessorIndex == 0;
++                        core->ids.push_back(item->CpuSet.Id);
++                        core->processors.push_back(item->CpuSet.LogicalProcessorIndex);
++                    }
++                }
++                offset += item->Size;
++            }
++            if (otherGroup || cores.size() < 4u)
++            {
++                std::fprintf(stderr, "[threads] best core: %zu cores%s (4 needed in one group) - left to Windows\n", cores.size(),
++                             otherGroup ? " and more than one processor group" : "");
++                return;
++            }
++            const CoreSets *best = nullptr;
++            for (const CoreSets &c : cores)
++            {
++                if (!best || c.efficiency > best->efficiency ||
++                    (c.efficiency == best->efficiency && (c.scheduling > best->scheduling ||
++                                                          (c.scheduling == best->scheduling && best->hasProcessor0 && !c.hasProcessor0))))
++                    best = &c;
++            }
++            std::vector<ULONG> others;
++            for (const CoreSets &c : cores)
++                if (&c != best)
++                    others.insert(others.end(), c.ids.begin(), c.ids.end());
++            const bool processOk = setProcess(GetCurrentProcess(), others.data(), static_cast<ULONG>(others.size())) != 0;
++            const bool threadOk = setThread(GetCurrentThread(), best->ids.data(), static_cast<ULONG>(best->ids.size())) != 0;
++            std::string table;
++            for (const CoreSets &c : cores)
++            {
++                char entry[48];
++                std::snprintf(entry, sizeof(entry), "%s%d:e%d/s%d", table.empty() ? "" : " ", c.index, c.efficiency, c.scheduling);
++                table += entry;
++            }
++            std::string processors;
++            for (int p : best->processors)
++                processors += (processors.empty() ? "" : ",") + std::to_string(p);
++            std::fprintf(stderr, "[threads] best core: the EE thread on core %d (logical processors %s)%s, the rest of the process on the other %zu cores%s; cores (index:efficiency/scheduling) %s\n",
++                         best->index, processors.c_str(), threadOk ? "" : " (failed)", cores.size() - 1u, processOk ? "" : " (failed)", table.c_str());
++        }
++#endif
+     }
+ 
+     void place(Role role)
+@@ -199,6 +311,12 @@ namespace ps2_thread_placement
+         if (r < 0 || r >= kRoles)
+             return;
+ #if defined(_WIN32)
++        if (bestChosen())
++        {
++            if (role == Role::Ee)
++                placeEeOnBestCore();
++            return;
++        }
+         const uint64_t mask = plan().masks[r];
+         if (mask == 0u)
+             return;
+@@ -219,7 +337,7 @@ namespace ps2_thread_placement
+         s.help = "Auto: the game's busiest threads each get a processor core of their own, the ones that pass data to "
+                  "each other on cores that share a cache. Can steady the frame rate on processors with 6 or more cores, "
+                  "Ryzen especially. Off: Windows decides, as before. Takes a restart.";
+-        s.choices = {{"off", "Off"}, {"auto", "Auto"}};
++        s.choices = {{"off", "Off"}, {"auto", "Auto"}}; // (best: an A/B by the environment only - TODO 312, no gain measured)
+         s.defaultValue = "off";
+ #if !defined(_WIN32)
+         s.available = []() { return false; };

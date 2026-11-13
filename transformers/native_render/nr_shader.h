@@ -40,6 +40,7 @@ namespace nr
         Smear,                 // 0x2220 (image 83f1438f69bcf7be): the vertices facing q0 moved by it, colour q1 / q2 (the dash's after-image)
         CityBlocks,            // 0x22c0 (image a31dd0bedf37226c): a box per vertex, one face of it a batch (Cybertron's city, TODO 162)
         ElectricShock,         // 0x1ac0 (image 83f1438f69bcf7be): taShader_ElectricShock - the stunned creature's crackling shell (TODO 290)
+        ViewRamp,              // 0x1e70 (image 6b20c90260be78a4): S = N.V (V towards the eye q0), T and Q the mesh's - the tractor beam's ball (TODO 305)
     };
 
     constexpr uint32_t kMaxRoutines = 6;

@@ -1,7 +1,7 @@
 #pragma once
 // The start-up screens (TODO 110): what the game shows from boot to its main menu, a setting of the
 // F1 overlay's Gameplay page (`TF_START_SCREENS` in settings.ini):
-//   menu  - straight to the main menu (New Game / Continue / Options), the default: the memory card's
+//   menu  - straight to the main menu (New Game / Continue / Options / Extras), the default: the memory card's
 //           notices ("Load Successful", "No save data present", the autosave notice - TODO 116), the
 //           copyright screen, the Atari and Melbourne House logos, the attract film the first start
 //           plays before the title, the title ("press Start") and the story intro after New Game are

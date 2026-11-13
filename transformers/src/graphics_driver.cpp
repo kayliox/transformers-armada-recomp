@@ -4,6 +4,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <string>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -102,6 +104,61 @@ namespace graphics_driver
             return i.vendor != 0u && i.dedicatedMB < 3584u;
         }();
         return low;
+    }
+
+    namespace
+    {
+        // (TODO 295, the user's laptop target: a steady 60, sharper than the PS2) The Low preset's values that differ from
+        // the defaults (mod_menu.cpp's presets: Medium is the default) - draw distance 1x (the console's), enemy detail 1,
+        // no MSAA - and the picture drawn at 67% and enlarged by FSR 1 (the ThinkPad's UHD 620 at 720p: 29 -> 40 fps). Edge
+        // smoothing (FXAA) and texture quality (already Low from the card's memory) stay. While that render scale is the
+        // default the picture keeps at least 480 lines (TF_NATIVE_MIN_LINES; the PS2 shows 448), so it is never softer.
+        struct LowEndDefault
+        {
+            const char *key;
+            const char *value;
+        };
+        constexpr LowEndDefault kLowEndDefaults[] = {{"TF_DRAW_DISTANCE", "1"}, {"TF_ENEMY_DETAIL", "1"}, {"PS2X_GPU_MSAA", "0"},
+                                                   {"TF_NATIVE_RENDER_SCALE", "67"}, {"TF_NATIVE_UPSCALER", "fsr1"}};
+    }
+
+    const char *defaultFor(const char *key, const char *normal)
+    {
+        if (lowEnd())
+            for (const LowEndDefault &d : kLowEndDefaults)
+                if (std::strcmp(d.key, key) == 0)
+                    return d.value;
+        return normal;
+    }
+
+    void applyLowEndDefaults()
+    {
+        if (!lowEnd())
+            return;
+        std::string applied;
+        for (const LowEndDefault &d : kLowEndDefaults)
+        {
+            const char *set = std::getenv(d.key);
+            if (set && *set)
+                continue; // (settings.ini or the environment: the player's)
+#if defined(_WIN32)
+            _putenv_s(d.key, d.value);
+#else
+            setenv(d.key, d.value, 1);
+#endif
+            applied += (applied.empty() ? "" : ", ") + std::string(d.key) + "=" + d.value;
+            if (std::strcmp(d.key, "TF_NATIVE_RENDER_SCALE") == 0 && !(std::getenv("TF_NATIVE_MIN_LINES") && *std::getenv("TF_NATIVE_MIN_LINES")))
+            {
+#if defined(_WIN32)
+                _putenv_s("TF_NATIVE_MIN_LINES", "480");
+#else
+                setenv("TF_NATIVE_MIN_LINES", "480", 1);
+#endif
+                applied += " (at least 480 lines)";
+            }
+        }
+        if (!applied.empty())
+            std::fprintf(stderr, "[graphics] built-in or low-end graphics: the Low preset's %s (not set in settings.ini)\n", applied.c_str());
     }
 
     void writeGpuFile(const std::string &hdDir)

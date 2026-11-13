@@ -11,7 +11,9 @@
 // (taScreenStartMenu, taScreenStartInitCardCheck - both taScreenInGMenu screens, their input is its
 // 0x312480) and the HQ's option screens, and in a level the Mini-Con / Data-Con pickup menus. The HQ draws
 // its lists on slanted 3D hologram panels (Options..., the Exit's "Are you sure?"): there the wheel steps and a
-// click takes the selected entry, no pointing (frame()).
+// click takes the selected entry; once the panel is zoomed in (ultrawide::panelSettled) the cursor also points at the
+// rows, where they were measured to be on the screen (frame()). The saved games' list (taScreenStartNewGameSelect)
+// draws its own bars: its rows are measured too (kSavedGamesVtable).
 //
 // The HQ's own screens (taScreenPrG*: the main ring, character / level / Mini-Con select, the warp
 // gate, the comm screen, the title) are not lists: their input (vtable slot 18; 0x3F7660 the ring's...)
@@ -28,6 +30,7 @@
 
 #include "menu_mouse.h"
 
+#include "pc_settings_row.h"
 #include "playrec.h"
 #include "ultrawide.h"
 
@@ -90,6 +93,74 @@ namespace menu_mouse
         // The front end's lists: taScreenStartLoadGame (0x6C7240) ... taScreenStartMenu (0x6C7640), 0x80 apart.
         constexpr uint32_t kStartScreensFirst = 0x006C7240u, kStartScreensLast = 0x006C7640u;
         constexpr float kStartLastRow = 362.0f, kStartRowStep = 25.0f;
+        // The saved games' list (taScreenStartNewGameSelect, "SAVED GAMES": three slots): the screen draws its bars itself, 44 of the
+        // picture's 480 high and 48 apart, the first from 263 (measured in a shot of it), whatever the window's shape.
+        // The HQ's hologram panels (see frame()): where the 2D list's rows land on the screen once the panel is zoomed in (TF_HQ_PANELS,
+        // ultrawide.cpp), measured in shots of the Options panel: a row's middle at (the 2D's y, from the top, / 448) x B + A of the
+        // picture's height, the same in every widescreen shape (the panel keeps its height; it is about 1.53 of it wide, in the
+        // middle) and another with the game's widescreen off (4:3).
+        constexpr float kPanelWideA = -0.0996f, kPanelWideB = 1.0968f, kPanelWideHalfWidth = 0.574f; // (half width: of the 4:3 area)
+        constexpr float kPanelFourA = -0.1617f, kPanelFourB = 1.12f;
+        // The button bar at the bottom of a menu ("} Select  | Back": the game's glyph codes - } cross, | triangle, < left, > right,
+        // <> the arrows): a click on a word or its glyph presses what it says. The bar's text is the screen's own copy of a
+        // KEY_HELPTEXT_* string, so the texts here are the English ones of the screens listed; the bar is centred and each character
+        // takes about 0.0245 of the picture's height (measured in shots: 181 px of 480 for "} Select  | Back", 326 for the Start
+        // menu's options bar), a segment ending in the middle of the gap before the next glyph.
+        constexpr float kBarTop = 0.85f, kBarBottom = 0.925f, kBarChar = 0.0245f, kBarMargin = 0.04f;
+        const char *barText(uint32_t vtable, bool pausePages)
+        {
+            switch (vtable)
+            {
+            case 0x006C7640u: return "} Select";                                   // the Start menu
+            case 0x006C75C0u: return "<> Change  } Save  | Cancel";                // its Options
+            case 0x006C7440u: return "} Select  | Back";                           // the saved games
+            case 0x006BA050u: return "} Select  | Back";                           // the HQ's Options
+            case 0x006B6FE0u: return pausePages ? "} Select  | Back" : "} Select"; // the pause menu, and our pages on it
+            default: return nullptr;
+            }
+        }
+        // The button a click at `x` (the picture's heights from its middle) on that bar presses, 0 for none.
+        uint16_t barButton(const char *text, float x)
+        {
+            struct Segment
+            {
+                size_t start;
+                uint16_t button;
+                bool arrows;
+            };
+            std::vector<Segment> segments;
+            const size_t n = std::strlen(text);
+            for (size_t i = 0; i < n; ++i)
+            {
+                if (text[i] == '}')
+                    segments.push_back({i, kPadCross, false});
+                else if (text[i] == '|')
+                    segments.push_back({i, kPadTriangle, false});
+                else if (text[i] == '<' && i + 1 < n && text[i + 1] == '>')
+                {
+                    segments.push_back({i, kPadRight, true});
+                    ++i;
+                }
+                else if (text[i] == '<')
+                    segments.push_back({i, kPadLeft, false});
+                else if (text[i] == '>')
+                    segments.push_back({i, kPadRight, false});
+            }
+            const float width = kBarChar * static_cast<float>(n), left = -width * 0.5f;
+            if (segments.empty() || x < left - kBarMargin || x > left + width + kBarMargin)
+                return 0u;
+            for (size_t j = 0; j < segments.size(); ++j)
+            {
+                const float end = j + 1 < segments.size() ? left + (static_cast<float>(segments[j + 1].start) - 1.0f) * kBarChar
+                                                           : left + width + kBarMargin;
+                if (x < end)
+                    return segments[j].arrows && x < left + (static_cast<float>(segments[j].start) + 1.0f) * kBarChar ? kPadLeft
+                                                                                                                         : segments[j].button;
+            }
+            return 0u;
+        }
+        constexpr uint32_t kSavedGamesVtable = 0x006C7440u;
+        constexpr float kSlotsTop = 263.0f / 480.0f, kSlotsStep = 48.0f / 480.0f, kSlotsHigh = 44.0f / 480.0f;
 
         // The HQ's own screens (the header): their update (vtable slot 16), the vtable, how a click steps them.
         enum class Kind : uint8_t
@@ -524,6 +595,18 @@ namespace menu_mouse
             u = testU;
             v = testV;
         }
+        // The button bar at the bottom: a left click on a glyph or its word presses that button.
+        if (left > 0 && !own && listShown && g_holdFrames == 0 && u > -0.5f && v >= kBarTop && v <= kBarBottom)
+            if (const char *bar = barText(menuVtable, pc_settings_row::pausePagesUp()))
+                if (const uint16_t button = barButton(bar, (u - 0.5f) * (4.0f / 3.0f)); button != 0u)
+                {
+                    press(button, kPressFrames);
+                    if (traceOn)
+                        std::fprintf(stderr, "[menu mouse] the button bar \"%s\": the click presses %04x\n", bar, button);
+                    g_lastU = u;
+                    g_lastV = v;
+                    return;
+                }
         if (own)
         {
             // An HQ screen: where the click is decides (the header).
@@ -568,6 +651,45 @@ namespace menu_mouse
         }
         if (panel)
         {
+            // Pointing, once the panel is zoomed in and settled: the row under the cursor is selected (when the cursor moves or
+            // clicks), and a left click on it confirms it. Anywhere else - no row under the cursor, the panel still moving or
+            // zoomed out - it is as before: the wheel steps, a left click takes the selected entry, the right one goes back.
+            int under = -1;
+            if (ultrawide::panelSettled() && u > -0.5f)
+            {
+                const uint8_t *wideByte = getConstMemPtr(rdram, kWidescreenByte);
+                const bool gameWide = wideByte && *wideByte != 0u;
+                const float a = gameWide ? kPanelWideA : kPanelFourA, b = gameWide ? kPanelWideB : kPanelFourB;
+                if (!gameWide || std::fabs(u - 0.5f) <= kPanelWideHalfWidth)
+                {
+                    const float top = real(rdram, menu + kRowTop), step = real(rdram, menu + kRowStep);
+                    const float height2D = real(rdram, menu + kSize2D + 4u);
+                    const int rows = static_cast<int>(std::min<uint32_t>(word(rdram, menu + kCount), 7u));
+                    if (height2D > 0.0f)
+                        for (int i = 0; i < rows; ++i)
+                        {
+                            const float rowTop = (400.0f - top) - static_cast<float>(i + 1) * step; // (y up, as the list lays them out)
+                            const float middle = (height2D - (rowTop - 15.0f)) / height2D * b + a;  // (the row's middle, of the height)
+                            if (std::fabs(v - middle) <= 15.0f / height2D * b)
+                                under = i;
+                        }
+                }
+            }
+            const uint8_t *skippedRows = getConstMemPtr(rdram, menu + kSkipped);
+            const bool pointable = under >= 0 && !(skippedRows && skippedRows[under] != 0u);
+            if (pointable)
+            {
+                const bool movedHere = std::fabs(u - g_lastU) > 1e-4f || std::fabs(v - g_lastV) > 1e-4f;
+                if ((movedHere || left > 0) && word(rdram, menu + kSelected) != static_cast<uint32_t>(under))
+                    if (uint8_t *p = getMemPtr(rdram, menu + kSelected))
+                    {
+                        const uint32_t value = static_cast<uint32_t>(under);
+                        std::memcpy(p, &value, sizeof(value));
+                        playrec::menuSelect(menu + kSelected, value);
+                        if (traceOn)
+                            std::fprintf(stderr, "[menu mouse] an HQ panel: the cursor selects entry %d\n", under);
+                    }
+            }
             if (g_holdFrames == 0)
             {
                 const uint16_t button = left > 0 ? kPadCross : right > 0 ? kPadTriangle : wheel > 0.0f ? kPadUp : wheel < 0.0f ? kPadDown : 0u;
@@ -594,7 +716,17 @@ namespace menu_mouse
             // (TODO 175) The front end's lists (taScreenStart*) lay their bars out the same but draw no bars: their
             // entries are centred text, the last one's middle 362 of the 448 down, 25 apart (measured in shots of the
             // start menu and its options).
-            if (frontEnd)
+            if (frontEnd && menuVtable == kSavedGamesVtable)
+            {
+                // (its bars run the whole width: any u)
+                for (int i = 0; i < count; ++i)
+                {
+                    const float top = kSlotsTop + static_cast<float>(i) * kSlotsStep;
+                    if (v >= top && v <= top + kSlotsHigh)
+                        hovered = i;
+                }
+            }
+            else if (frontEnd)
             {
                 if (u >= 0.15f && u <= 0.85f)
                     for (int i = 0; i < count; ++i)

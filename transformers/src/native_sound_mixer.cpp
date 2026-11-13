@@ -172,6 +172,10 @@ namespace native_sound::mixer
             uint32_t envCounter = 0u;
             uint32_t counter = 0, position = 0;
             int16_t history[4] = {};
+            // (from the tone, the pitch and the envelope, worked out where they are set - prepareVoice -
+            // instead of at each of the 48,000 samples a second)
+            uint32_t pitchReg = 0x1000u;
+            float attackStep = 0.0f, decayStep = 0.0f;
         };
 
         std::map<int32_t, Voice> g_voices;
@@ -183,6 +187,18 @@ namespace native_sound::mixer
             e.release = 0.005f; // a tone without an instrument: no attack, a click-free stop
             return e;
         }();
+
+        // What the mix takes from a voice's tone, pitch and envelope at every sample, by the very
+        // expressions it used there: worked out at each of their writers (setTone, updateVoice; a
+        // save state's voice goes through both), the same values once instead of 48,000 times a
+        // second. (The steps not where the envelope never takes them: no division by 0.)
+        void prepareVoice(Voice &v)
+        {
+            const double dt = 1.0 / kRate;
+            v.pitchReg = v.tone ? pitchRegister(v.tone->sampleRate, v.pitch) : 0x1000u;
+            v.attackStep = v.envelope.attack <= 0.0f ? 0.0f : static_cast<float>(dt / v.envelope.attack);
+            v.decayStep = v.envelope.decay <= 0.0f ? 0.0f : static_cast<float>((1.0 - v.envelope.sustain) * dt / v.envelope.decay);
+        }
 
         // ---- the SPU2's envelope, as SIRENS3 sets it up (2026-11-11) ------------------------------
         // SIRENS3 turns an instrument's ADSR in seconds into the SPU2's ADSR words when it makes the instrument
@@ -435,7 +451,7 @@ namespace native_sound::mixer
                     startPhase(v, Phase::Decay);
                     break;
                 }
-                v.level = std::min(1.0f, v.level + static_cast<float>(dt / v.envelope.attack));
+                v.level = std::min(1.0f, v.level + v.attackStep);
                 if (v.level >= 1.0f)
                     startPhase(v, Phase::Decay);
                 break;
@@ -446,7 +462,7 @@ namespace native_sound::mixer
                     startPhase(v, Phase::Sustain);
                     break;
                 }
-                v.level = std::max(v.envelope.sustain, v.level - static_cast<float>((1.0 - v.envelope.sustain) * dt / v.envelope.decay));
+                v.level = std::max(v.envelope.sustain, v.level - v.decayStep);
                 break;
             case Phase::Release:
                 v.level -= v.releaseStep;
@@ -542,12 +558,14 @@ namespace native_sound::mixer
             uint32_t rowsLeft = 0; // interleave rows still to read
             std::array<int32_t, 8> h1{}, h2{};
             std::array<std::deque<int16_t>, 8> pcmQueue;
+            std::vector<uint8_t> rowBytes; // (readRow's, kept: no allocation for each row)
             uint32_t samplesLeft = 0; // per channel, of the part
 
             // resampling to 48 kHz
             uint32_t counter = 0;
             std::array<std::array<int16_t, 4>, 8> history{};
             double sampleRate = 48000.0;
+            uint32_t pitchReg = 0x1000u; // pitchRegister(sampleRate, pitch), kept at their writers (48 kHz at 1: 1000h)
 
             // movie audio
             std::deque<int16_t> eeLeft, eeRight;
@@ -572,6 +590,7 @@ namespace native_sound::mixer
             s.in.seekg(s.header.dataOffset ? s.header.dataOffset : 0x8000u);
             s.samplesLeft = s.header.samples;
             s.sampleRate = s.header.sampleRate;
+            s.pitchReg = pitchRegister(s.sampleRate, s.pitch);
             s.h1.fill(0);
             s.h2.fill(0);
             for (auto &q : s.pcmQueue)
@@ -583,7 +602,8 @@ namespace native_sound::mixer
         bool readRow(Stream &s)
         {
             const data::StreamHeader &h = s.header;
-            std::vector<uint8_t> row(static_cast<size_t>(h.interleave) * h.channels);
+            std::vector<uint8_t> &row = s.rowBytes; // (every byte read over below, or the row is not used)
+            row.resize(static_cast<size_t>(h.interleave) * h.channels);
             if (!s.in.read(reinterpret_cast<char *>(row.data()), static_cast<std::streamsize>(row.size())))
                 return false;
             for (uint32_t c = 0; c < h.channels && c < 8; ++c)
@@ -705,6 +725,8 @@ namespace native_sound::mixer
             10246, 0, -2960, 0, 1332, 0, -616, 0, 266, 0, -103, 0, 35, 0, -10, 0, 2, 0, -1,
         };
         constexpr uint32_t kReverbTapAt[21] = {0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 19, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38};
+        // The filters' span: the 39 newest samples of a ring (kReverbTaps).
+        constexpr uint32_t kReverbSpan = static_cast<uint32_t>(std::size(kReverbTaps));
 
         int32_t reverbFilter(const int16_t *history)
         {
@@ -724,6 +746,19 @@ namespace native_sound::mixer
             uint64_t sample = 0;
             uint32_t position = 0;
             int16_t input[2][128] = {}, output[2][128] = {};
+            // The work-area places one sample of the effect reads and writes, per channel, relative to
+            // the area's position: reduced modulo the area's size once, when a preset is set (prepare),
+            // instead of by a 64-bit division at each of the 14 a sample makes. (p + rel) mod size is
+            // (p + (rel mod size)) mod size: the same places, at every position.
+            enum Spot
+            {
+                SameSrc, SamePrev, SameDst, DiffSrc, DiffPrev, DiffDst, Comb1, Comb2, Comb3, Comb4, Apf1Old, Apf1Dst, Apf2Old, Apf2Dst, kSpots
+            };
+            std::array<std::array<size_t, kSpots>, 2> spots{};
+            size_t areaPos = 0; // (sample / 2) % area.size(): set by prepare, moved on with sample while the effect is on
+            // Samples in a row with the effect off since it was last on or its rings' position started
+            // again (up to kReverbSpan): from kReverbSpan on, the output rings' window holds only 0s.
+            uint32_t quiet = 0;
 
             void loadPresets()
             {
@@ -751,6 +786,7 @@ namespace native_sound::mixer
                     pr.areaSamples = units * 4u; // 8 bytes = 4 samples
                     presets.push_back(pr);
                 }
+                prepare(); // (presets read again with one in force: its places again)
             }
 
             void setMode(int m)
@@ -760,6 +796,45 @@ namespace native_sound::mixer
                 mode = (m >= 0 && m < static_cast<int>(presets.size())) ? m : 0;
                 area.assign(mode ? std::max<uint32_t>(presets[static_cast<size_t>(mode)].areaSamples, 16u) : 0u, 0);
                 position = 0;
+                quiet = 0; // (the rings' position starts again: their 0s are counted again)
+                prepare();
+            }
+
+            // The places of the preset in force and the area position for the sample count, after a
+            // change of preset or area; nothing while the effect is off.
+            void prepare()
+            {
+                if (mode == 0 || area.empty() || static_cast<size_t>(mode) >= presets.size())
+                    return;
+                const Preset &pr = presets[static_cast<size_t>(mode)];
+                const int64_t size = static_cast<int64_t>(area.size());
+                const auto off = [&](Reg r) { return static_cast<int64_t>(pr.regs[r]) * 4; };
+                const auto wrap = [&](int64_t rel)
+                {
+                    const int64_t w = rel % size;
+                    return static_cast<size_t>(w < 0 ? w + size : w);
+                };
+                for (uint32_t right = 0; right < 2u; ++right)
+                {
+                    std::array<size_t, kSpots> &place = spots[right];
+                    const int64_t sameDst = off(right ? mRSAME : mLSAME), diffDst = off(right ? mRDIFF : mLDIFF);
+                    const int64_t apf1Dst = off(right ? mRAPF1 : mLAPF1), apf2Dst = off(right ? mRAPF2 : mLAPF2);
+                    place[SameSrc] = wrap(off(right ? dRSAME : dLSAME));
+                    place[SamePrev] = wrap(sameDst - 1);
+                    place[SameDst] = wrap(sameDst);
+                    place[DiffSrc] = wrap(off(right ? dLDIFF : dRDIFF));
+                    place[DiffPrev] = wrap(diffDst - 1);
+                    place[DiffDst] = wrap(diffDst);
+                    place[Comb1] = wrap(off(right ? mRCOMB1 : mLCOMB1));
+                    place[Comb2] = wrap(off(right ? mRCOMB2 : mLCOMB2));
+                    place[Comb3] = wrap(off(right ? mRCOMB3 : mLCOMB3));
+                    place[Comb4] = wrap(off(right ? mRCOMB4 : mLCOMB4));
+                    place[Apf1Old] = wrap(apf1Dst - off(dAPF1));
+                    place[Apf1Dst] = wrap(apf1Dst);
+                    place[Apf2Old] = wrap(apf2Dst - off(dAPF2));
+                    place[Apf2Dst] = wrap(apf2Dst);
+                }
+                areaPos = static_cast<size_t>((sample >> 1u) % static_cast<uint64_t>(size));
             }
 
             // One 48 kHz sample in and out (the effect runs on one channel a sample).
@@ -776,16 +851,15 @@ namespace native_sound::mixer
                 {
                     const Preset &pr = presets[static_cast<size_t>(mode)];
                     const auto coef = [&](Reg r) { return static_cast<int32_t>(static_cast<int16_t>(pr.regs[r])); };
-                    const auto off = [&](Reg r) { return static_cast<int64_t>(pr.regs[r]) * 4; };
-                    const int64_t size = static_cast<int64_t>(area.size());
-                    const int64_t pos = static_cast<int64_t>((sample >> 1u) % static_cast<uint64_t>(size));
-                    const auto idx = [&](int64_t rel)
+                    const size_t size = area.size();
+                    const std::array<size_t, kSpots> &spot = spots[right];
+                    const auto idx = [&](Spot s)
                     {
-                        int64_t w = (pos + rel) % size;
-                        return static_cast<size_t>(w < 0 ? w + size : w);
+                        const size_t w = areaPos + spot[s];
+                        return w >= size ? w - size : w;
                     };
-                    const auto rd = [&](int64_t rel) { return static_cast<int32_t>(area[idx(rel)]); };
-                    const auto wr = [&](int64_t rel, int32_t v) { area[idx(rel)] = static_cast<int16_t>(v); };
+                    const auto rd = [&](Spot s) { return static_cast<int32_t>(area[idx(s)]); };
+                    const auto wr = [&](Spot s, int32_t v) { area[idx(s)] = static_cast<int16_t>(v); };
                     const auto mul = [](int32_t a, int32_t b) { return (a * b) >> 15; };
                     const int32_t in = clamp16(mul(clamp16(reverbFilter(&input[right][first]) >> 15), coef(right ? vRIN : vLIN)));
                     const int32_t iir = coef(vIIR), wall = coef(vWALL);
@@ -795,33 +869,41 @@ namespace native_sound::mixer
                         const int32_t stored = clamp16(mul(clamp16(mixed - previous), iir) + previous);
                         return iir == -0x8000 ? clamp16(-stored) : stored;
                     };
-                    const int64_t sameDst = off(right ? mRSAME : mLSAME), diffDst = off(right ? mRDIFF : mLDIFF);
-                    const int32_t sameSrc = rd(off(right ? dRSAME : dLSAME));
-                    const int32_t samePrev = rd(sameDst - 1);
-                    const int32_t diffSrc = rd(off(right ? dLDIFF : dRDIFF));
-                    wr(sameDst, reflect(in, sameSrc, samePrev));
-                    const int32_t diffPrev = rd(diffDst - 1);
-                    const int32_t comb1 = rd(off(right ? mRCOMB1 : mLCOMB1));
-                    wr(diffDst, reflect(in, diffSrc, diffPrev));
-                    const int32_t comb2 = rd(off(right ? mRCOMB2 : mLCOMB2));
-                    const int32_t comb3 = rd(off(right ? mRCOMB3 : mLCOMB3));
-                    const int32_t comb4 = rd(off(right ? mRCOMB4 : mLCOMB4));
-                    const int64_t apf1Dst = off(right ? mRAPF1 : mLAPF1), apf2Dst = off(right ? mRAPF2 : mLAPF2);
-                    const int32_t apf1Old = rd(apf1Dst - off(dAPF1)), apf2Old = rd(apf2Dst - off(dAPF2));
+                    const int32_t sameSrc = rd(SameSrc);
+                    const int32_t samePrev = rd(SamePrev);
+                    const int32_t diffSrc = rd(DiffSrc);
+                    wr(SameDst, reflect(in, sameSrc, samePrev));
+                    const int32_t diffPrev = rd(DiffPrev);
+                    const int32_t comb1 = rd(Comb1);
+                    wr(DiffDst, reflect(in, diffSrc, diffPrev));
+                    const int32_t comb2 = rd(Comb2);
+                    const int32_t comb3 = rd(Comb3);
+                    const int32_t comb4 = rd(Comb4);
+                    const int32_t apf1Old = rd(Apf1Old), apf2Old = rd(Apf2Old);
                     int32_t out = clamp16(mul(comb1, coef(vCOMB1)) + mul(comb2, coef(vCOMB2)) + mul(comb3, coef(vCOMB3)) + mul(comb4, coef(vCOMB4)));
                     const int32_t a1v = coef(vAPF1), a2v = coef(vAPF2);
                     const int32_t apf1 = clamp16(out - mul(a1v, apf1Old));
                     out = clamp16(mul(apf1, a1v) + apf1Old);
                     const int32_t apf2 = clamp16(out - mul(a2v, apf2Old));
                     out = clamp16(mul(apf2, a2v) + apf2Old);
-                    wr(apf1Dst, apf1);
-                    wr(apf2Dst, apf2);
+                    wr(Apf1Dst, apf1);
+                    wr(Apf2Dst, apf2);
                     value = out;
+                    if (right) // (the area moves on one place a left-right pair)
+                        areaPos = areaPos + 1u == size ? 0u : areaPos + 1u;
+                    quiet = 0;
                 }
+                else if (quiet < kReverbSpan)
+                    ++quiet;
                 output[right][at] = output[right][at + 64u] = static_cast<int16_t>(value);
                 output[right ^ 1u][at] = output[right ^ 1u][at + 64u] = 0;
-                outLeft = clamp16(reverbFilter(&output[0][first]) >> 14);
-                outRight = clamp16(reverbFilter(&output[1][first]) >> 14);
+                if (quiet >= kReverbSpan)
+                    outLeft = outRight = 0; // (what the filters give then: their window holds only the 0s written since)
+                else
+                {
+                    outLeft = clamp16(reverbFilter(&output[0][first]) >> 14);
+                    outRight = clamp16(reverbFilter(&output[1][first]) >> 14);
+                }
                 ++sample;
             }
         };
@@ -872,6 +954,7 @@ namespace native_sound::mixer
         // (TODO 213) toPad: the game alerts go to padL / padR instead of the PC's mix (pad_speaker.h).
         void mixVoices(float &dryL, float &dryR, float &sendL, float &sendR, bool toPad, float &padL, float &padR)
         {
+            const bool req = reqLog(); // (fixed for the process: read once a sample, not once a voice)
             for (auto &[handle, v] : g_voices)
             {
                 if (v.phase == Phase::Off || !v.tone)
@@ -882,14 +965,19 @@ namespace native_sound::mixer
                     reqEnd(handle, v, "released");
                     continue;
                 }
-                const uint32_t pitch = pitchRegister(v.tone->sampleRate, v.pitch);
+                // A voice that cannot be heard this sample - its envelope at 0, or both volume words 0 -
+                // would add exactly 0 to every bus: it is not interpolated or added (its envelope, counter
+                // and data go on all the same). Only where that is certain: a level over 1 or not a
+                // number, or a dry or send level not a number (never so from the game), take the long way.
+                const bool silent = (v.level == 0.0f || (v.gainLeft == 0.0f && v.gainRight == 0.0f && std::fabs(v.level) <= 1.0f)) &&
+                                    !std::isnan(v.dry) && !std::isnan(v.send);
                 // (With the SPU2's envelope the level is the hardware's own: an instrument whose decay is the fastest (most of them,
                 // and every plain tone: 0D0Fh) drops to half on the step after its attack - the 0.5 that kOutputGain stood in for
                 // until now, as measured on the emulated SPU2. Its voices so take x2 here: the mix as the emulated SPU2's,
                 // instrument by instrument, where the ramps had every voice at the same level.)
                 const float spuGain = spu2Envelope() ? 2.0f : 1.0f;
-                const float sample = static_cast<float>(gauss(v.history, v.counter)) * v.level * spuGain;
-                v.counter += pitch;
+                const float sample = silent ? 0.0f : static_cast<float>(gauss(v.history, v.counter)) * v.level * spuGain;
+                v.counter += v.pitchReg;
                 bool ended = false;
                 while (v.counter >= 0x1000u && !ended)
                 {
@@ -904,8 +992,10 @@ namespace native_sound::mixer
                 if (!soloHeard(v))
                     continue;
                 const float l = sample * v.gainLeft, r = sample * v.gainRight;
-                if (reqLog())
+                if (req)
                     v.peak = std::max(v.peak, v.level * std::max(std::fabs(v.gainLeft), std::fabs(v.gainRight)));
+                if (silent)
+                    continue;
                 if (toPad && v.toPad)
                 {
                     padL += l * v.dry;
@@ -962,6 +1052,8 @@ namespace native_sound::mixer
                 float l = 0.0f, r = 0.0f;
                 for (uint32_t c = 0; c < channels; ++c)
                 {
+                    if (s.left[c] == 0.0f && s.right[c] == 0.0f)
+                        continue; // (a channel at 0 on both sides would add exactly 0: not interpolated)
                     const float v = static_cast<float>(gauss(s.history[c].data(), s.counter));
                     l += v * s.left[c];
                     r += v * s.right[c];
@@ -971,7 +1063,7 @@ namespace native_sound::mixer
                 const float g = s.channelLoudness ? 1.0f : s.loudness;
                 (toPad && s.toPad ? padL : dryL) += l * g;
                 (toPad && s.toPad ? padR : dryR) += r * g;
-                s.counter += pitchRegister(s.sampleRate, s.pitch);
+                s.counter += s.pitchReg;
                 while (s.counter >= 0x1000u)
                 {
                     s.counter -= 0x1000u;
@@ -986,6 +1078,8 @@ namespace native_sound::mixer
     }
 
     // ---- the disc -------------------------------------------------------------------------
+    void useDisc(const std::filesystem::path &cdRoot) { g_disc = cdRoot; }
+
     void setDisc(const std::filesystem::path &cdRoot)
     {
         g_disc = cdRoot;
@@ -1082,6 +1176,27 @@ namespace native_sound::mixer
             g_libraries.erase(kFallbackLibrary);
     }
 
+    bool loadModLibrary(const std::string &path)
+    {
+        // (below the fallback, -1: the lookups go from the highest handle down)
+        static std::map<std::string, int32_t> handles;
+        auto it = handles.find(path);
+        if (it == handles.end())
+            it = handles.emplace(path, -16 - static_cast<int32_t>(handles.size())).first;
+        data::ToneLibrary lib;
+        if (!data::loadToneLibrary(g_archive, path, lib))
+        {
+            std::fprintf(stderr, "[native sound] mod library '%s' not loaded\n", path.c_str());
+            return false;
+        }
+        auto &slot = g_libraries[it->second];
+        if (slot)
+            forgetTones(*slot);
+        slot = std::make_unique<data::ToneLibrary>(std::move(lib));
+        std::fprintf(stderr, "[native sound] mod library %d '%s' loaded (%zu tones)\n", it->second, path.c_str(), slot->tones.size());
+        return true;
+    }
+
     // ---- voices -----------------------------------------------------------------------------
     void createVoice(int32_t handle) { g_voices[handle] = Voice{}; }
     void destroyVoice(int32_t handle)
@@ -1130,6 +1245,7 @@ namespace native_sound::mixer
                 std::fprintf(stderr, "[native sound] tone '%s' not found; libraries:%s\n", name.c_str(), have.c_str());
             }
         }
+        prepareVoice(v);
     }
 
     void updateVoice(int32_t handle, uint16_t volLeft, uint16_t volRight, float pitch, int32_t priority, float send, float dry)
@@ -1144,6 +1260,7 @@ namespace native_sound::mixer
         v.updated = true;
         v.send = std::clamp(send, 0.0f, 1.0f);
         v.dry = std::clamp(dry, 0.0f, 1.0f);
+        prepareVoice(v);
     }
 
     // (TODO 290 (10), the user's choice 2026-11-11) The vehicle's engine loops fade out over 0.15 s when the game keys
@@ -1536,6 +1653,7 @@ namespace native_sound::mixer
         Stream &s = g_streams[handle];
         if (std::isfinite(pitch) && pitch > 0.0f)
             s.pitch = pitch;
+        s.pitchReg = pitchRegister(s.sampleRate, s.pitch);
         (void)loudness;
     }
 
@@ -1740,13 +1858,16 @@ namespace native_sound::mixer
     {
         if (frames == 0)
             return;
-        std::vector<int16_t> out(frames * 2u);
+        // (kept from mix to mix, as pcDelay below: native_sound.cpp lets one caller at a time into the mixer)
+        static std::vector<int16_t> out;
+        out.resize(frames * 2u);
         // (TODO 213) The DualSense's speaker, while one plays (pad_speaker.h): the game alerts instead of the PC.
         const bool padLive = pad_speaker::live();
         const pad_speaker::Mode padMode = pad_speaker::mode();
         const bool alertsToPad = padLive && padMode == pad_speaker::Mode::Alerts;
         const float padGain = pad_speaker::volume();
-        std::vector<int16_t> pad(padLive && padMode != pad_speaker::Mode::Off ? frames * 2u : 0u);
+        static std::vector<int16_t> pad;
+        pad.resize(padLive && padMode != pad_speaker::Mode::Off ? frames * 2u : 0u);
         for (size_t i = 0; i < frames; ++i)
         {
             float dryL = 0.0f, dryR = 0.0f, sendL = 0.0f, sendR = 0.0f, padL = 0.0f, padR = 0.0f;
@@ -2002,6 +2123,7 @@ namespace native_sound::mixer
                 s.loudness = unbits(loudness);
                 s.channelLoudness = channelLoudness != 0;
                 s.pitch = unbits(pitch);
+                s.pitchReg = pitchRegister(s.sampleRate, s.pitch);
                 for (int c = 0; c < 8; ++c)
                 {
                     s.left[static_cast<size_t>(c)] = unbits(lr[2 * c]);

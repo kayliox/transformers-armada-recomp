@@ -21,6 +21,7 @@
 #include "camera_mode.h"
 #include "distance_meter.h"
 #include "photo_mode.h"
+#include "static_aim.h" // (TODO 322: the crosshair pinned)
 #include "port_ext.h"
 
 #include "ps2_runtime.h"
@@ -106,8 +107,29 @@ namespace small_crosshair
 
     bool enabled() { return g_enabled.load(std::memory_order_relaxed); }
 
+    // TF_XHAIR_LOG=1 (tests): where the cross is, once a second, as a share of the window (TODO 292 B: TF_XHAIR_LOG=<ms> that
+    // often instead) - and (TODO 322) where the game's crosshair model is in this frame's camera, the original crosshair's
+    // place; with the original crosshair the small cross's is -1.
+    void logPlaces(float x, float y)
+    {
+        static const double every = std::getenv("TF_XHAIR_LOG") ? (std::atof(std::getenv("TF_XHAIR_LOG")) > 1.0 ? std::atof(std::getenv("TF_XHAIR_LOG")) / 1000.0 : 1.0) : -1.0;
+        if (every <= 0.0)
+            return;
+        static double last = 0.0;
+        if (GetTime() - last < every)
+            return;
+        last = GetTime();
+        const float w = static_cast<float>(GetScreenWidth()), h = static_cast<float>(GetScreenHeight());
+        float mx = -w, my = -h, mp[3];
+        if (photo_mode::crosshair(mp))
+            photo_mode::project(mp, w, h, ps2_host_display::displayAspect(), mx, my);
+        std::fprintf(stderr, "[crosshair] at %.4f, %.4f of the window; the model at %.4f, %.4f\n", x / w, y / h, mx / w, my / h);
+    }
+
     void draw(PS2Runtime &runtime)
     {
+        if (!enabled() && !photo_mode::active() && !camera_mode::inVehicle())
+            logPlaces(-static_cast<float>(GetScreenWidth()), -static_cast<float>(GetScreenHeight())); // (TODO 322, tests: the original crosshair's place)
         if (!enabled() || photo_mode::active() || camera_mode::inVehicle() || distance_meter::menuOpen(runtime)) // (none in the car or a menu)
             return;
         const uint32_t crosshair = distance_meter::crosshairObject(runtime);
@@ -118,24 +140,25 @@ namespace small_crosshair
             return;
         if (ext::hideCrosshair(rdram)) // (an extension's, port_ext.h: TODO 92, none on the jet bike)
             return;
-        float point[3], x = 0.0f, y = 0.0f;
-        if (!photo_mode::crosshair(point) ||
-            !photo_mode::project(point, static_cast<float>(GetScreenWidth()), static_cast<float>(GetScreenHeight()),
-                                 ps2_host_display::displayAspect(), x, y))
-            return;
-        // TF_XHAIR_LOG=1 (tests): where the cross is, once a second, as a share of the window
-        // (TODO 292 B: TF_XHAIR_LOG=<ms> that often instead)
-        if (static const double every = std::getenv("TF_XHAIR_LOG") ? (std::atof(std::getenv("TF_XHAIR_LOG")) > 1.0 ? std::atof(std::getenv("TF_XHAIR_LOG")) / 1000.0 : 1.0) : -1.0;
-            every > 0.0)
+        float point[3], x = 0.0f, y = 0.0f, share = 0.0f;
+        if (static_aim::pinned(share))
         {
-            static double last = 0.0;
-            if (GetTime() - last >= every)
-            {
-                last = GetTime();
-                std::fprintf(stderr, "[crosshair] at %.3f, %.3f of the window\n", x / static_cast<float>(GetScreenWidth()),
-                             y / static_cast<float>(GetScreenHeight()));
-            }
+            // (TODO 322) Mouse and keyboard: one point of the window, never a projection - the picture's middle across, the
+            // still crosshair's height up (the share of half the picture's height above its middle, where photo_mode puts the
+            // game's model on the camera's ray). The same point every picture.
+            const float w = static_cast<float>(GetScreenWidth()), h = static_cast<float>(GetScreenHeight());
+            const float aspect = ps2_host_display::displayAspect();
+            if (!(aspect > 0.0f))
+                return;
+            const float picW = std::min(w, h * aspect), picH = picW / aspect;
+            x = w * 0.5f;
+            y = h * 0.5f - share * picH * 0.5f;
         }
+        else if (!photo_mode::crosshair(point) ||
+                 !photo_mode::project(point, static_cast<float>(GetScreenWidth()), static_cast<float>(GetScreenHeight()),
+                                      ps2_host_display::displayAspect(), x, y))
+            return;
+        logPlaces(x, y);
 
         // The Mini-Con weapon's state: equipped (an add-on), in range.
         const bool addOn = word(rdram, crosshair + kAddOnA) != 0u || word(rdram, crosshair + kAddOnB) != 0u;

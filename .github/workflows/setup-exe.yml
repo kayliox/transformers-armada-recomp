@@ -21,6 +21,8 @@ concurrency:
 
 jobs:
   build:
+    # (the public repository only: the private home repository's Actions minutes are not spent on it)
+    if: github.repository == 'kayliox/transformers-armada-recomp'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

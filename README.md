@@ -126,6 +126,10 @@ Some bugs are in the original game on the PlayStation 2 too. This version fixes 
   a spot on the cliff edge that the game places only on a first visit, so a finished Antarctica stays silent to the
   end. Confirmed on the original game. Here a finished Antarctica keeps that spot, for the music only, without the
   story's radio call. `TF_REVISIT_MUSIC=0` in settings.ini gives the PS2's behaviour back.
+- **Deep Amazon: skip the temple, and Cyclonus's fight plays the temple's music.** The level's music moves one step
+  at certain spots (the temple, the fight), so a spot you skip leaves the music a step behind. Confirmed on the
+  original game. Here each of those spots brings in its own music, whichever way you came. The same holds for
+  Antarctica's cliff edge and Starscream's fight. `TF_MUSIC_STEPS=0` in settings.ini gives the PS2's behaviour back.
 - **Decepticlones dropped by a dropship can hang frozen in the air.** If a cutscene that freezes the enemies (for
   example a Mini-Con's discovery) starts while a dropship is still carrying Decepticlones in, the game wipes their
   "fall when dropped" instruction, so they stay in mid-air when the ship lets them go. Rare on the PS2 too. Here the
@@ -152,6 +156,9 @@ A few things behave differently from the original on purpose. Each one can be tu
   French, German, Spanish, Italian), works too, experimentally. The Japanese release does not work yet.
 
 The setup installs everything else for you (Git, Python and the Visual Studio C++ build tools).
+
+**On Linux or a Steam Deck** the game can also run natively, without Windows: see
+[Linux and Steam Deck (native)](#linux-and-steam-deck-native) below.
 
 ## Install
 
@@ -193,9 +200,12 @@ starting it to open the setup's window instead (updates, repair).
 Added the game to Steam before? An entry that points at `tfa-setup.exe` or `TransformersRecomp.exe` keeps working.
 If you move or copy the game's folder, point the entry at `Transformers Armada.exe` in the new place.
 
-**Steam Deck**
+**Steam Deck (the Windows build, under Proton)**
 
-The game has to be built on a Windows PC first: the setup needs Windows to compile it from your disc.
+These steps play the Windows build through Proton. The game also runs natively on Linux and SteamOS, without
+Proton: build it in a container and play it there, as in [Linux and Steam Deck (native)](#linux-and-steam-deck-native)
+below. For this Proton route, build the Windows version on a Windows PC first: its setup compiles the game from your
+disc.
 
 1. On your Windows PC, install the game with the setup as described above, and play it once.
 2. Copy the **whole** folder you installed into (the one with `Transformers Armada.exe` in it) to the Steam Deck, for
@@ -215,7 +225,36 @@ Tips for the Deck:
 - The settings menu opens with **F1**, or by holding **View** and **Menu** together on the Deck's controls (the
   Deck's buttons work like an Xbox controller).
 - In **F1 > Graphics**, the **Low** or **Medium** preset suits the Deck best.
-- A native Linux and Steam Deck version is planned; until then the game runs through Proton.
+- You can also run the game natively on the Deck, without Proton: see the next section.
+
+## Linux and Steam Deck (native)
+
+The game also builds as a native Linux program, with both renderers: the native one (as on Windows, drawn through
+Vulkan) and "Emulated (PS2)". HD textures and sharp fonts work too: make them with `./tools/make_hd_textures.sh`.
+
+**On a Linux PC:**
+
+1. Get the code: `git clone --recursive https://github.com/kayliox/transformers-armada-recomp`
+2. In that folder run `./setup.sh --iso "/path/to/Transformers (USA).iso"`. If tools are missing, it lists them with
+   the command that installs them on your distribution; install them and run it again. The first build takes about
+   15 to 25 minutes.
+3. Play with `./play.sh`. Update with `./update.sh`, or in the game with **F1 > About > Update now**.
+
+**On a Steam Deck:** SteamOS cannot install the build tools: its system is read-only and has no compiler. Build it on
+another Linux PC, or on the Deck inside a container (Desktop Mode, Konsole):
+
+```sh
+distrobox create -n tfa-build -i ubuntu:24.04
+distrobox enter tfa-build        # from here on, in the container: install the tools setup.sh lists, then
+./setup.sh --iso "/path/to/Transformers (USA).iso"
+```
+
+The container builds the game and nothing else: the build puts the FFmpeg libraries it found beside the executable,
+so the folder plays on SteamOS whichever machine or container built it. Add `play.sh` to Steam as a non-Steam game
+(**Games > Add a Non-Steam Game to My Library > Browse**, file type **All Files**) and start it from Gaming Mode.
+
+A save state is tied to the memory layout of the build that made it, so do not count on moving one between the
+Windows and Linux builds; the memory cards move freely (see [docs/PLAYING.md](docs/PLAYING.md#function-keys)).
 
 ## Controls
 
@@ -253,6 +292,10 @@ Everything you need is in the folder you installed into:
 
 To back up your saves, copy the `saves` folder. To move the game to another drive or PC, or to a Steam Deck, copy
 the whole folder you installed into.
+
+The native Linux build has no `saves`, `logs` or `data` folders: everything stays in the checkout. `settings.ini` is
+in its root, the disc's files in `game`, the memory cards in `game/mc0` and `game/mc1`, save states in `states`, logs
+in `runs`, and F1 > Saves' backups and exports in `Saves`.
 
 **Logs, for a bug report:** in the game, **F1 > About > "Make a report"** makes one zip file with the logs, your
 settings and your PC's details (no saves, nothing of the game's files) and opens its folder. Attach that file. If

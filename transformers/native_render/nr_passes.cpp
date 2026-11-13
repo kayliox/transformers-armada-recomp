@@ -10,19 +10,43 @@
 // 7 the lit metal's reflection (0x2800, context 1); 8 its lit base (context 2); 9 an instance's
 // (0x1ac0 of bec5: the vertex's times the instance's tint).
 // ST modes: 0 the mesh's; 1 the position through q0-q3 (0x21b0); 2 a 2x3 matrix (0x1ac0: scrolling);
-// 3 the sphere map of the view reflected about the normal (0x2800).
+// 3 the sphere map of the view reflected about the normal (0x2800); ... 9 S = N.V, T the mesh's (0x1e70 of 6b20).
 // Alpha modes: 0 the colour's; 1 the distance from a plane (0x3660), 0 to 128.
 #include "nr_types.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cmath>
 #include <cstdlib>
+#include <cstdint>
 #include <cstring>
 
 namespace nr
 {
+    namespace
+    {
+        constexpr int kSmoothTrails = 2; // ("smooth" and unset: the look chosen for the default - TODO 305 (7))
+        std::atomic<int> g_motionTrails{-1}; // (-1: not read yet - TF_MOTION_TRAILS at the first draw)
+    }
+    void setMotionTrails(int mode)
+    {
+        g_motionTrails.store(mode < 0 || mode > 3 ? kSmoothTrails : mode, std::memory_order_relaxed); // (-1: "smooth")
+    }
+    int motionTrails()
+    {
+        int m = g_motionTrails.load(std::memory_order_relaxed);
+        if (m < 0)
+        {
+            const char *v = std::getenv("TF_MOTION_TRAILS");
+            const std::string s = v ? v : "";
+            m = s == "original" ? 0 : s == "soft" ? 1 : s == "ghost" ? 2 : s == "off" ? 3 : kSmoothTrails;
+            g_motionTrails.store(m, std::memory_order_relaxed);
+        }
+        return m;
+    }
+
     namespace
     {
         void copy(float *dst, const Qword &q) { std::memcpy(dst, q.v, 16u); }
@@ -123,7 +147,13 @@ namespace nr
             {
                 Pass reflection = basePass(d);
                 reflection.mode[0] = 7.0f;
-                reflection.mode[1] = 3.0f;
+                // (TODO 305 (4)) The sphere map's coordinates as the GS takes them: 0x2800 sends S, T = (0.5 + 0.5 E.xy /
+                // (Ez + 1)) * Q and Q' = (Ez + 1) * Q, the GS dividing S and T by Q' at each pixel - shader mode 9. Divided
+                // at the vertex (mode 3, TF_NATIVE_REFLECTQ=0: as before), a vertex whose reflection points nearly away
+                // from the eye (Ez ~ -1) gave its triangle coordinates far out on the map: single triangles of the
+                // reflective characters flashed bright as they moved.
+                static const bool vertexDivide = std::getenv("TF_NATIVE_REFLECTQ") && *std::getenv("TF_NATIVE_REFLECTQ") == '0';
+                reflection.mode[1] = vertexDivide ? 3.0f : 9.0f;
                 for (int q = 0; q < 11; ++q)
                     copy(reflection.p[q], lighting[q]);
                 copy(reflection.p[11], output[16]);
@@ -182,6 +212,43 @@ namespace nr
         // unmoved normal) - 0 in most frames, so it is not seen (it drew as a white chrome dome, the
         // colour and alpha 1, ALPHA 0x48 adding it in). The blocks are adjacent: 0x2030's q9-q11 are
         // 0x25e0's q0-q2.
+        // (TODO 305) The tractor beam's ball (image 6b20: 0x1e70 then 0x25e0, before 0x1410): ST mode 10, S the normal dotted
+        // with the direction to the eye (q0 of 0x1e70, in the mesh's space) plus q0.w, T the mesh's. 0x25e0 then writes
+        // its q1 as the colour and as the alpha q2.w * max(R . q0, 0) + q2.z, R the register 0x2030 leaves the moved
+        // normal in - here 0x1e70's q1 as integers (FTOI0), read as floats: denormals, so 0 - each value FTOI0 to the
+        // packet's low eight bits (tools/vu1_trace.py on captured batches; the packets' alpha is 0: with ALPHA 0x48,
+        // Cs * As + Cd, the ball adds nothing - on the PS2 it is not seen).
+        if (const Qword *ramp = sh.blockOf(Routine::ViewRamp))
+        {
+            Pass p = basePass(d);
+            p.mode[1] = 10.0f; // (ST mode 10: 9 is the lit metal's per-pixel Q, TODO 305 (4))
+            copy(p.p[8], ramp[0]);
+            if (const Qword *shade = sh.blockOf(Routine::MembraneShade))
+            {
+                auto ftoi0 = [](float v) -> int32_t {
+                    if (!(v == v))
+                        return 0;
+                    return v >= 2147483520.0f ? INT32_MAX : v <= -2147483648.0f ? INT32_MIN : static_cast<int32_t>(v);
+                };
+                auto vuFloat = [](int32_t bits) { // (an integer register read by an FMAC: denormals are 0)
+                    float f = 0.0f;
+                    std::memcpy(&f, &bits, 4u);
+                    if (std::isinf(f) || std::isnan(f))
+                        return std::copysign(3.402823466e38f, f); // (exponent 255: +-FLT_MAX)
+                    return std::fpclassify(f) == FP_SUBNORMAL ? 0.0f : f;
+                };
+                float rl = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                    rl += vuFloat(ftoi0(ramp[1].v[k])) * shade[0].v[k];
+                const int32_t alpha = ftoi0(shade[2].v[3] * std::max(rl, 0.0f) + shade[2].v[2]);
+                p.mode[0] = 1.0f;
+                for (int k = 0; k < 3; ++k)
+                    p.p[0][k] = static_cast<float>(ftoi0(shade[1].v[k]) & 0xFF);
+                p.p[0][3] = static_cast<float>(alpha & 0xFF);
+            }
+            out.push_back(p);
+            return;
+        }
         if (const Qword *wave = sh.blockOf(Routine::MembraneWave))
             if (sh.blockOf(Routine::MembraneShade))
             {
@@ -227,16 +294,60 @@ namespace nr
         // moved end), ST the mesh's; drawn with the TEX0_1 / ALPHA_1 / TEST_1 the list writes for it
         // (the character's texture, the usual blend: nr_capture.cpp expandFrame). TF_NATIVE_SMEAR=0:
         // drawn as a plain mesh.
+        //
+        // (TODO 305 (7)) Its look, TF_MOTION_TRAILS (F1 Graphics, "Motion trails"). The routine moves each vertex facing
+        // q0 the whole way and the rest not at all (taShader_MotionBlur: q0 the creature's velocity x -1/15 s, clamped),
+        // so a triangle with corners on both sides stretches into a long hard sliver - the flyers' "two of them".
+        // Original (0): as the PS2. Soft push (1): each vertex moved by how squarely it faces q0 (its cosine, eased), so
+        // the shape tapers instead of tearing. Ghost blur (2): the mesh drawn kGhosts times along q0, each a step further
+        // and fainter - the trail as a soft blur of the body. Off (3): no trail. p3: x the mode (0 / 1 / 2), y a ghost's
+        // place along q0 (0..1), z its share of the alpha.
         if (const Qword *smear = sh.blockOf(Routine::Smear))
         {
             static const bool off = std::getenv("TF_NATIVE_SMEAR") && *std::getenv("TF_NATIVE_SMEAR") == '0';
             if (!off)
             {
+                const int look = motionTrails();
+                if (look == 3)
+                    return;
                 Pass p = basePass(d);
                 p.mode[0] = 20.0f;
                 p.mode[2] = 4.0f;
                 for (int q = 0; q < 3; ++q)
                     copy(p.p[q], smear[q]);
+                p.p[3][2] = 1.0f;
+                if (look == 2)
+                {
+                    // (copies close enough together to read as one blur - 6 left a staircase of plates on the flyers,
+                    // whose trail is long; each copy's result alpha times 3/N x (1 - t)^2, applied in the pixel shader -
+                    // a share on the vertex alpha changed nothing on the flyers (their alpha comes from the texture) - the
+                    // faintest at the far end. TF_MOTION_TRAIL_GHOSTS: the number, 2..48.)
+                    static const int kGhosts = [] {
+                        const char *v = std::getenv("TF_MOTION_TRAIL_GHOSTS");
+                        return v && *v ? std::clamp(std::atoi(v), 2, 48) : 24;
+                    }();
+                    // (each copy's texture blurred over this many texels - TF_MOTION_TRAIL_BLUR, 0 sharp)
+                    static const float kBlur = [] {
+                        const char *v = std::getenv("TF_MOTION_TRAIL_BLUR");
+                        return v && *v ? std::clamp(static_cast<float>(std::atof(v)), 0.0f, 16.0f) : 3.0f;
+                    }();
+                    p.p[3][3] = kBlur;
+                    // (the trail's length, a share of the game's q0 - the full length by default. TF_MOTION_TRAIL_LENGTH)
+                    static const float kLength = [] {
+                        const char *v = std::getenv("TF_MOTION_TRAIL_LENGTH");
+                        return v && *v ? std::clamp(static_cast<float>(std::atof(v)), 0.05f, 1.0f) : 1.0f;
+                    }();
+                    p.p[3][0] = 2.0f;
+                    for (int k = kGhosts; k >= 1; --k) // (farthest first: the nearer ones over them)
+                    {
+                        const float t = static_cast<float>(k) / static_cast<float>(kGhosts + 1);
+                        p.p[3][1] = t * kLength;
+                        p.p[3][2] = 3.0f * (1.0f - t) * (1.0f - t) / static_cast<float>(kGhosts); // (the faintest at the far end)
+                        out.push_back(p);
+                    }
+                    return;
+                }
+                p.p[3][0] = look == 1 ? 1.0f : 0.0f;
                 out.push_back(p);
                 return;
             }

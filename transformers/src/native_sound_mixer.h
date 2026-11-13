@@ -12,6 +12,8 @@ namespace native_sound::mixer
 {
     // Where the disc is (the .MS files, SOUNDE.ZIP). Once, before anything else.
     void setDisc(const std::filesystem::path &cdRoot);
+    // The disc the files are read from from now on (the mods' copy, once it is set up); nothing reloaded.
+    void useDisc(const std::filesystem::path &cdRoot);
 
     // ---- tone libraries --------------------------------------------------------------
     int32_t createLibrary();                             // the handle command 23 returns
@@ -20,6 +22,9 @@ namespace native_sound::mixer
     // A library of the port's own, looked in last of all (empty path: none): the full bank of a
     // level revisited with its trimmed one (native_sound.cpp). In save states.
     void setFallbackLibrary(const std::string &path);
+    // A mod's library (the mounted archive), looked in after every library of the game's and the fallback; loaded
+    // again when asked again (each level). False when it is not there.
+    bool loadModLibrary(const std::string &path);
     void mountArchive(const std::string &archive);       // command 40 op 0
 
     // ---- voices (EE handles) -----------------------------------------------------------

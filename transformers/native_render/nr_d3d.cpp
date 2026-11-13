@@ -18,8 +18,10 @@
 #include "nr_glshare.h"
 #include "nr_policy.h"
 #include "nr_taa.h"
+#include "nr_pipeline_seed.h" // (TODO 317: the pipelines a first run makes ahead)
 #include "runtime/ps2_thread_placement.h"
 
+#if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -30,6 +32,9 @@
 #include <d3d12.h>
 #include <d3dcompiler.h>
 #include <dxgi1_4.h>
+#else
+#include "nr_vkd3d.h" // (Linux: Direct3D 12 through vkd3d)
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -227,10 +232,20 @@ VsOut vs(VsIn i)
     }
     // The dash's after-image (mode.z 4: image 83f1's 0x2220): the vertices whose normal faces q0
     // moved by it - min(max(q0 . N, 0) * 1e8, 1), a step - the rest left where they are.
+    // (TODO 305 (7), p[3].x) 1: soft push - each vertex moved by how squarely it faces q0 (its cosine, eased);
+    // 2: a ghost - the whole mesh moved p[3].y of the way. 0: the routine's step, as the PS2.
     float smearT = 0.0;
     if ((int)mode.z == 4)
     {
-        smearT = saturate(dot(P0.xyz, i.normal) * 1e8);
+        if (p[3].x == 1.0)
+        {
+            const float l = length(P0.xyz);
+            smearT = l > 0.0 ? smoothstep(0.0, 1.0, saturate(dot(P0.xyz, i.normal) / l)) : 0.0;
+        }
+        else if (p[3].x == 2.0)
+            smearT = p[3].y;
+        else
+            smearT = saturate(dot(P0.xyz, i.normal) * 1e8);
         ipos = i.pos + P0.xyz * smearT;
     }
     // (TODO 290) A stunned creature's crackling shell (mode.z 6: taShader_ElectricShock, image 83f1's 0x1ac0): the vertex
@@ -440,16 +455,23 @@ VsOut vs(VsIn i)
     // the lit metal's reflection sends (Rz + 1) * Q; a 2D draw its own Q.
     o.gsq = 1.0 / max(abs(w), 1e-12);
     int sm = (int)mode.y;
+    float stq = 1.0; // (sm 9: the GS's Q over the vertex's perspective, divided per pixel)
     if (sm == 1)
         st = (p[12] * i.pos.x + p[13] * i.pos.y + p[14] * i.pos.z + p[15]).xy;
     else if (sm == 2)
         st = (p[12] * i.uv.x + p[13] * i.uv.y + p[14]).xy;
-    else if (sm == 3)
+    else if (sm == 3 || sm == 9)
     {
         float3 r = 2.0 * nv * n - v;
         float3 e = normalize(P0.xyz * r.x + p[1].xyz * r.y + p[2].xyz * r.z);
         st = 0.5 + e.xy * 0.5 / (e.z + 1.0);
         o.gsq *= max(e.z + 1.0, 1e-6);
+        if (sm == 9)
+        {
+            // (TODO 305 (4)) S, T, Q as 0x2800 sends them over the vertex's perspective Q: the coordinates above and
+            // Q' = Ez + 1; the GS divides S and T by Q' at each pixel - what it samples, smooth over the triangle.
+            stq = e.z + 1.0;
+        }
     }
     else if (sm == 4)
         st = i.uv + p[4].xy; // the water's base: ST moved by the current (q4.xy)
@@ -478,6 +500,8 @@ VsOut vs(VsIn i)
         float3 e = row0.xyz * r.x + row1.xyz * r.y + row2.xyz * r.z;
         st = 0.5 + 0.5 * e.xy / max(length(e), 1e-20);
     }
+    else if (sm == 10)
+        st = float2(dot(i.normal, normalize(p[8].xyz - i.pos)) + p[8].w, i.uv.y); // (TODO 305) 0x1e70 of 6b20: S = N.V, T the mesh's
     if ((int)mode.z == 5)
         st = citySt;
     if ((int)mode.z == 6)
@@ -486,6 +510,8 @@ VsOut vs(VsIn i)
     o.q = texScale.z > 0.5 ? i.size : 1.0; // (S, T, Q interpolated, divided per pixel)
     if (texScale.z > 0.5)
         o.gsq = i.size;
+    if (sm == 9)
+        o.q = stq;
     return o;
 }
 
@@ -628,6 +654,19 @@ void gsClip(triangle VsOut tri[3], inout TriangleStream<VsOut> stream)
 #endif
 float4 sampleGs(float2 uv, float2 uvx, float2 uvy, float gsq)
 {
+    // (TODO 305 (7)) A motion trail's ghost copy (mode.z 4, p3.x 2): its texture blurred over p3.w texels (9 taps), so
+    // the copies along the trail melt into one smear instead of stacking sharp detail into stripes.
+    if ((int)mode.z == 4 && p[3].x == 2.0 && p[3].w > 0.0)
+    {
+        float tw, th, levels;
+        tex.GetDimensions(0, tw, th, levels);
+        const float2 r = p[3].w / max(float2(tw, th), 1.0);
+        float4 s = 0.0;
+        [unroll] for (int by = -1; by <= 1; ++by)
+            [unroll] for (int bx = -1; bx <= 1; ++bx)
+                s += tex.SampleLevel(smpLinear, uv + float2(bx, by) * r, 0.0);
+        return s / 9.0;
+    }
 #if PSV_LOD != 1
     if (PSV_LOD == 0 || lod.x < 0.5)
         return clipOn.w > 0.5 ? tex.Sample(smpAlt, uv) : tex.Sample(smp, uv);
@@ -843,6 +882,10 @@ float4 psColour(VsOut i)
         // HIGHLIGHT(2): the GS adds the vertex alpha to the colour as it is - 0x80 is 128 of 255 - and the alpha here is in units
         // of 0x80 (TODO 61: it added 255, twice the GS's: a lit mesh's alpha 0x80 made it solid white).
         c = float4(t.rgb * v.rgb + v.a * (128.0 / 255.0), tcc ? (tfx == 2 ? t.a + v.a : t.a) : v.a);
+    // (TODO 305 (7)) A motion trail's ghost copy: its share of the trail's alpha (p3.z) on the result - where the alpha comes from the
+    // texture (TCC; the flyers), the vertex's alpha, where the routine's fade lives, takes no part.
+    if ((int)mode.z == 4 && p[3].x == 2.0)
+        c.a *= p[3].z;
 #if PSV_ATEST
     if (test.x > 0.5)
     {
@@ -1120,7 +1163,7 @@ float3 aaSharpen(int2 c, float3 col, float sharp)
     const float3 east = aaLoadOff(c, int2(1, 0)), s = aaLoadOff(c, int2(0, 1));
     const float3 mn = min(min(min(n, w), min(east, s)), e);
     const float3 mx = max(max(max(n, w), max(east, s)), e);
-    const float3 amp = sqrt(saturate(min(mn, 2.0 - mx) / max(mx, 1.0 / 256.0)));
+    const float3 amp = sqrt(saturate(min(mn, 1.0 - mx) / max(mx, 1.0 / 256.0)));
     const float3 k = amp * (-1.0 / lerp(8.0, 5.0, saturate(sharp)));
     const float3 sharpened = (n * k + w * k + east * k + s * k + e) / (1.0 + 4.0 * k);
     return saturate(col + (sharpened - e));
@@ -1494,10 +1537,36 @@ float4 smaaBlendPs(SmaaBlendOut i) : SV_Target
             UINT64 slotFence[kFrames] = {};
             std::vector<ID3D12Resource *> slotReleases[kFrames];
             std::vector<UINT> slotFreeSlots[kFrames];
+#if defined(__linux__)
+            // (N9: the CPU hand-over) The pictures' readbacks, apart from the frame slots: a picture the window
+            // still reads (or whose copy the GPU still makes) is not written into, so a slot coming round again
+            // costs no picture. They are also the window's queue: each published picture keeps its readback until
+            // the window takes it (oldest first - a newer publication never replaces one waiting), so a present
+            // delayed by a refresh costs no picture. Four: the frames in flight fill at most one (the frame before
+            // this one - the one before that is finished by beginSlot), and two presents' worth of pictures fit
+            // beside it even when the window misses a refresh.
+            static constexpr int kHandovers = 4;
+            struct Handover
+            {
+                ID3D12Resource *resource = nullptr; // (readback: mapped once, read by the window where the GPU wrote it)
+                void *mapped = nullptr;
+                D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+                UINT w = 0, h = 0;
+                std::atomic<bool> held{false}; // (published and not given back: the window may read it - pictureShown)
+                bool filled = false;           // (its copy recorded, not published yet - render thread)
+                bool taken = false;            // (the window took it: its ack is coming - with g_published.mutex)
+                uint64_t serial = 0;           // (the publication it carries: oldest first - with g_published.mutex)
+                d3d::SharedPicture meta;       // (its tick, moment, ready time, turn and size - with g_published.mutex)
+            };
+            Handover handovers[kHandovers];
+            int handoverNext = 0;
+            int slotHandover[kFrames] = {-1, -1}; // (the readback the frame's picture is copied into)
+#else
             ID3D12Resource *slotReadback[kFrames] = {};
             D3D12_PLACED_SUBRESOURCE_FOOTPRINT slotFootprint[kFrames] = {};
             UINT slotReadbackW[kFrames] = {}, slotReadbackH[kFrames] = {};
             bool slotPublish[kFrames] = {};
+#endif
             bool slotHas3D[kFrames] = {};
             uint64_t slotTick[kFrames] = {}; // (N9) the frame's VBlank and its moment (Frame::tick, dueNs), for the hand-over
             int64_t slotDueNs[kFrames] = {};
@@ -1567,11 +1636,19 @@ float4 smaaBlendPs(SmaaBlendOut i) : SV_Target
             ID3D12PipelineState *probePipeline = nullptr;
         } g;
 
+#if defined(__linux__)
+        // The latest picture, handed to the window's thread (nr_present.cpp). The CPU hand-over's pictures are in
+        // State::handovers (published ones stay there, oldest first, until the window takes them); this is only the
+        // serial and the moment of the newest, for the pacer's wait and its 100 ms rule.
+#else
         // The latest picture, handed to the window's thread (nr_present.cpp).
+#endif
         struct Published
         {
             std::mutex mutex;
+#if !defined(__linux__)
             std::vector<uint32_t> pixels;
+#endif
             uint32_t width = 0, height = 0;
             uint64_t serial = 0;
             bool has3D = false;
@@ -1580,6 +1657,9 @@ float4 smaaBlendPs(SmaaBlendOut i) : SV_Target
             int64_t lastNs = 0;          // when the newest was
             uint32_t pending = 0u;       // (N9) shared textures given to the pacer, not handed over yet (pickShared leaves them)
         } g_published;
+#if defined(__linux__)
+        uint64_t g_handoverSkips = 0; // (N9: CPU pictures not read back - every readback the window's; a profile window)
+#endif
         std::atomic<int> g_shareOn{0};    // the window: 0 not asked yet, 1 reads shared textures, -1 cannot
         std::atomic<int> g_sharedHeld{-1}; // the shared texture the window shows
         // (TODO 98) ... and the two it showed before it: the window's GL may still read them after it has moved on (its
@@ -1787,6 +1867,13 @@ float4 smaaBlendPs(SmaaBlendOut i) : SV_Target
         // The fence waited for in steps of a second, the device's state looked at between them: a
         // removed device (a GPU hang) ends the wait - the frame's end tells it and stops the renderer -
         // rather than the render thread waiting for ever (and the game's thread behind it).
+        std::atomic<bool> g_serialPictureReplay{false};
+        bool serialPictureReplay()
+        {
+            static const bool env = [] { const char *v = std::getenv("TF_NATIVE_SERIAL_REPLAY"); return v && *v == '1'; }();
+            return env || g_serialPictureReplay.load(std::memory_order_relaxed);
+        }
+
         void waitFence(UINT64 value)
         {
             if (g.fence->GetCompletedValue() >= value)
@@ -2512,8 +2599,21 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                                              D3DCOMPILE_IEEE_STRICTNESS);
                     if (!code)
                     {
+#if defined(__linux__)
+                        std::fprintf(stderr, "[native render] grass on the GPU: shader %s%s failed\n", entries[k], g_exact ? " (divisions in double)" : "");
+                        if (!g_exact)
+                            return false;
+                        // (a compiler without doubles - vkd3d's on Linux: the float divisions rather than the CPU's grass)
+                        std::fprintf(stderr, "[native render] grass on the GPU: its divisions in float instead\n");
+                        for (int j = 0; j < k; ++j)
+                            release(g_pso[j]);
+                        g_exact = false;
+                        k = -1;
+                        continue;
+#else
                         std::fprintf(stderr, "[native render] grass on the GPU: shader %s failed\n", entries[k]);
                         return false;
+#endif
                     }
                     D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
                     cd.pRootSignature = g_root;
@@ -3071,8 +3171,17 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                         at = end + 1;
                     }
                 }
-                std::fprintf(stderr, "[native render] pipeline library: %s, %zu pipelines known (%s)\n", had && g_libBytes.size() ? "loaded" : "new",
-                             g_keys.size(), cache::dir().string().c_str());
+                // (TODO 317) A first run knows no pipelines, and on a cold graphics-driver cache each one a draw needs is
+                // compiled by the driver there and then (Intel's UHD 620: ~40 ms each, a 1.8 s frame for 44 in the first
+                // level). The seed - the keys the game uses, built in (nr_pipeline_seed.h, tools/make_pipeline_seed.py) -
+                // joins the machine's own, so warm makes them at the start, while the title and the menus show.
+                // TF_PIPELINE_SEED=0: the machine's own keys only, as before.
+                size_t seeded = 0;
+                if (!(std::getenv("TF_PIPELINE_SEED") && *std::getenv("TF_PIPELINE_SEED") == '0'))
+                    for (const uint64_t k : nr::pipeline_seed::kKeys)
+                        seeded += g_keys.insert(k).second ? 1u : 0u;
+                std::fprintf(stderr, "[native render] pipeline library: %s, %zu pipelines known, %zu of them new from the seed (%s)\n",
+                             had && g_libBytes.size() ? "loaded" : "new", g_keys.size(), seeded, cache::dir().string().c_str());
             }
 
             // The pipeline for a key: from the library, else made (and stored).
@@ -3237,6 +3346,9 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                     std::lock_guard<std::mutex> lock(g_mutex);
                     keys.assign(g_keys.begin(), g_keys.end());
                 }
+                // (TODO 317: the base pipelines first - a draw that needs one waits for it; a variant's draw takes the whole
+                // shader meanwhile)
+                std::stable_partition(keys.begin(), keys.end(), [](uint64_t k) { return (k >> 32) == 0u; });
                 std::thread([keys] {
                     const auto start = std::chrono::steady_clock::now();
                     std::unordered_map<uint32_t, ID3DBlob *> blobs;
@@ -3598,8 +3710,26 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
             td.SampleDesc.Count = 1;
             const D3D12_HEAP_PROPERTIES gpu = heap(D3D12_HEAP_TYPE_DEFAULT);
             ID3D12Resource *resource = pool::place(td);
-            if (!resource && FAILED(g.device->CreateCommittedResource(&gpu, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                                      IID_PPV_ARGS(&resource))))
+            if (resource)
+            {
+                // (TODO 305 (2)) A texture placed over a heap range another texture used before: the aliasing barrier, then a
+                // discard - D3D12's start for a placed resource over reused memory - before its copies. Without them the Iris Xe
+                // drew some of the pool's textures as boxes of flat colour (the HUD's gems and bars, the insignia, after a warp
+                // gate's autosave): the copies were right (the texels on the CPU the same), the GPU still read the range as it
+                // held it before. TF_NATIVE_TEXPOOL_INIT=0: neither, as before.
+                static const bool initOff = std::getenv("TF_NATIVE_TEXPOOL_INIT") && *std::getenv("TF_NATIVE_TEXPOOL_INIT") == '0';
+                if (!initOff)
+                {
+                    D3D12_RESOURCE_BARRIER b{};
+                    b.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+                    b.Aliasing.pResourceBefore = nullptr; // (whatever used the range before)
+                    b.Aliasing.pResourceAfter = resource;
+                    g.list->ResourceBarrier(1, &b);
+                    g.list->DiscardResource(resource, nullptr);
+                }
+            }
+            else if (FAILED(g.device->CreateCommittedResource(&gpu, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                              IID_PPV_ARGS(&resource))))
                 return nullptr;
             mkLap(1);
             std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fps(levels);
@@ -4102,6 +4232,88 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
             }
         }
 
+#if defined(__linux__)
+        // (N9: the CPU hand-over) A readback the picture can be copied into and the window can upload from - mapped
+        // once, so the window reads the pixels where the GPU wrote them (no copy of the picture on the render side).
+        bool handoverMake(int i)
+        {
+            State::Handover &ho = g.handovers[i];
+            D3D12_RESOURCE_DESC td{};
+            td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            td.Width = g.width;
+            td.Height = g.height;
+            td.DepthOrArraySize = 1;
+            td.MipLevels = 1;
+            td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            td.SampleDesc.Count = 1;
+            UINT64 total = 0;
+            g.device->GetCopyableFootprints(&td, 0, 1, 0, &ho.fp, nullptr, nullptr, &total);
+            const D3D12_HEAP_PROPERTIES back = heap(D3D12_HEAP_TYPE_READBACK);
+            const D3D12_RESOURCE_DESC rb = bufferDesc(total);
+            if (FAILED(g.device->CreateCommittedResource(&back, D3D12_HEAP_FLAG_NONE, &rb, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                         IID_PPV_ARGS(&ho.resource))))
+                return false;
+            void *p = nullptr;
+            if (FAILED(ho.resource->Map(0, nullptr, &p)))
+            {
+                release(ho.resource);
+                return false;
+            }
+            ho.mapped = p;
+            ho.w = g.width;
+            ho.h = g.height;
+            return true;
+        }
+
+        // A readback made for the picture's size and marked as this frame's copy (render thread).
+        int handoverUse(int i)
+        {
+            State::Handover &ho = g.handovers[i];
+            if (ho.resource && (ho.w != g.width || ho.h != g.height))
+            {
+                // (the picture's size changed: freed here only once the window has let go of it)
+                ho.resource->Unmap(0, nullptr);
+                g.uploads.push_back(ho.resource); // (released once its last use is done)
+                ho.resource = nullptr;
+                ho.mapped = nullptr;
+            }
+            if (!ho.resource && !handoverMake(i))
+                return -1;
+            g.handoverNext = (i + 1) % State::kHandovers;
+            ho.filled = true;
+            return i;
+        }
+
+        // A readback for this frame's picture: a free one, else the oldest picture the window has not taken (the
+        // window is a whole ring behind - that one is let go of unseen, the newest picture here kept).
+        int handoverFor()
+        {
+            for (int k = 0; k < State::kHandovers; ++k)
+            {
+                const int i = (g.handoverNext + k) % State::kHandovers;
+                if (g.handovers[i].filled || g.handovers[i].held.load(std::memory_order_acquire))
+                    continue;
+                if (const int picked = handoverUse(i); picked >= 0)
+                    return picked;
+            }
+            int oldest = -1;
+            {
+                std::lock_guard<std::mutex> lock(g_published.mutex);
+                for (int i = 0; i < State::kHandovers; ++i)
+                {
+                    const State::Handover &ho = g.handovers[i];
+                    if (ho.filled || ho.taken || !ho.held.load(std::memory_order_relaxed))
+                        continue;
+                    if (oldest < 0 || ho.serial < g.handovers[oldest].serial)
+                        oldest = i;
+                }
+                if (oldest < 0)
+                    return -1; // (every readback is the window's - this picture is not read back: counted at the call)
+                g.handovers[oldest].held.store(false, std::memory_order_release); // (never to be shown: let go)
+            }
+            return handoverUse(oldest);
+        }
+#else
         // A slot's readback of the picture, made (again) for the picture's size.
         bool slotReadbackFor(UINT slot)
         {
@@ -4129,6 +4341,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
             g.slotReadbackH[slot] = g.height;
             return true;
         }
+#endif
 
         // A shared texture of the picture's size (made again when it changes: a new generation, which
         // the window imports again).
@@ -4289,7 +4502,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                     to = end && *end == '-' ? std::strtoull(end + 1, nullptr, 10) : from;
                     if (const char *k = std::getenv("TF_NATIVE_STREAM_SHRINK"))
                         shrink = static_cast<UINT>(std::max(1, std::atoi(k)));
-                    CreateDirectoryA("runs\\stream", nullptr);
+                    CreateDirectoryA("runs/stream", nullptr);
                     std::fprintf(stderr, "[native render] stream: every frame from tick %llu to %llu saved, shrunk %u times\n",
                                  static_cast<unsigned long long>(from), static_cast<unsigned long long>(to), shrink);
                     return to >= from;
@@ -4342,7 +4555,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                             o[2] = static_cast<uint8_t>(sum[0] / (k * k));
                         }
                     char path[96];
-                    std::snprintf(path, sizeof(path), "runs\\stream\\s_%06llu_%llu.bmp", static_cast<unsigned long long>(j.seq),
+                    std::snprintf(path, sizeof(path), "runs/stream/s_%06llu_%llu.bmp", static_cast<unsigned long long>(j.seq),
                                   static_cast<unsigned long long>(j.tick));
                     if (FILE *f = std::fopen(path, "wb"))
                     {
@@ -4443,6 +4656,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
         // next pass and went out right before the next one, 2 ms and 32 ms apart in turn (the pictures' 1% low ~31). No
         // delay is added (an earlier version paced these too, by the frame's moment plus a delay, and measured worse on the
         // Vostro). The copier's part follows that version (0a7c4857). TF_NATIVE_CPUCOPIER=0: as before.
+#if !defined(__linux__)
         namespace cpucopy
         {
             struct Item
@@ -4575,6 +4789,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                 return had;
             }
         }
+#endif
 
         void finishSlot(UINT slot)
         {
@@ -4649,6 +4864,45 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
             }
             g.slotShared[slot] = -1;
             g.slotPaced[slot] = false;
+#if defined(__linux__)
+            if (const int readback = g.slotHandover[slot]; readback >= 0)
+            {
+                g.slotHandover[slot] = -1;
+                State::Handover &ho = g.handovers[readback];
+                ho.filled = false;
+                const int64_t readyNs =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                static int told = 3;
+                if (told > 0)
+                {
+                    --told;
+                    std::fprintf(stderr, "[native render] picture %ux%u handed over (readback %d)\n", ho.w, ho.h, readback);
+                }
+                {
+                    std::lock_guard<std::mutex> lock(g_published.mutex);
+                    // (it joins the queue at its newest end: earlier pictures keep their readbacks until the window
+                    //  takes them - a newer publication never replaces one that is waiting, so a present delayed by
+                    //  a refresh costs no picture)
+                    ho.meta = d3d::SharedPicture{};
+                    ho.meta.width = ho.w;
+                    ho.meta.height = ho.h;
+                    ho.meta.has3D = g.slotHas3D[slot];
+                    ho.meta.tick = g.slotTick[slot];
+                    ho.meta.dueNs = g.slotDueNs[slot];
+                    ho.meta.readyNs = readyNs;
+                    ho.meta.turnId = g.slotFence[slot];
+                    ho.serial = ++g_published.serial;
+                    ho.taken = false;
+                    ho.held.store(true, std::memory_order_release); // (from here the window may take and read it)
+                    g_published.shared.index = -1; // (no shared texture: latestShared must not hand this one out)
+                    g_published.has3D = g.slotHas3D[slot];
+                    g_published.width = ho.w;
+                    g_published.height = ho.h;
+                    g_published.lastNs = readyNs;
+                    g_published.cv.notify_all();
+                }
+            }
+#else
             const bool copierHadIt = cpucopy::waitFor(slot); // (TODO 295: published by the copier at its fence already)
             if (g.slotPublish[slot] && g.slotReadback[slot] && !copierHadIt)
             {
@@ -4693,6 +4947,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                 }
             }
             g.slotPublish[slot] = false;
+#endif
             stream::finish(slot);
             // (Many at once - a level's or the HQ's textures let go of when it ends, a thousand and more -
             // released on a thread of their own: each Release of a texture costs the driver a fraction
@@ -4789,6 +5044,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
         // TF_NATIVE_DEBUG=1: the debug layer, its messages on stderr; =2 adds GPU-based validation.
         const char *debug = std::getenv("TF_NATIVE_DEBUG");
         const bool debugging = debug && (*debug == '1' || *debug == '2');
+#if defined(_WIN32) // (vkd3d has neither the debug layer nor DRED)
         if (debugging)
         {
             ID3D12Debug *layer = nullptr;
@@ -4815,6 +5071,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
             }
             release(dred);
         }
+#endif
         if (const HRESULT made = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&g.device)); FAILED(made))
         {
             // (With the debug layer on, a fullscreen window's start makes the device fail with
@@ -4824,6 +5081,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
             return false;
         }
         nr::taa::probe(g.device); // (TODO 299, TF_TAA_PROBE=1: the FidelityFX SDK on this device)
+#if defined(_WIN32)
         // (TODO 163, with TF_NATIVE_DRED) A watch on the device every 50 ms: a GPU fault the OpenGL driver ends the process
         // over within seconds (the test PC's NVIDIA driver: nvoglv64 abort()) is told with DRED's last operations and
         // the faulting address before that - the renderer's own check (a frame's end) never came to it.
@@ -4905,6 +5163,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
             else
                 std::fprintf(stderr, "[native render] no debug message queue (the debug layer is not installed?)\n");
         }
+#endif
         D3D12_COMMAND_QUEUE_DESC qd{};
         qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
         if (FAILED(g.device->CreateCommandQueue(&qd, IID_PPV_ARGS(&g.queue))) ||
@@ -6326,6 +6585,14 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                             const D3D12_RESOURCE_DESC cd = g.colour->GetDesc();
                             const LONG side = 16, h = static_cast<LONG>(cd.Height);
                             const uint32_t number = ++stampNumber & 0xffffu;
+                            // (TODO 311, a measuring aid: TF_NATIVE_STAMP_LOG=1 - each stamp's number, when it was recorded and
+                            // its frame's moment, steady-clock ms; stampcap.exe reads the numbers off the screen on the same
+                            // clock, so the two give the time from the frame's moment to the screen on any present path)
+                            static const bool stampLog = std::getenv("TF_NATIVE_STAMP_LOG") && *std::getenv("TF_NATIVE_STAMP_LOG") == '1';
+                            if (stampLog)
+                                std::fprintf(stderr, "[stamp] %u %.3f %.3f\n", number,
+                                             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+                                             static_cast<double>(pic.dueNs) / 1.0e6);
                             std::vector<D3D12_RECT> red, on, off;
                             for (const LONG y : {side, h - 2 * side})
                             {
@@ -6359,6 +6626,29 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                         g.slotTick[g.slot] = in.tick;
                         g.slotDueNs[g.slot] = pic.dueNs;
                     }
+#if defined(__linux__)
+                    else if (last && g.live && g_shareOn.load() != 1 && !in.dropped)
+                    {
+                        const int handover = handoverFor();
+                        g_handoverSkips += handover < 0 ? 1u : 0u; // (told in the profile window: pictures not read back)
+                        if (handover >= 0)
+                        {
+                            barrier(tail, g.colour, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                            D3D12_TEXTURE_COPY_LOCATION dst{}, src{};
+                            dst.pResource = g.handovers[handover].resource;
+                            dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                            dst.PlacedFootprint = g.handovers[handover].fp;
+                            src.pResource = g.colour;
+                            src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                            tail->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                            barrier(tail, g.colour, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                            g.slotHandover[g.slot] = handover;
+                            g.slotHas3D[g.slot] = in.has3D || in.shown2D; // (a menu shown natively: TODO 88)
+                            g.slotTick[g.slot] = in.tick;
+                            g.slotDueNs[g.slot] = pic.dueNs;
+                        }
+                    }
+#else
                     else if (last && g.live && g_shareOn.load() != 1 && !in.dropped && slotReadbackFor(g.slot))
                     {
                         barrier(tail, g.colour, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -6374,6 +6664,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                         g.slotHas3D[g.slot] = in.has3D || in.shown2D; // (a menu shown natively: TODO 88)
                         g.slotCpuDueNs[g.slot] = pic.dueNs; // (TODO 295: its frame's moment, for the hand-over's profile)
                     }
+#endif
                     if (last && !in.dropped && stream::wanted(in.tick) && stream::readbackFor(g.slot))
                     {
                         barrier(tail, g.colour, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -6475,7 +6766,8 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                     }
                     else
                     {
-                        if (executed > 0 && replayMode != 0 && g.fence->GetCompletedValue() < g.fenceValue)
+                        // (Playable Decepticons: serialPictureReplay() - setSerialPictureReplay, TF_NATIVE_SERIAL_REPLAY=1 - waits too)
+                        if (executed > 0 && (replayMode != 0 || serialPictureReplay()) && g.fence->GetCompletedValue() < g.fenceValue)
                         {
                             const auto waitStart = std::chrono::steady_clock::now();
                             waitFence(g.fenceValue); // (the picture before: the frame's list and the restore list free to run again)
@@ -6490,6 +6782,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                     ++executed;
                     if (timed)
                         g.slotPictures[g.slot] = executed;
+#if !defined(__linux__)
                     if (last && g.slotPublish[g.slot] && g.slotReadback[g.slot] && cpucopy::on())
                     {
                         // (TODO 295: the CPU hand-over's picture published at its fence by the copier, not by finishSlot)
@@ -6504,6 +6797,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                         it.dueNs = g.slotCpuDueNs[g.slot];
                         cpucopy::submit(it);
                     }
+#endif
                     if (sharedIndex >= 0 && d3d::pacingMode() != 0)
                     {
                         // (N9: handed over by the pacer, at its moment - not by finishSlot)
@@ -7149,11 +7443,21 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                              policy::largeImageCap(),
                              largeImageStats().c_str());
             }
+#if defined(__linux__)
+            std::fprintf(stderr, "[native render] profile: texture pool %zu heaps, %llu MB used, %llu placed, %llu not (committed); staging ring %llu uses, %llu overflows; %llu pictures not read back (no readback free)\n",
+                         pool::heaps.size(), static_cast<unsigned long long>(pool::usedBytes() >> 20), static_cast<unsigned long long>(pool::made),
+                         static_cast<unsigned long long>(pool::fallbacks), static_cast<unsigned long long>(g_texRingUses),
+                         static_cast<unsigned long long>(g_texRingOverflows), static_cast<unsigned long long>(g_handoverSkips));
+#else
             std::fprintf(stderr, "[native render] profile: texture pool %zu heaps, %llu MB used, %llu placed, %llu not (committed); staging ring %llu uses, %llu overflows\n",
                          pool::heaps.size(), static_cast<unsigned long long>(pool::usedBytes() >> 20), static_cast<unsigned long long>(pool::made),
                          static_cast<unsigned long long>(pool::fallbacks), static_cast<unsigned long long>(g_texRingUses),
                          static_cast<unsigned long long>(g_texRingOverflows));
+#endif
             pool::made = pool::fallbacks = g_texRingUses = g_texRingOverflows = 0;
+#if defined(__linux__)
+            g_handoverSkips = 0;
+#endif
         }
 
         // SMAA's two lookup textures copied into video memory, recorded into the frame's list once (both staging
@@ -7236,6 +7540,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
     // The device's video memory in use (or its budget), from its adapter.
     void preUploadImpl(const std::shared_ptr<const Texture> &texture) { frame::preUpload(texture); }
 
+#if defined(_WIN32)
     uint64_t videoMemory(bool budget)
     {
         static IDXGIAdapter3 *adapter = nullptr;
@@ -7338,6 +7643,44 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
         }();
         return mb;
     }
+#else
+    uint64_t videoMemory(bool) { return 0; } // (no DXGI budget through vkd3d: the profile line shows 0)
+    void videoMemoryNote(double) {} // (no DXGI counters through vkd3d)
+
+    // The graphics card as Vulkan tells it (nr_vkd3d.h), once the device is made (0: not known yet).
+    namespace adapter
+    {
+        std::mutex g_mutex;
+        bool g_known = false;
+        uint32_t g_vendor = 0;
+        uint64_t g_memoryMB = 0;
+        void look()
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            std::string name;
+            if (!g_known && nr::vk::describe(g.device, g_vendor, g_memoryMB, name))
+            {
+                g_known = true;
+                std::fprintf(stderr, "[native render] Vulkan through vkd3d: %s (vendor %04x, %llu MB of video memory)\n", name.c_str(),
+                             static_cast<unsigned>(g_vendor), static_cast<unsigned long long>(g_memoryMB));
+            }
+        }
+    }
+
+    uint32_t adapterVendor()
+    {
+        adapter::look();
+        return adapter::g_vendor;
+    }
+
+    uint64_t adapterMemoryMB()
+    {
+        if (const char *e = std::getenv("TF_NATIVE_VRAM_MB"); e && *e)
+            return std::strtoull(e, nullptr, 10);
+        adapter::look();
+        return adapter::g_memoryMB;
+    }
+#endif
 
     // (The quality preset and the large images' cap and budget made of it: nr_policy.cpp, the same rules for both backends.
     // On High and Ultra the clipping shader's exact colour on clipped triangles costs 1.1 ms of the RX 5700 XT's 8 ms at
@@ -7347,6 +7690,9 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
     // Windows gives us on the card now: Backend::largeImageRoom.
     uint64_t largeImageRoom(uint64_t budget)
     {
+#if !defined(_WIN32)
+        return budget; // (no DXGI budget through vkd3d: the shared rules' fixed budget alone)
+#else
         // (Issue #20) Also no more than Windows lets us have on the card now, less what the rest of ours holds and a
         // margin: when other programs take the card's memory, the HD images idle longest go first (evictLarge) rather
         // than Windows moving memory to and from the card. Measured at most every 2 s; TF_HIRES_BUDGET_WINDOWS=0: the
@@ -7390,14 +7736,23 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
             }
         const uint64_t l = live.load(std::memory_order_relaxed);
         return l ? std::min(budget, l) : budget;
+#endif
     }
 
     uint64_t largeImageBytes() { return g_largeBytes.load(std::memory_order_relaxed); }
 
+#if defined(__linux__)
+    void setWindowSize(int width, int height)
+    {
+        g_windowWidth.store(width, std::memory_order_relaxed);
+        g_windowLines.store(height, std::memory_order_relaxed);
+    }
+#else
     void setWindowLines(int lines)
     {
         g_windowLines.store(lines, std::memory_order_relaxed);
     }
+#endif
 
     void setSpeedupsForced(int on)
     {
@@ -7414,6 +7769,40 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
         g_aa.store(std::clamp(mode, 0, 2), std::memory_order_relaxed);
     }
 
+#if defined(__linux__)
+    bool latestPicture(const uint8_t *&pixels, uint32_t &rowPitch, int &index, uint64_t &serial, d3d::SharedPicture &meta)
+    {
+        std::lock_guard<std::mutex> lock(g_published.mutex);
+        // (The oldest published picture the window has not taken - not the newest: one that arrived while the
+        // window was presenting waits its turn instead of being replaced, and each is shown exactly once.)
+        int oldest = -1;
+        for (int i = 0; i < State::kHandovers; ++i)
+        {
+            const State::Handover &ho = g.handovers[i];
+            if (ho.taken || ho.serial <= serial || !ho.held.load(std::memory_order_relaxed))
+                continue;
+            if (oldest < 0 || ho.serial < g.handovers[oldest].serial)
+                oldest = i;
+        }
+        if (oldest < 0)
+            return false;
+        State::Handover &ho = g.handovers[oldest];
+        pixels = static_cast<const uint8_t *>(ho.mapped) + ho.fp.Offset;
+        rowPitch = ho.fp.Footprint.RowPitch;
+        index = oldest;
+        meta = ho.meta;
+        serial = ho.serial;
+        ho.taken = true; // (pictureShown's ack is coming: the readback is not freed or drawn into under it)
+        return true;
+    }
+
+    void pictureShown(int index)
+    {
+        if (index < 0 || index >= State::kHandovers)
+            return;
+        g.handovers[index].held.store(false, std::memory_order_release);
+    }
+#else
     bool latestPicture(std::vector<uint32_t> &pixels, uint32_t &width, uint32_t &height, uint64_t &serial, bool &has3D)
     {
         std::lock_guard<std::mutex> lock(g_published.mutex);
@@ -7426,6 +7815,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
         serial = g_published.serial;
         return true;
     }
+#endif
 
     void setSharedPictures(bool on)
     {
@@ -7613,7 +8003,7 @@ namespace nr::d3d
                 const char *colon = std::strchr(e, ':');
                 const int processes = colon ? std::atoi(colon + 1) : 1;
                 const int restarts = std::getenv("TF_GPU_RESTARTS") ? std::atoi(std::getenv("TF_GPU_RESTARTS")) : 0;
-                return restarts < processes ? std::strtoull(e, nullptr, 10) : uint64_t{0};
+                return restarts < processes ? static_cast<uint64_t>(std::strtoull(e, nullptr, 10)) : uint64_t{0};
             }();
             if (removeAt && input.tick >= removeAt)
             {
@@ -7639,7 +8029,7 @@ namespace nr::d3d
                 const char *colon = std::strchr(e, ':');
                 const int processes = colon ? std::atoi(colon + 1) : 1;
                 const int restarts = std::getenv("TF_GPU_RESTARTS") ? std::atoi(std::getenv("TF_GPU_RESTARTS")) : 0;
-                return restarts < processes ? std::strtoull(e, nullptr, 10) : uint64_t{0};
+                return restarts < processes ? static_cast<uint64_t>(std::strtoull(e, nullptr, 10)) : uint64_t{0};
             }();
             if (hangAt && input.tick >= hangAt)
             {
@@ -7772,6 +8162,7 @@ namespace nr::d3d
 namespace nr
 {
     void preUpload(const std::shared_ptr<const Texture> &texture) { backend().preUpload(texture); }
+    void setSerialPictureReplay(bool on) { d3d::g_serialPictureReplay.store(on, std::memory_order_relaxed); } // (nr_types.h)
     bool rendererStarting() { return backend().startingNow(); }
     int bakeShaders(const char *path) { return d3d::bakeShaders(path); } // (the build's step: Direct3D 12's shaders)
 }
@@ -7793,16 +8184,28 @@ namespace nr
             double waitForFrameSlot() override { return d3d::waitForFrameSlot(); }
             void render(const Frame &frame, const std::string &shotPath) override { d3d::render(frame, shotPath); }
             void preUpload(const std::shared_ptr<const Texture> &texture) override { d3d::preUploadImpl(texture); }
+#if defined(__linux__)
+            bool latestPicture(const uint8_t *&pixels, uint32_t &rowPitch, int &index, uint64_t &serial, d3d::SharedPicture &meta) override
+            {
+                return d3d::latestPicture(pixels, rowPitch, index, serial, meta);
+            }
+            void pictureShown(int index) override { d3d::pictureShown(index); }
+#else
             bool latestPicture(std::vector<uint32_t> &pixels, uint32_t &width, uint32_t &height, uint64_t &serial, bool &has3D) override
             {
                 return d3d::latestPicture(pixels, width, height, serial, has3D);
             }
+#endif
             void setSharedPictures(bool on) override { d3d::setSharedPictures(on); }
             bool latestShared(d3d::SharedPicture &out, uint64_t &serial) override { return d3d::latestShared(out, serial); }
             void sharedHeld(int index) override { d3d::sharedHeld(index); }
             bool waitPicture(uint64_t serial, int64_t untilNs, int64_t &lastNs) override { return d3d::waitPicture(serial, untilNs, lastNs); }
             int pacingMode() override { return d3d::pacingMode(); }
+#if defined(__linux__)
+            void setWindowSize(int width, int height) override { d3d::setWindowSize(width, height); }
+#else
             void setWindowLines(int lines) override { d3d::setWindowLines(lines); }
+#endif
             void setAntiAliasing(int mode) override { d3d::setAntiAliasing(mode); }
             void setSupersampling(bool on) override { d3d::setSupersampling(on); }
             void setSpeedupsForced(int on) override { d3d::setSpeedupsForced(on); }

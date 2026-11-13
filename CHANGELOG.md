@@ -1,5 +1,87 @@
 # What's new
 
+## 0.7.1
+
+**New**
+- An objective guide (off by default, Gameplay in the Options): a small arrow at the bottom of the screen points to
+  your next objective in the story, with its name and distance. It follows each level's own story order, also when
+  you start from a later warp gate.
+- The PC settings are now also pages in the game's own Options menus (the Start menu, the HQ and the pause menu), with
+  QUIT GAME in the main menu on every platform. The mouse now also works on the saved games list, the HQ's
+  hologram panels and the button bar at the bottom of a menu. Thanks to TPepperoni.
+- A native Linux and Steam Deck version, no Proton needed: set up with `./setup.sh --iso <your disc>`, play with
+  `./play.sh`, update with `./update.sh`. On the Steam Deck it starts full screen with Deck button prompts and Deck
+  controls (R2 fires, L2 jumps), and uses less CPU and battery. Thanks to ravioli-gh.
+- Xbox button prompts are drawn like the pad plugged in: Xbox One / Series or Xbox 360. The update also repairs an
+  install whose font images went missing. Thanks to TheBrousse.
+
+**Changed**
+- Laptops and PCs with built-in graphics: this update puts the graphics settings back to the recommended laptop
+  settings once (the frame rate cap to 60, field of view, picture shape and texture pack too; controls, sound and
+  gameplay stay). Your old settings are kept in settings.ini.bak-071. The renderer goes back to Native, except on Intel
+  drivers older than 2023, which keep your choice.
+- Frame rate cap Unlimited now follows what your PC can draw, smoothly and from the first moment of a level: no
+  more slow motion in a level's first seconds or after a movie, and about 10-16% more frames on PCs that cannot
+  hold the very top rate. Capped rates (60, 144, 240 ...) work as before.
+- Built-in graphics (Intel, and AMD's in the processor) now start on the Low preset, drawn at a render scale of
+  67% and enlarged with FSR 1: about 40 frames a second instead of 29 on a UHD 620 laptop, still sharper than the
+  PS2. Only settings you never changed start there; your own choices stay. Stronger built-in graphics can raise the
+  preset in F1 > Graphics.
+- VSync now reads "On (no tearing)" or "Off (may tear)", and a new Screen line under it in F1 > Display tells your
+  screen's refresh rate, its FreeSync range and whether the screen is following the game. If you see the picture
+  tear (a line across the screen), turn VSync On. With FreeSync and a frame rate cap at your screen's rate or above,
+  the game now stays a little under the screen's top so FreeSync keeps working.
+
+**Fixed**
+- First person: the HQ calls, the Mini-Con and Data-Con discoveries and the other cutscenes now play out in their own
+  view to the end (an HQ call up to your Confirm), then the view eases into first person, instead of jumping into first
+  person while the scene was still up.
+- With the mouse and keyboard the crosshair now stays on one spot of the screen while you turn, aim with the right
+  button or look at near and far things, in first and third person: the game's reticle and the small cross alike.
+- Crashes, black screens and loads that never finish while the HD textures were still being made: the game started
+  making the rest of them beside itself, and on some graphics cards (a GTX 1660 SUPER) the two together stalled the
+  card until Windows reset it. Now the rest is made in its small window once you close the game; it waits while you
+  play. (To make them during play anyway: "Keep making HD textures while I play" in the setup.) Thanks to SirCebollo.
+- The Autobot no longer spins during the HQ calls, the Mini-Con and Data-Con discoveries and the other cutscenes, his
+  back turned to the moving camera (new in 0.7.0, with the still crosshair): he stays where the scene puts him, as on
+  the PS2. Thanks to wayneng1997.
+- The very first start after installing (or after a graphics driver update) no longer freezes for about half a minute
+  on some Intel laptops: the main menu now comes as quickly as on any later start. A save state made in the first
+  seconds after the start is also no longer slow there.
+- The first level after installing (or after a graphics driver update) no longer freezes for a few seconds at its
+  start while the graphics driver prepares the game's shaders: they are prepared ahead, while the title and the menus
+  show. Most noticeable on Intel laptops.
+- Invert Y set with a controller (or the keys, or the mouse) in the game's own Options is now kept: it went back to No
+  after Accept, in the HQ's Controller Settings and in the pause menu's Options alike. Thanks to bbatts.
+- Intel graphics: the start-up movies no longer stutter (a picture held about a fifth of a second every few seconds).
+  Some NVIDIA cards also show their pictures through a faster path now.
+- The game window no longer uploads an unused placeholder picture every frame while the native renderer is on (a
+  little less CPU work).
+- Motion trails (the after-image behind flying enemies, dashes and melee swings) are now a soft blur instead of
+  sharp slivers, so flyers no longer look doubled. F1 > Graphics > Motion trails: Smooth (default), Original, Off.
+- Intel graphics: boxes of flat colour no longer flash over the HUD (the health and weapon bars, the insignia) after an
+  autosave.
+- The sun's glare now fades out smoothly when something moves in front of the sun, instead of switching off at once.
+- Sounds beside or behind you (waterfalls, ambiences) no longer fade out on laptop and TV speakers: the game's Pro
+  Logic II surround encoding is replaced by plain stereo by default (F1 > Sound > Surround encoding).
+- Antarctica, played again after finishing it: crossing the cliff edge no longer changes the music (from the Research
+  Center end it switched to Starscream's theme there).
+- Deep Amazon: if you skip the temple, Cyclonus's fight now plays its own music, not the temple's (the original game's
+  own slip).
+- Looking at the sun no longer hides the crosshair, shots, blasts, the warp gate's light and the Mini-Con glow (on every
+  graphics card).
+- Characters' chrome reflections no longer flash single bright triangles; they now match the original's reflection.
+- The Tractor Mini-Con's beam no longer shows a solid white ball.
+- Save states: a state made with mods on and loaded without them (or the other way round) is now refused with a clear
+  message, instead of the game getting stuck in its next load.
+- Sharpening no longer over-sharpens bright, near-white areas. Thanks to TheBrousse.
+- The river no longer seems to rush: the HD textures' reflection maps (the sky seen in water and chrome) had thin bright
+  lines the upscaler added, which the waves swept across the water. Reflections now use the game's own soft maps.
+- HQ: Cybertron's Situation text in More Info is shown whole (it stopped mid-word, at "Autobot mis").
+- Vibration now works after "Restart to apply" and on Proton / Steam's virtual pad under Wine. Thanks to TPepperoni.
+- European disc: the keyboard and mouse hints now also name the mouse wheel and cover the Mini-Con texts in French,
+  German, Italian and Spanish. Thanks to TheBrousse.
+
 ## 0.7.0
 
 **New**
@@ -580,8 +662,8 @@
   and the fine details under "Advanced".
 - "Trees: Full 3D at any distance" option: no more flat trees popping in the distance (heavy; Ultra turns it on).
 - Xbox controllers vibrate, and the button prompts follow your controller (PlayStation or Xbox symbols, or your
-  keyboard keys).
-- Modern stick response: a light touch walks, running starts at about a third of the stick.
+  keyboard keys). Thanks to TPepperoni.
+- Modern stick response: a light touch walks, running starts at about a third of the stick. Thanks to TPepperoni.
 - The game's .exe now has its own icon, made from your disc.
 
 **Fixed**

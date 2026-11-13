@@ -52,6 +52,8 @@
 
 namespace native_sound
 {
+    std::function<std::string(const std::string &)> g_libraryRedirect; // setLibraryRedirect (native_sound.h)
+    std::function<std::vector<std::string>()> g_modLibraries;           // setModLibraries (native_sound.h)
     namespace
     {
         // The mixing thread (2026-10-23; TF_NATIVE_SOUND_THREAD=0: on the EE's): the frame packet's
@@ -695,7 +697,13 @@ namespace native_sound
                 const int32_t handle = a.i32();
                 const int32_t op = a.i32();
                 a.b();
-                const std::string file = a.str();
+                std::string file = a.str();
+                if (g_libraryRedirect)
+                    if (std::string instead = g_libraryRedirect(file); !instead.empty())
+                    {
+                        std::fprintf(stderr, "[native sound] tone library %d: '%s' in place of '%s'\n", handle, instead.c_str(), file.c_str());
+                        file = instead;
+                    }
                 // (op 0 at a level's start; a library named under another op is loaded too and the op
                 // logged once: a Mini-Con equipped in the middle of a level had no sounds - user,
                 // 2026-10-23 - and the op its load used was never seen)
@@ -731,6 +739,9 @@ namespace native_sound
                         const size_t ret = lower.size() >= 8 ? lower.size() - 8 : std::string::npos;
                         const bool revisit = ret != std::string::npos && lower.compare(ret, 8, "_ret.tla") == 0;
                         mixer::setFallbackLibrary(revisit ? file.substr(0, ret) + file.substr(ret + 4) : std::string());
+                        if (g_modLibraries)
+                            for (const std::string &extra : g_modLibraries())
+                                mixer::loadModLibrary(extra);
                     }
                     writeRecord(g_rdram);
                 }
@@ -794,7 +805,17 @@ namespace native_sound
                 const int32_t op = a.i32();
                 const std::string archive = a.str();
                 if (op == 0)
+                {
+                    // The disc as it is now: the mods' copy (mod_loader.h) is set up after the sound server is
+                    // installed, so a mod's sound files (SOUNDE) are read from it, not from game\.
+                    static std::filesystem::path disc;
+                    if (const std::filesystem::path now = PS2Runtime::getIoPaths().cdRoot; !now.empty() && now != disc)
+                    {
+                        disc = now;
+                        mixer::useDisc(now);
+                    }
                     mixer::mountArchive(archive);
+                }
                 break;
             }
             default: // the rest need no reply and change nothing the game can hear or see
@@ -934,6 +955,9 @@ namespace native_sound
         s.apply = [](const std::string &) { return false; }; // (takes a restart)
         ps2_settings::add(s);
     }
+
+    void setLibraryRedirect(std::function<std::string(const std::string &)> redirect) { g_libraryRedirect = std::move(redirect); }
+    void setModLibraries(std::function<std::vector<std::string>()> libraries) { g_modLibraries = std::move(libraries); }
 
     void install(PS2Runtime &runtime)
     {

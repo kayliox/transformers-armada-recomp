@@ -1,0 +1,35 @@
+Subject: [PATCH] Runtime: the game's vibration reaches an XInput pad under Wine when XInputGetState does not report it
+
+Under Proton (the Legion Go 2 in Steam's Game Mode) XInputGetState answered "not connected" for the pad Steam makes while XInputSetState on user 0 vibrated it (PS2X_XINPUT_TRACE=2 showed "ok"), so the game's vibration never reached the pad. Under Wine user 0 is now written to when no pad is found; a "not connected" answer lets go of it as before.
+
+--- a/ps2xRuntime/src/lib/ps2_xinput_rumble.cpp
++++ b/ps2xRuntime/src/lib/ps2_xinput_rumble.cpp
+@@ -128,6 +128,16 @@ namespace ps2x::xinput
+         int64_t g_nextScan = 0;
+         Speeds g_written;     // what the pad was last told (off: it is never touched before the game vibrates)
+ 
++        bool underWine()
++        {
++            static const bool wine = []()
++            {
++                const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
++                return ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
++            }();
++            return wine;
++        }
++
+         int firstConnectedUser()
+         {
+             for (DWORD i = 0; i < 4; ++i)
+@@ -290,7 +300,10 @@ namespace ps2x::xinput
+             g_user = firstConnectedUser();
+             if (g_user < 0)
+             {
+-                if (!test)
++                // (Under Wine - Proton on Linux - XInputGetState can answer "not connected" for a pad that XInputSetState vibrates:
++                // user 0 is written to then, and write() lets go of it when that answers "not connected" too: the next scan is a
++                // second later.)
++                if (!test && !underWine())
+                     return;
+                 g_user = 0; // (the test mode's call to an empty slot)
+             }

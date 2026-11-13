@@ -44,6 +44,9 @@ namespace tf::port
     uint64_t testTickNow();
     // (TODO 292) The mouse turns the view now: from its first travel taken until the pad's right stick moves (overrides.cpp).
     bool mouseTurnsView();
+    // (TODO 331) A cutscene script plays (taCutSceneSystem's byte 0x6CFB94: a level's opening, an HQ call, a Mini-Con or Data-Con
+    // discovery - any .CS script) - its camera, not the player's, makes the view (overrides.cpp).
+    bool cutscenePlaying(const uint8_t *rdram);
     // Display lists kicked so far (0x25D2B0): VIF1 and VU1 work on the newest one's batches until
     // the next kick, which waits for them - so it numbers the frame a batch belongs to.
     uint64_t listsKicked();

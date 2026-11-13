@@ -78,11 +78,16 @@ namespace gpu_recovery
         {
 #if defined(_WIN32)
             SetEnvironmentVariableA(name, value); // (null: removed - the new process's environment is this one's)
-#endif
             if (value)
                 _putenv_s(name, value);
             else
                 _putenv_s(name, "");
+#else
+            if (value)
+                setenv(name, value, 1);
+            else
+                unsetenv(name);
+#endif
         }
 
         std::atomic<bool> g_givenUp{false};

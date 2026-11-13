@@ -1,0 +1,165 @@
+Subject: [PATCH] Runtime: the EE clock waits split by the deadline that held them (TODO 295, only while TF_HITCH_MS > 0)
+
+A slow frame's "waited for the clock" did not say what the EE was held for. The scheduler now adds each wait for the clock to the deadline it waited on (VBlankStart, VBlankEnd, a DMA channel, an alarm, the EE timer, or no deadline at all), and takeIdleBreakdown() hands the totals since the last call to the game's slow-frame line. The bookkeeping runs only while TF_HITCH_MS is above 0 (read once), so it costs nothing otherwise.
+
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -13,6 +13,7 @@
+ #include <functional>
+ #include <mutex>
+ #include <optional>
++#include <string>
+ #include <thread>
+ #include <unordered_map>
+ #include <variant>
+@@ -584,6 +585,11 @@ public:
+     {
+         return std::chrono::nanoseconds(m_idleHostNs.load(std::memory_order_relaxed));
+     }
++    // (A measuring aid, only while TF_HITCH_MS is set: otherwise nothing is counted.) That idle time by what the EE
++    // waited for - the deadline the host clock held it at: a VBlank's start or end, a DMA channel's end, an alarm,
++    // the EE timer, or no deadline (an event from another thread: the IOP, the renderer). Taken and cleared: e.g.
++    // "VBlankStart 10.2 ms, Dmac9 3.1 ms".
++    [[nodiscard]] std::string takeIdleBreakdown();
+     // What keeps a state from being taken right now (host callbacks that cannot be
+     // written to a file), or empty.
+     [[nodiscard]] std::string saveStateBlocker() const;
+@@ -780,6 +786,12 @@ private:
+     std::atomic<uint64_t> m_nextDeadlineCycle{0};
+     std::atomic<int64_t> m_hostClockOffsetNs{0};
+     std::atomic<int64_t> m_idleHostNs{0}; // idleHostTime
++    // takeIdleBreakdown (TF_HITCH_MS): idle ns by what was waited for - 0 none, 1 timer, 2.. the EeEventType + Dmac
++    // channels (16 + channel).
++    void noteIdleFor(int what, std::chrono::steady_clock::duration waited);
++    static int idleWhat(const EeEvent &event);
++    std::mutex m_idleByMutex;
++    std::array<int64_t, 40> m_idleByNs{};
+     uint64_t m_turboUntilVSync = 0;
+     std::atomic<bool> m_turboHeld{false};
+ 
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -12,6 +12,7 @@ void ps2CaptureFrameAtVSync(PS2Runtime &runtime, uint64_t tick);
+ 
+ #include <algorithm>
+ #include <cassert>
++#include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+ #include <iostream>
+@@ -2170,6 +2171,13 @@ void EeScheduler::processDueDeadlines()
+                 updateNextDeadline();
+                 return;
+             }
++            int pacingWhat = 0; // (takeIdleBreakdown: the event the earliest due deadline is for)
++            for (const ScheduledEvent &item : m_deadlines)
++                if (item.deadlineCycle <= m_eeCycle && item.hostDeadline == pacingDeadline)
++                {
++                    pacingWhat = idleWhat(item.event);
++                    break;
++                }
+ 
+             if (now < pacingDeadline && turboActive())
+             {
+@@ -2185,6 +2193,7 @@ void EeScheduler::processDueDeadlines()
+                                            std::chrono::steady_clock::now() - waitStart)
+                                            .count(),
+                                        std::memory_order_relaxed);
++                noteIdleFor(pacingWhat, std::chrono::steady_clock::now() - waitStart);
+                 if (!m_events.empty() || m_stopRequested.load(std::memory_order_acquire))
+                 {
+                     updateNextDeadline();
+@@ -2433,6 +2442,61 @@ void EeScheduler::writeGuestU32(uint32_t address, uint32_t value)
+     std::memcpy(m_rdram + physical, &value, sizeof(value));
+ }
+ 
++namespace
++{
++    // takeIdleBreakdown: off unless TF_HITCH_MS is set (read once).
++    bool idleBreakdownOn()
++    {
++        static const bool on = []()
++        {
++            const char *e = std::getenv("TF_HITCH_MS");
++            return e && std::atof(e) > 0.0;
++        }();
++        return on;
++    }
++    const char *const kIdleNames[] = {"no deadline", "EE timer", "Stop", "VBlankStart", "VBlankEnd", "Dmac", "ExternalWake", "Alarm"};
++}
++
++int EeScheduler::idleWhat(const EeEvent &event)
++{
++    if (event.type == EeEventType::Dmac && event.id < 16u)
++        return 16 + static_cast<int>(event.id);
++    return 2 + static_cast<int>(event.type);
++}
++
++void EeScheduler::noteIdleFor(int what, std::chrono::steady_clock::duration waited)
++{
++    if (!idleBreakdownOn() || what < 0 || what >= static_cast<int>(m_idleByNs.size()))
++        return;
++    std::lock_guard<std::mutex> lock(m_idleByMutex);
++    m_idleByNs[static_cast<size_t>(what)] += std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count();
++}
++
++std::string EeScheduler::takeIdleBreakdown()
++{
++    if (!idleBreakdownOn())
++        return {};
++    std::array<int64_t, 40> by{};
++    {
++        std::lock_guard<std::mutex> lock(m_idleByMutex);
++        by = m_idleByNs;
++        m_idleByNs.fill(0);
++    }
++    std::string out;
++    char b[64];
++    for (size_t i = 0; i < by.size(); ++i)
++    {
++        if (by[i] < 100000) // (under 0.1 ms: left out)
++            continue;
++        if (i >= 16u)
++            std::snprintf(b, sizeof(b), "%sDmac%zu %.1f ms", out.empty() ? "" : ", ", i - 16u, by[i] / 1e6);
++        else
++            std::snprintf(b, sizeof(b), "%s%s %.1f ms", out.empty() ? "" : ", ", i < 8u ? kIdleNames[i] : "?", by[i] / 1e6);
++        out += b;
++    }
++    return out;
++}
++
+ void EeScheduler::waitForEvent()
+ {
+     std::unique_lock lock(m_eventMutex);
+@@ -2451,6 +2515,7 @@ void EeScheduler::waitForEvent()
+ 
+     uint64_t deadlineCycle = 0u;
+     auto hostDeadline = std::chrono::steady_clock::time_point::max();
++    int waitWhat = 0; // (takeIdleBreakdown)
+     if (!m_deadlines.empty())
+     {
+         const auto next = std::min_element(m_deadlines.begin(), m_deadlines.end(),
+@@ -2464,6 +2529,7 @@ void EeScheduler::waitForEvent()
+                                            });
+         deadlineCycle = next->deadlineCycle;
+         hostDeadline = next->hostDeadline;
++        waitWhat = idleWhat(next->event);
+     }
+     if (hasTimerDeadline)
+     {
+@@ -2472,6 +2538,7 @@ void EeScheduler::waitForEvent()
+         {
+             deadlineCycle = m_eeCycle + timerCycles;
+             hostDeadline = timerHostDeadline;
++            waitWhat = 1;
+         }
+     }
+ 
+@@ -2484,6 +2551,7 @@ void EeScheduler::waitForEvent()
+     m_idleHostNs.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - waitStart)
+                                .count(),
+                            std::memory_order_relaxed);
++    noteIdleFor(signaled ? 0 : waitWhat, std::chrono::steady_clock::now() - waitStart);
+     if (!signaled)
+     {
+         const uint64_t elapsed = deadlineCycle > m_eeCycle ? deadlineCycle - m_eeCycle : 0u;

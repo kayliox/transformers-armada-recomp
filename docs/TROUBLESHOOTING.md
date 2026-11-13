@@ -31,6 +31,13 @@ false alarm. Don't turn the antivirus off. Instead:
 - If it still fails, open an [issue](https://github.com/kayliox/transformers-armada-recomp/issues) with the end
   of the output.
 
+### On Linux the game stops with "cannot open shared object file"
+
+The build copies the FFmpeg libraries it found, and their own dependencies, beside the executable, so a folder
+normally plays on a machine without them. If one is missing, it is a folder copied without those files or a build
+from before they were copied: run `./setup.sh` (or `./build.sh`) again where you are, or copy the whole folder, not
+part of it.
+
 ### The game shows the original, blurry textures
 
 The HD textures were skipped or are not finished. Run `setup.ps1` again without `-SkipHdTextures`. Making them
@@ -88,7 +95,7 @@ Never attach disc images, save states, memory cards or play recordings: they con
 
 ### Is this an emulator?
 
-No. The game's own program is translated to C++ and built into a Windows program on your PC. A small runtime
+No. The game's own program is translated to C++ and built into a program for your PC. A small runtime
 stands in for the PS2 hardware, and the graphics and sound are replaced by native PC code.
 
 ### Why do I need my own disc?
@@ -107,7 +114,9 @@ folder you installed into.
 
 ### Does it run on Linux, macOS or the Steam Deck?
 
-Not yet. The port is a Windows program, and the renderer uses Direct3D 12. Other systems are not tested.
+Linux and the Steam Deck run it natively: build and play it with `./setup.sh` and `./play.sh` (see
+[the native Linux section](../README.md#linux-and-steam-deck-native)). A Steam Deck can also run the Windows build
+through Proton. macOS is not supported.
 
 ### How much faster than the PS2 is it?
 

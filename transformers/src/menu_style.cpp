@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <system_error>
 
@@ -106,6 +107,17 @@ namespace menu_style
                     return dir / name;
             if (std::strcmp(name, "Bahnschrift.ttf") == 0 && fs::exists("C:/Windows/Fonts/bahnschrift.ttf", e))
                 return "C:/Windows/Fonts/bahnschrift.ttf";
+#if defined(__linux__)
+            // The system's own sans (SteamOS / Arch, Debian / Ubuntu, Fedora paths) in place of the Windows fonts: else
+            // ImGui's built-in pixel font is scaled up, blocky.
+            const bool bold = std::strcmp(name, "Bahnschrift.ttf") != 0;
+            for (const char *dir : {"/usr/share/fonts/noto/", "/usr/share/fonts/truetype/noto/", "/usr/share/fonts/google-noto/"})
+                if (const fs::path p = fs::path(dir) / (bold ? "NotoSans-Bold.ttf" : "NotoSans-Regular.ttf"); fs::exists(p, e))
+                    return p;
+            for (const char *dir : {"/usr/share/fonts/TTF/", "/usr/share/fonts/truetype/dejavu/", "/usr/share/fonts/dejavu-sans-fonts/"})
+                if (const fs::path p = fs::path(dir) / (bold ? "DejaVuSans-Bold.ttf" : "DejaVuSans.ttf"); fs::exists(p, e))
+                    return p;
+#endif
             return {};
         }
 
@@ -163,7 +175,27 @@ namespace menu_style
 
     const Fonts &fonts() { return g_fonts; }
 
+#if defined(__linux__)
+    namespace
+    {
+        // A handheld PC (the BIOS's chassis type: 8 portable - the Steam Deck, 11 hand held, 30 tablet, 32 detachable):
+        // a 7-inch screen, the text a third larger.
+        float handheldScale()
+        {
+            static const float scale = []
+            {
+                std::ifstream in("/sys/class/dmi/id/chassis_type");
+                int type = 0;
+                in >> type;
+                return type == 8 || type == 11 || type == 30 || type == 32 ? 1.35f : 1.0f;
+            }();
+            return scale;
+        }
+    }
+    float textSize() { return std::clamp(static_cast<float>(GetScreenHeight()) / 42.0f * handheldScale(), 15.0f, 40.0f); }
+#else
     float textSize() { return std::clamp(static_cast<float>(GetScreenHeight()) / 42.0f, 15.0f, 40.0f); }
+#endif
 
     unsigned int colour(const char *name)
     {

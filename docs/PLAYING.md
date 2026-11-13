@@ -27,6 +27,10 @@ Something not working? See [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 The setup installs the rest: Git, Python and the Visual Studio C++ build tools. Windows may ask for permission.
 
+On Linux or a Steam Deck, the game also builds natively, without Windows or Proton: see
+[README.md's "Linux and Steam Deck (native)"](../README.md#linux-and-steam-deck-native). [Your files](#your-files)
+below shows where each layout keeps its files.
+
 ## Install
 
 ### With the setup program (recommended)
@@ -130,8 +134,13 @@ Change any key in **F1 > Controls**: click **Change** and press the new key, or 
 | F8 | Photo mode |
 | F11 | Switches between a window and full screen |
 
-Save states are kept in `saves\states` in the folder you installed into. They are a copy of the game's memory, so
-keep them private, like your disc image.
+Save states are kept in `saves\states` in the folder you installed into (`states` in the checkout on native
+Linux). They are a copy of the game's memory, so keep them private, like your disc image.
+
+A save state holds the game's memory as that build lays it out, so it loads only into a build with the same layout.
+The Windows and Linux builds can differ there: a state made by the Windows build has been refused by the Linux build
+with "made by a build with a different memory layout". Do not count on moving states between them. Memory cards are
+the game's own PS2 saves and work in both builds: move progress with **F1 > Saves**, or by copying `mc0` and `mc1`.
 
 ## Settings (F1)
 
@@ -149,7 +158,7 @@ Your choices are saved in `settings.ini` in the folder you installed into.
 | Screen | Which monitor the game uses. |
 | Aspect ratio | 4:3, 16:9, 21:9, Match screen, or Ultrawide 2.4:1. Wider shows more at the sides. |
 | Field of view | How wide the camera sees. |
-| Frame rate limit | The most frames a second the game draws: 30, 60, 90, 120, 144, 165, 240 or Unlimited. The game always runs at its true speed. |
+| Frame rate limit | The most frames a second the game draws: 30, 60, 90, 120, 144, 165, 240 or Unlimited (Linux also offers 45). The game always runs at its true speed. |
 | Show frame rate | A frame counter in the corner (F3). |
 | Sharp text | The game's fonts, redrawn sharp. |
 | Button prompts | Match device (your keys, or your controller's buttons), PlayStation, Xbox, or PS2 (original). |
@@ -169,8 +178,13 @@ Your choices are saved in `settings.ini` in the folder you installed into.
 | Anti-aliasing | Smooths jagged edges: edge filter, multisampling (up to 8x) and supersampling (1.5x). |
 | Texture quality | Texture sharpness and filtering. Low suits 4 GB graphics cards. |
 | Sharp distant textures | Keeps textures sharp into the distance on high-resolution screens. |
-| HD textures | The HD textures made from your disc, on or off (native renderer; takes a restart). Its buttons open their folder, **Make HD textures** (says the disk space and time first), **Verify HD textures** (checks every image and says what it found, changes nothing) and **Remake N broken images** (after a verify that found some). |
+| HD textures | The HD textures made from your disc, on or off (native renderer; takes a restart). Its buttons open their folder, **Make HD textures** (says the disk space and time first), **Verify HD textures** (checks images without changing them) and **Remake N broken images** (after a verify that found some). On Linux, the maker buttons show [commands to run in a terminal](BUILDING.md#hd-textures-and-sharp-fonts). |
 | Texture pack | Emulated renderer only: PCSX2 texture packs from a replacements folder. Not the HD textures. |
+
+On built-in graphics (Intel, AMD's in the processor) the game starts on the **Low** preset, drawn at a render
+scale of 67% and enlarged with FSR 1, which keeps it sharper than the PS2 (at least 480 lines; the PS2 shows 448).
+Only the settings you have not changed start there: anything you pick in F1 stays as you set it. Stronger built-in
+graphics (Iris Xe, recent AMD) can raise the preset.
 
 The **Ultra** preset sets everything to its highest but the forest: the longest distances, full enemy detail,
 8x multisampling with 1.5x supersampling and Ultra textures, with the forest at 2x. It needs a strong graphics
@@ -207,7 +221,7 @@ Volume, from Off to full.
 ### Saves
 
 Your memory card saves, and import or export of PS2 saves (through `saves\backups` and `saves\exports` in the
-folder you installed into). Save states by name.
+folder you installed into; `Saves/backups` and `Saves/exports` in the checkout on native Linux). Save states by name.
 
 ### About
 
@@ -240,7 +254,10 @@ To turn the automatic check off: **F1 > About > Check for updates automatically*
 
 ## Your files
 
-Everything the setup makes from your disc stays on your PC. In the folder you installed into:
+Everything the setup makes from your disc stays on your PC.
+
+**Windows: the install folder.** The setup keeps your things in folders of their own, so the whole folder can be
+copied or moved as one:
 
 | Folder or file | What it is |
 |---|---|
@@ -251,13 +268,29 @@ Everything the setup makes from your disc stays on your PC. In the folder you in
 | `data\` | Your extracted disc (`game`), the HD movies and the shader cache |
 | `transformers-armada-recomp\` | The game built from your disc (`work\`, `out\`), and the HD textures (`hd_textures\`) |
 
-To back up your saves, copy `saves`. To move the game to another drive, another PC or a Steam Deck, copy the whole
-folder you installed into: the game finds everything from where it is.
+**Linux (native): the checkout.** There is no separate install folder: the game and your files stay in the folder
+you cloned the repository into:
 
-Never share or upload `saves`, `data` or the built game: they contain game data.
+| Folder or file | What it is |
+|---|---|
+| `settings.ini` | Your settings |
+| `game/` | Your extracted disc, and your memory cards (`mc0`, `mc1`) |
+| `states/` | Save states |
+| `Saves/` | F1 > Saves' `backups` and `exports` |
+| `runs/` | The game's logs |
+| `hd_textures/` | The HD textures, made by `./tools/make_hd_textures.sh` |
+| `out/` | The game built from your disc |
 
-An install from before this layout is moved by its next update, after a backup of your saves and settings in
-`saves\backups`. The old files stay where they were.
+To back up your saves on Windows, copy `saves`; on Linux, copy `game/mc0`, `game/mc1`, `states` and `Saves`. To move
+the game to another drive, another PC or a Steam Deck, copy the whole install folder on Windows, or the whole
+checkout on Linux: the game finds everything from where it is.
+
+Never share or upload `saves`, `data` or the built game on Windows, or `game`, `states` or `Saves` on Linux: they
+contain game data.
+
+A Windows install from before this layout is moved by its next update, after a backup of your saves and settings in
+`saves\backups`. The old files stay where they were. The native Linux checkout already keeps its files this way, so
+nothing moves there.
 
 ## The European disc
 

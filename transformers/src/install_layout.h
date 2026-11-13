@@ -46,6 +46,9 @@ namespace install_layout
     std::filesystem::path logsDir();
     // F1 > Saves' own folder (backups, exports, imports): <root>\saves when it is there, else `today`.
     std::filesystem::path savesDir(const std::filesystem::path &today);
+    // (TODO 316) True when TF_MC_ROOT names a card the caller chose (a test's scratch card): set, and not this
+    // layout's own saves\mc0 (which apply() sets, and a restarted game inherits).
+    bool callerCardRoot();
     // What the log says about it at the start.
     std::string summary();
 }

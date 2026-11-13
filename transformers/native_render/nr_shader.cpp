@@ -100,6 +100,11 @@ namespace nr
             // ST that direction's y, z plus q0.xy (the effect's jumping offset), the colour q1 (its flicker). Unknown,
             // it drew the electricShock texture on the mesh's own UVs at full colour: a still purple coat.
             {0x1AC0u, 0x1E70u, 0x40F490F10159C61Eull, Routine::ElectricShock, true},
+            // (TODO 305) Image 6b20's 0x1e70 (to its jr's delay slot, 0x2030; tools/vu1_trace.py --spec 2 on captured batches,
+            // PS2X_VU1_CAPTURE="1e70/q35 25e0/q37 1410/q3a 0480/qd@6b20#4"): the tractor beam's ball, table 1e70 25e0 1410 0480 -
+            // S the normal dotted with the direction to the eye q0 (plus q0.w), T and Q the mesh's. Unknown, the ball drew
+            // with its white vertex colour and the mesh's own UVs, added in: a solid white ball (0x25e0 then sends alpha 0).
+            {0x1E70u, 0x2030u, 0x160CDCF173F65748ull, Routine::ViewRamp},
         };
 
         struct Tracker
@@ -141,6 +146,10 @@ namespace nr
                     static const bool anywhereOff = std::getenv("TF_NATIVE_ANYWHERE") && *std::getenv("TF_NATIVE_ANYWHERE") == '0';
                     static const bool shockOff = std::getenv("TF_NATIVE_SHOCK") && *std::getenv("TF_NATIVE_SHOCK") == '0';
                     if (shockOff && k.routine == Routine::ElectricShock)
+                        continue;
+                    // (TODO 305: TF_NATIVE_VIEWRAMP=0 - the tractor beam's ball's 0x1e70 left unknown, as before)
+                    static const bool rampOff = std::getenv("TF_NATIVE_VIEWRAMP") && *std::getenv("TF_NATIVE_VIEWRAMP") == '0';
+                    if (rampOff && k.routine == Routine::ViewRamp)
                         continue;
                     const uint32_t size = k.end - k.start;
                     const bool at = k.start == address || (k.anywhere && !anywhereOff && address + size <= sizeof(t.micro));

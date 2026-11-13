@@ -55,7 +55,7 @@ word in memory, listed as "from"; none of them is ever written, except `0x6CDA44
 
 | Word | gp offset | Value, kind | Formula | At 30 (bits) | From | At 60 | At 120 | At 144 |
 |---|---|---|---|---|---|---|---|---|
-| `0x6CD2A0` | `-0x5E50` | 0.2 share (existing `kBlendShare02`) | 1-(1-s)^k | `3E4CCCCD` | (as now) | 0.105573 | 0.0542584 | 0.0454242 |
+| `0x6CD2A0` | `-0x5E50` | 0.2 share (existing `kBlendShare02`; read by PickFinalSpeed 0x476320's walk/run band at `0x4763CC` / `0x476430`, patched in config/overrides.toml since the first 60 fps build, and by human_mode.cpp's own copy of it) | 1-(1-s)^k | `3E4CCCCD` | (as now) | 0.105573 | 0.0542584 | 0.0454242 |
 | `0x6CD2A4` | `-0x5E4C` | 0.3 share (existing `kBlendShare03`) | 1-(1-s)^k | `3E99999A` | (as now) | 0.16334 | 0.0853088 | 0.0716136 |
 | `0x6CD2B4` | `-0x5E3C` | 0.1 share | 1-(1-s)^k | `3DCCCCCD` | `0x6CBC64` | 0.0513167 | 0.0259963 | 0.021711 |
 | `0x6CD2B8` | `-0x5E38` | 0.05 share | 1-(1-s)^k | `3D4CCCCD` | `0x6CBD88` | 0.0253206 | 0.0127415 | 0.0106292 |

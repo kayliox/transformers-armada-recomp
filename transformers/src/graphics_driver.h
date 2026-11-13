@@ -13,6 +13,12 @@ namespace graphics_driver
     // (User decision 2026-11-11) Built-in graphics or a card with under 3.5 GB of video memory (the GTX 1650's 4 GB
     // and up are not): no HD textures are made or streamed on it. TF_LOW_END=1 / 0 says so for tests.
     bool lowEnd();
+    // (TODO 295) On such a card the graphics settings start on the Low preset's values where the player has not set them:
+    // a setting's default there (for its settings row) - the given one elsewhere.
+    const char *defaultFor(const char *key, const char *normal);
+    // ... and those values put in place at the start for every one of them settings.ini (or the environment) does not set,
+    // so what reads them sees them. Once the player picks a value it is kept in settings.ini as any other choice.
+    void applyLowEndDefaults();
     // The card in a line for the HD texture tools (hd_textures\.gpu.json: card, its memory, low end or not).
     void writeGpuFile(const std::string &hdDir);
     // The warning for the F1 menu ("" when the driver is not known to be too old).

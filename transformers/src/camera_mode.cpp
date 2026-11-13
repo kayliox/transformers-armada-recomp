@@ -48,6 +48,7 @@
 // offset.
 
 #include "camera_mode.h"
+#include "port.h"
 
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
@@ -85,6 +86,12 @@ namespace camera_mode
         constexpr uint32_t kAimStateVtable = 0x006BFC50u; // taTransformerStateAim (R3: state 9, measured)
         std::atomic<bool> g_firstPerson{false}; // the mode (the window thread sets it)
         bool g_applied = false;                  // the mode the view was last set for
+        // (TODO 334) A cutscene script plays (tf::port::cutscenePlaying, the game thread's update notes it): first person waits
+        // - the game's switches to its third-person camera are left as they are (an HQ call's last shot and its Confirm /
+        // Repeat prompt come there, the script still running), the mod's field of view and aim zoom left out; when it ends,
+        // the view fades into first person (the switch's own cross-fade).
+        std::atomic<bool> g_cutscene{false};
+        bool firstPersonNow() { return g_firstPerson.load(std::memory_order_relaxed) && !g_cutscene.load(std::memory_order_relaxed); }
         uint32_t g_manager = 0u;
         int g_wanted = -1; // the script the game last switched to (before our substitution)
         std::atomic<bool> g_inVehicle{false}; // the game's own view is the car's (whatever first person shows)
@@ -167,7 +174,7 @@ namespace camera_mode
             const uint32_t index = getRegU32(ctx, 5);
             g_manager = manager;
             g_wanted = static_cast<int>(index);
-            if (g_firstPerson.load(std::memory_order_relaxed) && replaceable(vtableAt(rdram, manager, index)))
+            if (firstPersonNow() && replaceable(vtableAt(rdram, manager, index)))
             {
                 const int fp = indexOf(rdram, manager, kFirstPersonVtable);
                 if (fp >= 0)
@@ -217,6 +224,25 @@ namespace camera_mode
             std::memcpy(&f, &v, sizeof(f));
             return f;
         }
+
+        // (TODO 300 (4), the Apex mod's aim down sights) While the mod is on in first person the right mouse button is its ADS
+        // (setAdsOwner): held = adsHeld(), no recon mode on the mouse (the pad keeps it). The mod eases the amount (setAds): the
+        // view's field narrowed by its zoom (adsFovFactor, photo_mode's FOV hook) and the eye moved toward the sight.
+        std::atomic<bool> g_adsOwner{false}, g_adsHeld{false};
+        // (TODO 327) In third person the mod's aim is over the shoulder (setAdsShoulder, default on): the button held (or toggled)
+        // stays in the third-person view - no recon mode - and the mod narrows the field (adsFovFactor, g_adsThird this frame).
+        std::atomic<bool> g_adsShoulder{true}, g_adsThird{false};
+        // (TODO 300, the Apex page) The mod's field of view in first person on foot (degrees, horizontal at 16:9 - the game's
+        // own measure: its frustums take the horizontal half-angle from it, and 16:9 is where the port's Hor+ widening is 1;
+        // 0: the game's), and aim down sights as a toggle (a click in, a click out) instead of held.
+        std::atomic<float> g_apexFov{0.0f};
+        std::atomic<bool> g_adsToggle{false};
+        bool g_adsToggled = false;
+        // (TODO 300, right-click melee) The Apex mod decides at the button's press whether it is a melee (a target in the game's
+        // own melee reach) or aim down sights: the press is offered for two frames (takeAdsPress) before the aim goes in, and a
+        // melee's veto (setAdsVeto) keeps the aim out until the button is let go.
+        std::atomic<bool> g_rclickMelee{false}, g_adsPress{false}, g_adsVeto{false};
+        std::atomic<float> g_adsAmount{0.0f}, g_adsZoom{1.0f}, g_adsRight{0.0f}, g_adsDown{0.0f};
 
         // (TODO 190) The free look: the first-person view on foot turned to the camera control's angles (the header).
         void freeLook(uint8_t *rdram, uint32_t manager)
@@ -274,7 +300,8 @@ namespace camera_mode
                 g_manager = manager; // (a new level, or a state loaded)
                 g_wanted = static_cast<int>(word(rdram, manager + kCurrent));
             }
-            const bool want = g_firstPerson.load(std::memory_order_relaxed);
+            g_cutscene.store(tf::port::cutscenePlaying(rdram), std::memory_order_relaxed);
+            const bool want = firstPersonNow();
             if (want != g_applied)
             {
                 const uint32_t current = word(rdram, manager + kCurrent);
@@ -314,6 +341,7 @@ namespace camera_mode
     {
         std::atomic<bool> g_steadyEye{true};
         std::atomic<float> g_eyeDrop{0.0f}; // (TODO 300 h: the Apex mod's crouch)
+        std::atomic<bool> g_eyeLock{false};  // (TODO 333: the Apex mod's fixed eye - learnt standing, then kept)
         struct Eye
         {
             bool have = false;    // an offset learnt
@@ -321,6 +349,7 @@ namespace camera_mode
             float last[3] = {};   // the last correction (faded out with the view)
             int64_t at = 0;       // its time (ms)
             uint32_t root = 0u;
+            int standFrames = 0;  // (TODO 333: frames learnt standing since the root was taken)
         } g_eye;
     }
 
@@ -343,10 +372,28 @@ namespace camera_mode
                 position[i] += g_eye.last[i];
             }
             g_eye.have = false;
+            // (TODO 300 (4)) The Apex mod's aim down sights is the game's aiming view, whose own camera this is (not the
+            // first-person view's): its eye moved toward the sight - right of the view and down, by the eased amount.
+            const float ads = g_adsAmount.load(std::memory_order_relaxed);
+            if (why <= 2 && ads > 0.0f && g_firstPerson.load(std::memory_order_relaxed))
+            {
+                const uint32_t m = word(rdram, 0x006CF498u), list = m ? word(rdram, m + 8u) : 0u;
+                const uint32_t player = list && list != m + 4u ? word(rdram, list + 8u) : 0u;
+                const uint32_t creature = player ? word(rdram, player + 8u) : 0u, actor = creature ? word(rdram, creature + 0x54u) : 0u;
+                const uint32_t context = actor ? word(rdram, actor + kActorContext) : 0u;
+                const float yaw = context ? readFloat(rdram, context + kControlYaw) : 0.0f;
+                if (context && std::isfinite(yaw))
+                {
+                    const float right = g_adsRight.load(std::memory_order_relaxed), down = g_adsDown.load(std::memory_order_relaxed); // (TODO 327: as set)
+                    position[0] += std::sin(yaw) * right;
+                    position[1] -= std::cos(yaw) * right;
+                    position[2] -= down;
+                }
+            }
         };
         const uint32_t manager = g_manager;
         const float drop = g_eyeDrop.load(std::memory_order_relaxed);
-        if ((!g_steadyEye.load(std::memory_order_relaxed) && !log && drop == 0.0f) || !g_firstPerson.load(std::memory_order_relaxed) || !manager ||
+        if ((!g_steadyEye.load(std::memory_order_relaxed) && !log && drop == 0.0f && g_adsAmount.load(std::memory_order_relaxed) == 0.0f) || !g_firstPerson.load(std::memory_order_relaxed) || !manager ||
             g_wanted < 0 || vtableAt(rdram, manager, static_cast<uint32_t>(g_wanted)) != kThirdPersonVtable)
             return fadeOut(1); // (off, third person, the car's view, a cutscene's)
         const uint32_t script = scriptAt(rdram, manager, word(rdram, manager + kCurrent));
@@ -398,15 +445,27 @@ namespace camera_mode
             std::memcpy(g_eye.offset, local, sizeof(local));
             g_eye.have = true;
             g_eye.root = node;
+            g_eye.standFrames = 0;
+        }
+        else if (learn && g_eyeLock.load(std::memory_order_relaxed) && g_eye.standFrames >= 30)
+        {
+            // (TODO 333) The Apex mod's eye is fixed to the root, as Apex's: learnt over the first half second standing, then
+            // kept - the idle's sway, the walk's bob and the head the aiming view leaves lower (1 unit on Hot Shot, which the
+            // learning then followed down over a second and back up later: "the camera goes a bit forth and back") all left out
         }
         else if (learn)
         {
+            if (id == 0u)
+                ++g_eye.standFrames;
             const float k = 1.0f - std::exp(-dt / tau);
             for (int i = 0; i < 3; ++i)
                 g_eye.offset[i] += (local[i] - g_eye.offset[i]) * k;
         }
-        const float steady[3] = {root[0] + c * g_eye.offset[0] - s * g_eye.offset[1], root[1] + s * g_eye.offset[0] + c * g_eye.offset[1],
-                                 root[2] + g_eye.offset[2] - drop};
+        // (TODO 300 (4): the ADS eye, toward the sight - right of the facing and down, by the eased amount)
+        const float ads = g_adsAmount.load(std::memory_order_relaxed);
+        const float adsRight = ads > 0.0f ? g_adsRight.load(std::memory_order_relaxed) : 0.0f, adsDown = ads > 0.0f ? g_adsDown.load(std::memory_order_relaxed) : 0.0f;
+        const float steady[3] = {root[0] + c * g_eye.offset[0] - s * g_eye.offset[1] + s * adsRight,
+                                 root[1] + s * g_eye.offset[0] + c * g_eye.offset[1] - c * adsRight, root[2] + g_eye.offset[2] - drop - adsDown};
         if (log)
             std::fprintf(stderr, "[eye] t %lld state %u head %.3f %.3f %.3f eye %.3f %.3f %.3f root %.3f %.3f %.3f facing %.2f view %.2f %.2f%s\n", static_cast<long long>(now), id,
                          local[0], local[1], local[2], g_eye.offset[0], g_eye.offset[1], g_eye.offset[2], root[0], root[1], root[2],
@@ -416,8 +475,11 @@ namespace camera_mode
         {
             for (float &v : g_eye.last)
                 v = 0.0f; // (the setting off: the head's view kept, only a crouch's drop)
-            g_eye.last[2] = -drop;
-            position[2] -= drop;
+            g_eye.last[0] = s * adsRight;
+            g_eye.last[1] = -c * adsRight;
+            g_eye.last[2] = -drop - adsDown;
+            for (int i = 0; i < 3; ++i)
+                position[i] += g_eye.last[i];
             return;
         }
         for (int i = 0; i < 3; ++i)
@@ -427,6 +489,7 @@ namespace camera_mode
         }
     }
 
+    void setEyeLock(bool on) { g_eyeLock.store(on, std::memory_order_relaxed); }
     void setEyeDrop(float units) { g_eyeDrop.store(std::isfinite(units) ? std::clamp(units, 0.0f, 10.0f) : 0.0f, std::memory_order_relaxed); }
 
     void install(PS2Runtime &runtime)
@@ -457,6 +520,39 @@ namespace camera_mode
     }
 
     void setAim(bool on) { g_aim.store(on); }
+    void setAdsOwner(bool on) { g_adsOwner.store(on, std::memory_order_relaxed); }
+    void setAdsShoulder(bool on) { g_adsShoulder.store(on, std::memory_order_relaxed); }
+    bool adsShoulder() { return g_adsThird.load(std::memory_order_relaxed); }
+    bool adsHeld() { return g_adsHeld.load(std::memory_order_relaxed); }
+    void setAds(float amount, float zoom, float right, float down)
+    {
+        const auto ok = [](float v, float lo, float hi, float otherwise) { return std::isfinite(v) ? std::clamp(v, lo, hi) : otherwise; };
+        g_adsAmount.store(ok(amount, 0.0f, 1.0f, 0.0f), std::memory_order_relaxed);
+        g_adsZoom.store(ok(zoom, 1.0f, 8.0f, 1.0f), std::memory_order_relaxed);
+        g_adsRight.store(ok(right, -3.0f, 3.0f, 0.0f), std::memory_order_relaxed);
+        g_adsDown.store(ok(down, -3.0f, 3.0f, 0.0f), std::memory_order_relaxed);
+    }
+    void setApexFov(float degrees) { g_apexFov.store(std::isfinite(degrees) ? std::clamp(degrees, 0.0f, 150.0f) : 0.0f, std::memory_order_relaxed); }
+    bool apexFovActive() { return g_apexFov.load(std::memory_order_relaxed) > 0.0f && firstPersonNow() && !inVehicle(); }
+    void setAdsToggle(bool on) { g_adsToggle.store(on, std::memory_order_relaxed); }
+    void setRclickMelee(bool on) { g_rclickMelee.store(on, std::memory_order_relaxed); }
+    bool takeAdsPress() { return g_adsPress.exchange(false, std::memory_order_relaxed); }
+    void setAdsVeto() { g_adsVeto.store(true, std::memory_order_relaxed); }
+    float fieldOfView(float game)
+    {
+        // the mod's own in first person on foot (in place of the game's), then aim down sights' zoom
+        const float base = apexFovActive() ? g_apexFov.load(std::memory_order_relaxed) : game;
+        return base * adsFovFactor();
+    }
+    float adsFovFactor()
+    {
+        // (the field of view at amount a: from 1 down to 1 / zoom; only while first person is the view on foot)
+        const float a = g_adsAmount.load(std::memory_order_relaxed);
+        if (a <= 0.0f || g_cutscene.load(std::memory_order_relaxed) ||
+            !(g_firstPerson.load(std::memory_order_relaxed) || g_adsThird.load(std::memory_order_relaxed)))
+            return 1.0f;
+        return 1.0f + a * (1.0f / g_adsZoom.load(std::memory_order_relaxed) - 1.0f);
+    }
     void noteCameraTransform(uint32_t transform) { g_cameraTransform.store(transform, std::memory_order_relaxed); }
     bool aim() { return g_aim.load(); }
     bool inVehicle()
@@ -604,7 +700,14 @@ namespace camera_mode
         // let go; the wheel's notches step the zoom while held (up: closer, down: back), unless the layout binds that wheel
         // way to a button - a binding always wins. TF_HOLD_TEST=<frame>:<frames>,... and TF_WHEEL_TEST=<frame>:<notches>,...
         // (tests: the button held for that many level frames, wheel notches injected at a frame - TF_RECON_CLICKS' count).
-        if (g_rightAim.load(std::memory_order_relaxed) == 1 && !ps2_host_input::mouseButtonBound(1))
+        // (TODO 300 (4)) The Apex mod's aim down sights is the game's aiming view held this way too, whatever Right-click aim is
+        // set to, while the mod owns the button in first person (setAdsOwner); adsHeld() tells the mod the button is held.
+        const bool shoulder = g_adsOwner.load(std::memory_order_relaxed) && !g_firstPerson.load(std::memory_order_relaxed) &&
+                              g_adsShoulder.load(std::memory_order_relaxed);
+        const bool apexAds = g_adsOwner.load(std::memory_order_relaxed) && (g_firstPerson.load(std::memory_order_relaxed) || shoulder);
+        g_adsHeld.store(false, std::memory_order_relaxed);
+        g_adsThird.store(false, std::memory_order_relaxed);
+        if ((g_rightAim.load(std::memory_order_relaxed) == 1 || apexAds) && !ps2_host_input::mouseButtonBound(1))
         {
             static long levelFrames = 0;
             static std::vector<std::pair<long, long>> holds;
@@ -638,7 +741,56 @@ namespace camera_mode
                 while (nextWheel < wheels.size() && levelFrames >= wheels[nextWheel].first)
                     ps2_host_input::injectMouseWheel(wheels[nextWheel++].second);
             }
-            const bool held = ps2_host_input::mouseButtonHeld(1) || testHeld;
+            bool held = ps2_host_input::mouseButtonHeld(1) || testHeld;
+            if (apexAds && g_rclickMelee.load(std::memory_order_relaxed))
+            {
+                static bool wasDown = false;
+                static int pressAge = -1; // (frames since the press; -1: none waiting)
+                if (held && !wasDown && actor)
+                {
+                    g_adsPress.store(true, std::memory_order_relaxed);
+                    pressAge = 0;
+                }
+                else if (pressAge >= 0 && ++pressAge > 2)
+                {
+                    g_adsPress.store(false, std::memory_order_relaxed);
+                    pressAge = -1;
+                }
+                wasDown = held;
+                if (!held)
+                    g_adsVeto.store(false, std::memory_order_relaxed);
+                if (g_adsVeto.load(std::memory_order_relaxed) || (pressAge >= 0 && pressAge < 2))
+                    held = false; // (a melee, or still deciding)
+            }
+            if (apexAds && g_adsToggle.load(std::memory_order_relaxed))
+            {
+                // (Toggle: each click flips it; out of a level or the view left another way (a hit, the car) it is off)
+                static bool wasDown = false;
+                if (held && !wasDown && actor)
+                    g_adsToggled = !g_adsToggled;
+                wasDown = held;
+                if (!actor)
+                    g_adsToggled = false;
+                held = g_adsToggled;
+            }
+            else
+                g_adsToggled = false;
+            g_adsHeld.store(actor != 0u && held, std::memory_order_relaxed);
+            if (shoulder)
+            {
+                // (TODO 327) Over the shoulder: the mod zooms the third-person view; the game's aiming view is not entered
+                // (the wheel is left to its other uses). One entered before (the view switched while in it) is left.
+                g_adsThird.store(actor != 0u, std::memory_order_relaxed);
+                if (actor && state == kLookState && g_holdEntered && g_holdWait <= 0 && g_reconFrames.load(std::memory_order_relaxed) <= 0)
+                {
+                    reconPress(kL3, "over the shoulder: leave recon mode (L3)");
+                    g_holdWait = kPressFrames + 3;
+                    g_holdEntered = false;
+                }
+                else if (g_holdWait > 0)
+                    --g_holdWait;
+                return;
+            }
             // (the wheel's notches for the zoom: taken every frame, used only unbound, while aiming)
             const int up = ps2_host_input::takeMouseButtonPresses(ps2_host_input::kMouseWheelUpButton);
             const int down = ps2_host_input::takeMouseButtonPresses(ps2_host_input::kMouseWheelDownButton);

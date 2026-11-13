@@ -153,28 +153,36 @@ namespace key_text
         // own phrases for the sticks and the buttons (Windows-1252, as the tables hold them), said with the player's keys
         // in each language's words - "touche" / "Taste" / "tasto", the mouse as "Souris" / "Maus" / "Mouse" / "Rat\xf3n",
         // the mouse buttons named in the language. Nothing matches a string of another language, so the English table
-        // (and the USA disc) is untouched. The same text when nothing in it changes.
-        std::string europeanText(const std::string &original, const std::map<std::string, std::vector<std::string>> &keys)
+        // (and the USA disc) is untouched. The same text when nothing in it changes. `compact`: a key named without the
+        // word for "key" ("Appuyer sur SPACE", "Auf SPACE legen", "Collega a SPACE"), for a line too long the other way.
+        std::string europeanText(const std::string &original, const std::map<std::string, std::vector<std::string>> &keys,
+                                 bool compact = false)
         {
             const auto has = [&](const char *t) { return original.find(t) != std::string::npos; };
-            const int lang = has("analogique") || has("Recon avec R3")                      ? 1   // French
-                             : has("Analog-Stick") || has("Aufkl\xe4rung: R3")               ? 2   // German
-                             : has("evetta analogica") || has("Ricognizione: tasto R3")      ? 3   // Italian
-                             : has("oystick anal\xf3g") || has("Recon. bot\xf3n R3")         ? 4   // Spanish
-                                                                                             : 0;
+            // (the Mini-Con descriptions and their equip page name only buttons: "touche R1", "R1-Taste", "tasto R1",
+            // "bot\xf3n R1" - words no English string holds)
+            const int lang = has("analogique") || has("Recon avec R3") || has("touche")                      ? 1 // French
+                             : has("Analog-Stick") || has("Aufkl\xe4rung: R3") || has("-Taste") || has(" mit L2 ") ? 2 // German
+                             : has("evetta analogica") || has("tasto ") || has("tasti L1")                   ? 3 // Italian
+                             : has("oystick anal\xf3g") || has("bot\xf3n") || has("botones L1")              ? 4 // Spanish
+                                                                                                             : 0;
             if (lang == 0)
                 return original;
             // (the mouse buttons' names, as keyWord gives them in English, in the string's language)
             static const std::map<std::string, std::string> mouse[5] = {
                 {},
                 {{"left click", "clic gauche"}, {"right click", "clic droit"}, {"middle click", "clic milieu"},
-                 {"side mouse button", "bouton souris"}, {"extra mouse button", "bouton souris"}},
+                 {"side mouse button", "bouton souris"}, {"extra mouse button", "bouton souris"},
+                 {"wheel up", "molette haut"}, {"wheel down", "molette bas"}},
                 {{"left click", "Linksklick"}, {"right click", "Rechtsklick"}, {"middle click", "Mittelklick"},
-                 {"side mouse button", "Maustaste"}, {"extra mouse button", "Maustaste"}},
+                 {"side mouse button", "Maustaste"}, {"extra mouse button", "Maustaste"},
+                 {"wheel up", "Mausrad hoch"}, {"wheel down", "Mausrad runter"}},
                 {{"left click", "clic sinistro"}, {"right click", "clic destro"}, {"middle click", "clic centrale"},
-                 {"side mouse button", "tasto mouse"}, {"extra mouse button", "tasto mouse"}},
+                 {"side mouse button", "tasto mouse"}, {"extra mouse button", "tasto mouse"},
+                 {"wheel up", "rotellina su"}, {"wheel down", "rotellina gi\xf9"}},
                 {{"left click", "clic izquierdo"}, {"right click", "clic derecho"}, {"middle click", "clic central"},
-                 {"side mouse button", "bot\xf3n del rat\xf3n"}, {"extra mouse button", "bot\xf3n del rat\xf3n"}}};
+                 {"side mouse button", "bot\xf3n del rat\xf3n"}, {"extra mouse button", "bot\xf3n del rat\xf3n"},
+                 {"wheel up", "rueda arriba"}, {"wheel down", "rueda abajo"}}};
             const auto key = [&](const char *button) {
                 std::string k = shownKey(keys, button);
                 if (k.empty() && std::string(button) == "r3" && !ps2_host_input::mouseButtonBound(1))
@@ -187,6 +195,19 @@ namespace key_text
             const std::string l1 = key("l1"), cross = key("cross"), r3 = key("r3");
             // (a button on the mouse is no key: "le clic milieu", not "la touche clic milieu")
             const auto onMouse = [&](const char *button) { return mouse[lang].count(shownKey(keys, button)) != 0; };
+            // (the wheel is feminine in French and Italian: "la molette haut enfonc\xe9e", "la rotellina su")
+            const auto wheel = [](const std::string &name) { return name.rfind("molette", 0) == 0 || name.rfind("rotellina", 0) == 0; };
+            // (TODO 288 in the other languages: the shoulder buttons the Mini-Cons are equipped to. A mouse button starts
+            // the sentence as English's "Left-click to fire" does - "Clic gauche pour tirer", "Linksklick, um ...",
+            // "Clic sinistro per sparare", "Clic izquierdo para disparar" - so the line stays no longer than the game's.)
+            static const std::pair<const char *, const char *> shoulders[] = {{"L1", "l1"}, {"L2", "l2"}, {"R1", "r1"}, {"R2", "r2"}};
+            const auto capital = [](std::string k) {
+                if (!k.empty())
+                    k[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(k[0])));
+                return k;
+            };
+            const std::string l2 = key("l2"), r1 = key("r1"), r2 = key("r2");
+            const bool allFour = !l1.empty() && !l2.empty() && !r1.empty() && !r2.empty();
             std::string s = original;
             if (lang == 1)
             {
@@ -194,15 +215,34 @@ namespace key_text
                 replaceAll(s, "joystick vers l'arri\xe8re", "touche " + down);
                 replaceAll(s, "Joystick analogique gauche", move);
                 replaceAll(s, "Joystick analogique droit", "Souris");
-                if (!l1.empty() && onMouse("l1"))
+                if (allFour)
+                    replaceAll(s, "aux touches L1, L2, R1 et R2", "\xe0 " + l1 + ", " + l2 + ", " + r1 + " et " + r2);
+                for (const auto &[name, button] : shoulders)
                 {
-                    replaceAll(s, "la touche L1 enfonc\xe9" "e", "le " + l1 + " enfonc\xe9");
-                    replaceAll(s, "touche L1 enfonc\xe9" "e", l1 + " enfonc\xe9");
-                    replaceAll(s, "la touche L1", "le " + l1);
-                    replaceAll(s, "touche L1", l1);
+                    const std::string k = key(button), touche = std::string("touche ") + name;
+                    if (k.empty())
+                        continue;
+                    if (!onMouse(button))
+                    {
+                        if (compact)
+                            replaceAll(s, "la " + touche, k);
+                        replaceAll(s, touche, compact ? k : "touche " + k);
+                        continue;
+                    }
+                    const std::string le = wheel(k) ? "la " : "le ", held = wheel(k) ? " enfonc\xe9" "e" : " enfonc\xe9";
+                    // ("la maintenir", "la rel\xe2cher": the key, now a click - "le maintenir", "le rel\xe2cher")
+                    if (s.find(touche) != std::string::npos)
+                    {
+                        replaceAll(s, "la maintenir enfonc\xe9" "e", le + "maintenir");
+                        replaceAll(s, "la rel\xe2" "cher", le + "rel\xe2" "cher");
+                    }
+                    replaceAll(s, "Appuyer sur la " + touche, capital(k));
+                    replaceAll(s, "Maintenir la " + touche + " enfonc\xe9" "e", "Maintenir " + le + k);
+                    replaceAll(s, "la " + touche + " enfonc\xe9" "e", le + k + held);
+                    replaceAll(s, touche + " enfonc\xe9" "e", k + held);
+                    replaceAll(s, "la " + touche, le + k);
+                    replaceAll(s, touche, k);
                 }
-                else if (!l1.empty())
-                    replaceAll(s, "touche L1", "touche " + l1);
                 if (!cross.empty())
                     replaceAll(s, "touche X", onMouse("cross") ? cross : "touche " + cross);
                 if (!r3.empty())
@@ -214,8 +254,25 @@ namespace key_text
                 replaceAll(s, "Linker Analog-Stick nach unten", down + "-Taste");
                 replaceAll(s, "Linker Analog-Stick", move);
                 replaceAll(s, "Rechter Analog-Stick", "Maus");
-                if (!l1.empty())
-                    replaceAll(s, "L1-Taste", onMouse("l1") ? l1 : l1 + "-Taste");
+                if (allFour)
+                    replaceAll(s, "auf die L1-, L2-, R1- und R2-Tasten", "auf " + l1 + ", " + l2 + ", " + r1 + " und " + r2);
+                for (const auto &[name, button] : shoulders)
+                {
+                    const std::string k = key(button), taste = std::string(name) + "-Taste";
+                    if (k.empty())
+                        continue;
+                    replaceAll(s, std::string(" mit ") + name + " ", " mit " + k + " ");
+                    if (!onMouse(button))
+                    {
+                        replaceAll(s, taste, compact ? k : k + "-Taste");
+                        continue;
+                    }
+                    if (s.find(taste) != std::string::npos)
+                        replaceAll(s, " gedr\xfc" "ckt halten", " halten");
+                    replaceAll(s, taste + " dr\xfc" "cken, um", k + ", um");
+                    replaceAll(s, taste + " zum Feuern dr\xfc" "cken", k + " zum Feuern");
+                    replaceAll(s, taste, k);
+                }
                 if (!cross.empty())
                     replaceAll(s, "X-Taste", onMouse("cross") ? cross : cross + "-Taste");
                 if (!r3.empty())
@@ -230,10 +287,43 @@ namespace key_text
                 replaceAll(s, "Levetta analogica destra", "Mouse");
                 if (!r3.empty())
                     replaceAll(s, "Ricognizione: tasto R3", "Ricognizione: " + r3);
-                if (!l1.empty())
-                    replaceAll(s, "tasto L1", onMouse("l1") ? l1 : "tasto " + l1);
+                if (allFour)
+                    replaceAll(s, "con i tasti L1, L2, R1 e R2", "con " + l1 + ", " + l2 + ", " + r1 + " e " + r2);
+                for (const auto &[name, button] : shoulders)
+                {
+                    const std::string k = key(button), tasto = std::string("tasto ") + name;
+                    if (k.empty())
+                        continue;
+                    if (!onMouse(button))
+                    {
+                        if (compact)
+                        {
+                            replaceAll(s, "al " + tasto, "a " + k);
+                            replaceAll(s, "il " + tasto, k);
+                        }
+                        replaceAll(s, tasto, compact ? k : "tasto " + k);
+                        continue;
+                    }
+                    const std::string il = wheel(k) ? "la " : "il ";
+                    if (wheel(k) && s.find(tasto) != std::string::npos)
+                        for (const char *it : {"premilo", "tienilo", "rilascialo"})
+                        {
+                            std::string la = it;
+                            la.back() = 'a'; // ("premila": the wheel)
+                            replaceAll(s, it, la);
+                        }
+                    replaceAll(s, "al " + tasto, (wheel(k) ? "alla " : "al ") + k);
+                    replaceAll(s, "Premi il " + tasto, capital(k));
+                    replaceAll(s, "Tieni premuto il " + tasto, "Tieni " + il + k);
+                    replaceAll(s, "il " + tasto, il + k);
+                    replaceAll(s, tasto, k);
+                }
                 if (!cross.empty())
+                {
+                    if (wheel(cross))
+                        replaceAll(s, "il tasto X", "la " + cross);
                     replaceAll(s, "tasto X", onMouse("cross") ? cross : "tasto " + cross);
+                }
             }
             else
             {
@@ -242,6 +332,26 @@ namespace key_text
                 replaceAll(s, "el joystick anal\xf3g. izq.", move);
                 replaceAll(s, "Joystick anal\xf3gico izquierdo", move);
                 replaceAll(s, "Joystick anal\xf3gico derecho", "Rat\xf3n");
+                if (allFour)
+                    replaceAll(s, "con los botones L1, L2, R1 y R2", "con " + l1 + ", " + l2 + ", " + r1 + " y " + r2);
+                for (const auto &[name, button] : shoulders)
+                {
+                    const std::string k = key(button), boton = std::string("bot\xf3n ") + name;
+                    if (k.empty())
+                        continue;
+                    if (!onMouse(button))
+                    {
+                        replaceAll(s, "al " + boton, "a " + k);
+                        replaceAll(s, "el " + boton, k);
+                        continue;
+                    }
+                    const std::string el = k.rfind("rueda", 0) == 0 ? "la " : "el ";
+                    replaceAll(s, "Pulsa el " + boton, capital(k));
+                    replaceAll(s, "Mant\xe9n pulsado el " + boton, "Mant\xe9n " + el + k);
+                    replaceAll(s, "Mant\xe9n el " + boton + " pulsado", "Mant\xe9n " + el + k);
+                    replaceAll(s, "al " + boton, (el == "el " ? "al " : "a la ") + k);
+                    replaceAll(s, "el " + boton, el + k);
+                }
                 if (!l1.empty())
                 {
                     replaceAll(s, "Pulsa L1", "Pulsa " + l1);
@@ -252,6 +362,8 @@ namespace key_text
                 if (!r3.empty())
                     replaceAll(s, "Recon. bot\xf3n R3", "Recon. " + r3);
             }
+            if (!compact && s.size() > original.size())
+                return europeanText(original, keys, true);
             return s;
         }
 
@@ -323,8 +435,13 @@ namespace key_text
             static const char *const marks[] = {"analog stick", "button", "Button",
 #if defined(TF_GAME_PAL)
                                                 "Joystick analogique", "joystick vers l'arri\xe8re", "Recon avec R3", "Analog-Stick",
-                                                "Aufkl\xe4rung: R3", "evetta analogica", "Ricognizione: tasto R3", "oystick anal\xf3g",
-                                                "Recon. bot\xf3n R3",
+                                                "Aufkl\xe4rung: R3", "evetta analogica", "oystick anal\xf3g",
+                                                // (the Mini-Con descriptions and their equip page in those languages - few
+                                                // and short, as every mark is a pass over the memory; "tasto R" and
+                                                // "bot\xf3n R" find the recon hints too. None finds the title's "START-Taste",
+                                                // "tasto START", "bot\xf3n START": mod_menu's, which this would put back.)
+                                                "touche", "1-Taste", "2-Taste", " mit L2 ", "tasto L", "tasto R", "tasti L1",
+                                                "bot\xf3n L", "bot\xf3n R", "botones L1",
 #endif
             };
             std::vector<uint32_t> starts;
@@ -377,11 +494,18 @@ namespace key_text
             if (epoch != g_epoch.load())
                 return; // (a load began while it searched: what it found may be freed - looked for again)
             // (TODO 309: the strings already rewritten no longer name a button, so the search does not find them: those still
-            // held as left are kept, with their originals)
+            // held as left are kept, with their originals. One the search finds again - a keyboard wording that still names a
+            // button, as the French "touche E" does - keeps the original it had: the search sees only the text written there.)
             for (Entry &e : g_entries)
-                if (std::none_of(found.begin(), found.end(), [&](const Entry &f) { return f.object == e.object && f.chars == e.chars; }) &&
-                    stillHeld(rdram, e))
+            {
+                if (!stillHeld(rdram, e))
+                    continue;
+                const auto same = std::find_if(found.begin(), found.end(), [&](const Entry &f) { return f.object == e.object && f.chars == e.chars; });
+                if (same != found.end())
+                    *same = std::move(e);
+                else
                     found.push_back(std::move(e));
+            }
             g_entries = std::move(found);
             g_searched = true;
         }

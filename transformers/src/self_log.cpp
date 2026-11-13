@@ -24,6 +24,8 @@
 #define NOMINMAX
 #include <io.h>
 #include <windows.h>
+#else
+#include <sys/stat.h>
 #endif
 
 namespace self_log
@@ -42,6 +44,13 @@ namespace self_log
                 return false;
             const DWORD type = GetFileType(h);
             return type == FILE_TYPE_DISK || type == FILE_TYPE_PIPE;
+        }
+#else
+        // (the same on Linux: a file, a pipe or a socket keeps it - a terminal, /dev/null or nothing does not)
+        bool redirected()
+        {
+            struct stat st{};
+            return fstat(2, &st) == 0 && (S_ISREG(st.st_mode) || S_ISFIFO(st.st_mode) || S_ISSOCK(st.st_mode));
         }
 #endif
 
@@ -69,7 +78,6 @@ namespace self_log
 
     void start()
     {
-#if defined(_WIN32)
         if (const char *e = std::getenv("TF_SELF_LOG"); e && *e == '0')
             return;
         if (redirected())
@@ -83,8 +91,9 @@ namespace self_log
         prune(dir);
         const std::time_t now = std::time(nullptr);
         std::tm local{};
-        localtime_s(&local, &now);
         char stamp[32];
+#if defined(_WIN32)
+        localtime_s(&local, &now);
         std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &local);
         const std::string base = (dir / (std::string("play_") + stamp)).string();
         // (freopen, not freopen_s: the secure one opens a file for writing with no sharing at all, so nothing could
@@ -99,7 +108,15 @@ namespace self_log
         SetStdHandle(STD_ERROR_HANDLE, reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(stderr))));
         if (out)
             SetStdHandle(STD_OUTPUT_HANDLE, reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(stdout))));
-        std::fprintf(stderr, "[log] this session's log: %s.err (TF_SELF_LOG=0: none)\n", base.c_str());
+#else
+        localtime_r(&now, &local);
+        std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &local);
+        const std::string base = (dir / (std::string("play_") + stamp)).string();
+        // (glibc's freopen keeps the descriptors 1 and 2: a process started again inherits the files)
+        if (!std::freopen((base + ".err").c_str(), "w", stderr))
+            return;
+        std::freopen((base + ".out").c_str(), "w", stdout);
 #endif
+        std::fprintf(stderr, "[log] this session's log: %s.err (TF_SELF_LOG=0: none)\n", base.c_str());
     }
 }

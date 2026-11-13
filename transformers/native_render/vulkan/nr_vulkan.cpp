@@ -38,7 +38,11 @@
 #include "nr_backend.h"
 #include "nr_device.h"
 #include "nr_frame.h"
+#include "nr_glshare.h" // (d3d::SharedPicture: the hand-over's metadata)
 #include "nr_hlsl_sources.h" // (generated at build time from nr_d3d.cpp: extract_hlsl.cmake)
+#if defined(__linux__)
+#include "nr_picture_mailbox.h" // (Published: the TF_VK_ALONE CPU hand-over, tested by tests/vulkan_picture_tests.cpp)
+#endif
 #include "nr_policy.h"
 #include "nr_types.h"
 #include "nr_vulkan_shaders.h" // (the SPIR-V the build compiled: bake_spirv.cpp)
@@ -66,6 +70,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace nr::vulkan
@@ -371,6 +376,11 @@ namespace nr::vulkan
             std::vector<gfx::ReadbackId> readbackFree[kSlots], readbackReleased[kSlots];
             gfx::ReadbackId publishRead[kSlots] = {}; // (TF_VK_ALONE: the picture for the window, read back)
             bool publishHas3D[kSlots] = {};
+#if defined(__linux__)
+            uint64_t publishTick[kSlots] = {};    // (the frame's VBlank and its picture's moment, for the hand-over)
+            int64_t publishDueNs[kSlots] = {};
+            uint64_t publishTurn[kSlots] = {};    // (the frame's id: the pacing log's turn)
+#endif
             // ---- time stamps ----
             VkQueryPool stamps = VK_NULL_HANDLE;
             uint32_t stampsUsed[kSlots] = {};
@@ -398,6 +408,9 @@ namespace nr::vulkan
             return on;
         }
 
+#if defined(__linux__)
+        Published g_pub;
+#else
         // TF_VK_ALONE: the newest picture as CPU pixels for the main window (latestPicture / waitPicture).
         struct Published
         {
@@ -410,6 +423,7 @@ namespace nr::vulkan
             int64_t lastNs = 0;
         };
         Published g_pub;
+#endif
 
         // ---- the window (SDL3): made and pumped on a thread of its own ----------------------------------------------
         // (The main window is still the runtime's raylib window on the main thread; this one is the Vulkan backend's own.
@@ -2240,6 +2254,11 @@ namespace nr::vulkan
             ReadbackBuffer &rb = g.readbacks[r];
             if (rb.format == gfx::Format::RGBA8 && rb.mem.mapped)
             {
+#if defined(__linux__)
+                const int64_t readyNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+                g_pub.publish(rb.mem.mapped, rb.w, rb.h, rb.rowBytes, g.publishHas3D[s], g.publishTick[s], g.publishDueNs[s],
+                              readyNs, g.publishTurn[s]);
+#else
                 std::lock_guard<std::mutex> lock(g_pub.mutex);
                 g_pub.pixels.resize(static_cast<size_t>(rb.w) * rb.h);
                 for (uint32_t y = 0; y < rb.h; ++y)
@@ -2249,8 +2268,11 @@ namespace nr::vulkan
                 g_pub.has3D = g.publishHas3D[s];
                 ++g_pub.serial;
                 g_pub.lastNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+#endif
             }
+#if !defined(__linux__)
             g_pub.cv.notify_all();
+#endif
             rb.live = false;
             g.readbackReleased[rb.slot].push_back(r);
         }
@@ -2750,6 +2772,11 @@ namespace nr::vulkan
                 {
                     g.publishRead[s] = readTarget(end.picture);
                     g.publishHas3D[s] = end.frame && end.frame->has3D;
+#if defined(__linux__)
+                    g.publishTick[s] = end.frame ? end.frame->tick : 0;
+                    g.publishDueNs[s] = end.pictures.empty() ? 0 : end.pictures[0].dueNs; // (the picture Vulkan draws: the first)
+                    g.publishTurn[s] = g.frameIndex;
+#endif
                 }
                 // (Milestone 3) The game's window: the picture copied into a window picture of its own, which the window's
                 // thread draws with the overlays and presents in a submit of its own (nr_vulkan_window.h) - this frame's
@@ -3869,6 +3896,14 @@ namespace nr::vulkan
             void preUpload(const std::shared_ptr<const Texture> &texture) override { frame::preUpload(texture); }
 
             // TF_VK_ALONE: the picture as CPU pixels (RGBA8, R in the low byte) - the main window's CPU hand-over.
+#if defined(__linux__)
+            // The pixels stay valid and unchanged until pictureShown, newer publications going into the other buffer.
+            bool latestPicture(const uint8_t *&pixels, uint32_t &rowPitch, int &index, uint64_t &serial, d3d::SharedPicture &meta) override
+            {
+                return g_pub.take(pixels, rowPitch, index, serial, meta);
+            }
+            void pictureShown(int index) override { g_pub.shown(index); }
+#else
             bool latestPicture(std::vector<uint32_t> &pixels, uint32_t &width, uint32_t &height, uint64_t &serial, bool &has3D) override
             {
                 std::lock_guard<std::mutex> lock(g_pub.mutex);
@@ -3881,6 +3916,7 @@ namespace nr::vulkan
                 serial = g_pub.serial;
                 return true;
             }
+#endif
             void setSharedPictures(bool on) override
             {
                 static bool told = false;
@@ -3894,14 +3930,20 @@ namespace nr::vulkan
             void sharedHeld(int) override {}
             bool waitPicture(uint64_t serial, int64_t untilNs, int64_t &lastNs) override
             {
+                // (the SDL3 window publishes its pictures separately from the TF_VK_ALONE mailbox)
                 if (vk::window::on())
                     return vk::window::waitNewer(serial, untilNs, lastNs);
+#if defined(__linux__)
+                return g_pub.wait(serial, untilNs, lastNs);
+#else
                 std::unique_lock<std::mutex> lock(g_pub.mutex);
                 const auto until = Clock::time_point(std::chrono::nanoseconds(untilNs));
                 g_pub.cv.wait_until(lock, until, [serial] { return g_pub.serial != serial; });
                 lastNs = g_pub.lastNs;
                 return g_pub.serial != serial;
+#endif
             }
+
             // (the game's window: each picture shown when the shared pacer hands it over - nr_pace.h, TF_PACING)
             int pacingMode() override { return vk::window::on() ? pace::mode() : 0; }
             bool presentsWindow() override { return vk::window::on(); }
@@ -3910,7 +3952,15 @@ namespace nr::vulkan
                 return vk::window::on() && vk::window::latest(out.texture, out.width, out.height, out.serial, out.has3D, out.tick, out.dueNs, out.readyNs);
             }
 
+#if defined(__linux__)
+            void setWindowSize(int width, int height) override
+            {
+                frame::g_windowWidth.store(width, std::memory_order_relaxed);
+                frame::g_windowLines.store(height, std::memory_order_relaxed);
+            }
+#else
             void setWindowLines(int lines) override { frame::g_windowLines.store(lines, std::memory_order_relaxed); }
+#endif
             void setAntiAliasing(int mode) override { frame::g_aa.store(std::clamp(mode, 0, 2), std::memory_order_relaxed); }
             void setSupersampling(bool on) override { frame::g_ssaa.store(on ? 1 : 0, std::memory_order_relaxed); }
             void setSpeedupsForced(int on) override { frame::g_speedupsForced.store(on, std::memory_order_relaxed); }

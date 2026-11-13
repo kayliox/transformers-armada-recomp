@@ -19,13 +19,16 @@
 // camera and the player is hit; the in-between frames' point goes on the same ray. The weapons fire at the point as
 // before, so shots go where the crosshair is.
 //
-// Left to the game: R3's aiming view and first-person aiming (state 9 - its camera already looks at the point), first
-// person's free look (the eye looks along the aim: the crosshair already keeps its place), a
-// turret (state 0x13, the muzzles'), the jet bike (its own aim, port_ext.h), photo mode, and a frame whose eye is not
-// known or lies far from the pivot (a camera cut).
+// Left to the game: a cutscene script's camera and any camera not looking along the aim (TODO 331), R3's aiming view
+// and first-person aiming (state 9 - its camera already looks at the point), first person's free look (the eye looks
+// along the aim: the crosshair already keeps its place), a turret (state 0x13, the muzzles'), the jet bike (its own
+// aim, port_ext.h), photo mode, and a frame whose eye is not known or lies far from the pivot (a camera cut).
 //
-// TF_STATIC_AIM: 1 = while the mouse turns the view (the default; the pad keeps the game's aim), 2 = always, 0 = the
-// game's. TF_AIM_LOG=1: the offset and the line, twice a second.
+// TF_STATIC_AIM: 1 = mouse and keyboard play (the default; a pad's input hands it back to the game's aim - TODO 322, before:
+// while the mouse turned the view), 2 = always, 0 = the game's. TF_AIM_LOG=1: the offset and the line, twice a second.
+// (TODO 322) While it holds, the crosshair is pinned to one screen point (pinned(): the line's fixed height in third person,
+// the centre in first person and the aiming view) - photo_mode places the game's model on the camera's ray through it each
+// frame and small_crosshair draws there.
 //
 // Decomp equivalent: CalculateCrosshair taking the start of its line test from the camera's eye (projected to the
 // pivot's depth) rather than the pivot.
@@ -40,9 +43,11 @@
 
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
+#include "runtime/ps2_host_input.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_settings.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -65,6 +70,36 @@ namespace static_aim
 
         PS2Runtime::RecompiledFunction g_crosshair = nullptr, g_collision = nullptr, g_aimDirection = nullptr, g_pivot = nullptr;
         std::atomic<int> g_mode{1}; // 0 the game's, 1 with the mouse, 2 always
+
+        // (TODO 322) The crosshair pinned to one screen point this frame: its share of half the view's height above the
+        // centre (0 in first person and the aiming view), and when that was decided (stale after a frame or two: the car,
+        // a cutscene, a menu - no CalculateCrosshair then).
+        std::atomic<float> g_pinShare{0.0f};
+        std::atomic<bool> g_pinOn{false};
+        std::atomic<int64_t> g_pinAtNs{0};
+
+        // (TODO 322) The still crosshair's height: a share of half the view's height above the centre - one fixed value, not
+        // learnt (the learnt value eased and crept; it always came out 0.179-0.180, where the game's own far point shows with
+        // the camera level). TF_STATIC_AIM_SHARE=<f>: another.
+        float stillShare()
+        {
+            static const float share = [] {
+                const char *e = std::getenv("TF_STATIC_AIM_SHARE");
+                const float v = e && *e ? std::strtof(e, nullptr) : 0.18f;
+                return std::isfinite(v) && std::fabs(v) < 0.6f ? v : 0.18f;
+            }();
+            return share;
+        }
+
+        // (TODO 322) Mouse and keyboard play: the still crosshair holds from the start, handed back to the game's aim only when
+        // a pad is used (a button, a trigger, a stick past half way - ps2_host_input::lastDevice). Before, it followed the mouse
+        // turning the view (mouseTurnsView), and an aim-stick value it took for the pad's handed it back mid-turn: the
+        // crosshair jumped between the two places (~2% of the height).
+        bool mouseAndKeyboard()
+        {
+            const int mode = g_mode.load(std::memory_order_relaxed);
+            return mode == 2 || (mode == 1 && ps2_host_input::lastDevice() == ps2_host_input::Device::Keyboard);
+        }
 
         struct V3
         {
@@ -156,6 +191,7 @@ namespace static_aim
             float tanUp = 0.0f;
             float prevPitch = 0.0f;
             bool shareKnown = false;
+            float leastAhead = 2.0f; // (TF_AIM_LOG: the camera's least ahead along the aim since the last line)
             float share = 0.0f;
         } g_offset;
 
@@ -223,33 +259,44 @@ namespace static_aim
             g_offset.camAhead = V3{dot(A, ahead), dot(A, right), dot(A, up)};
             g_offset.camUp = V3{dot(U, ahead), dot(U, right), dot(U, up)};
             g_offset.tanUp = tanUp;
-            // (the crosshair's height: where the game's own aim shows while the camera is level - its far point - learnt
-            // and kept; TF_STATIC_AIM_SHARE=<f> sets it, the share of half the picture's height above the centre)
-            static const float fixedShare = std::getenv("TF_STATIC_AIM_SHARE") ? std::strtof(std::getenv("TF_STATIC_AIM_SHARE"), nullptr) : -100.0f;
-            if (fixedShare > -99.0f)
+            // (TODO 331) The player's camera looks along the aim (the aim follows it); a scripted one - a cutscene's, the
+            // transformation's, any camera not behind the player looking his way - does not: its ray is not the
+            // crosshair's, and the aim point put on it would turn the torso toward wherever that camera looks. Left to
+            // the game (60 degrees and more apart: no turn of a frame goes that far).
+            const bool foreign = g_offset.camAhead.x < 0.5f;
+            g_offset.leastAhead = std::min(g_offset.leastAhead, g_offset.camAhead.x);
+            if (static bool was = false; foreign != was)
             {
-                g_offset.share = fixedShare;
-                g_offset.shareKnown = true;
+                was = foreign;
+                if (logOn())
+                    std::fprintf(stderr, "[aim] the camera %s (its ahead %.2f along the aim)\n",
+                                 foreign ? "does not look along the aim: the game's aim" : "looks along the aim again", g_offset.camAhead.x);
             }
-            else if (std::fabs(g_offset.prevPitch) < 0.06f)
+            if (foreign)
             {
-                const float along = dot(ahead, A);
-                if (along > 0.5f)
-                {
-                    const float share = dot(ahead, U) / along / tanUp;
-                    if (std::isfinite(share) && std::fabs(share) < 0.6f)
-                    {
-                        g_offset.share = g_offset.shareKnown ? g_offset.share + 0.1f * (share - g_offset.share) : share;
-                        g_offset.shareKnown = true;
-                    }
-                }
+                g_offset.valid = g_offset.camValid = false;
+                return;
             }
+            // (the crosshair's height: one fixed share of half the view's height above the centre - stillShare, TODO 322)
+            g_offset.share = stillShare();
+            g_offset.shareKnown = true;
         }
 
         bool wanted(const uint8_t *rdram, uint32_t context)
         {
-            const int mode = g_mode.load(std::memory_order_relaxed);
-            if (mode == 0 || (mode == 1 && !tf::port::mouseTurnsView()) || photo_mode::active() || context == 0u)
+            if (!mouseAndKeyboard() || photo_mode::active() || context == 0u)
+                return false;
+            // (TODO 331) A cutscene script plays - a level's opening, an HQ call, a Mini-Con or Data-Con discovery: the view is
+            // its camera's, and a line along that camera's ray pulled the aim point (and the torso that turns to it) round with
+            // the camera - the Autobot spun, his back always to it. The game's own aim then, as on the PS2.
+            const bool cutscene = tf::port::cutscenePlaying(rdram);
+            if (static bool was = false; cutscene != was)
+            {
+                was = cutscene;
+                if (logOn())
+                    std::fprintf(stderr, "[aim] a cutscene %s: %s\n", cutscene ? "plays" : "is over", cutscene ? "the game's aim" : "the still aim again");
+            }
+            if (cutscene)
                 return false;
             // (first person: the eye looks along the aim already - the game's crosshair keeps its place; measured, the line
             // moved it more than it does itself)
@@ -336,6 +383,36 @@ namespace static_aim
             g_collision(rdram, ctx, runtime);
         }
 
+        // (TODO 322) This frame's pin: mouse and keyboard play on foot - the still line's height in third person, the centre in
+        // first person and the aiming view (state 9: its camera looks at the point). Not on a turret, the jet bike, in photo
+        // mode or a cutscene (the game's aim there).
+        void notePin(const uint8_t *rdram, uint32_t context, bool lineActive)
+        {
+            bool on = false;
+            float share = 0.0f;
+            if (mouseAndKeyboard() && !photo_mode::active() && context != 0u && !camera_mode::inVehicle() &&
+                !tf::port::cutscenePlaying(rdram)) // (TODO 331: a cutscene's camera is not the player's)
+            {
+                const uint32_t actor = word(rdram, context);
+                const uint32_t state = actor ? word(rdram, actor + kState) : 0u;
+                float bike[3];
+                if (state != 0x13u && !ext::aimPoint(rdram, bike))
+                {
+                    if (camera_mode::firstPerson() || state == 9u)
+                        on = true; // (share 0: the eye looks along the aim)
+                    else if (lineActive)
+                    {
+                        on = true;
+                        share = stillShare();
+                    }
+                }
+            }
+            g_pinShare.store(share, std::memory_order_relaxed);
+            g_pinOn.store(on, std::memory_order_relaxed);
+            g_pinAtNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+                            std::memory_order_relaxed);
+        }
+
         void calculateCrosshair(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t shader = getRegU32(ctx, 4), context = getRegU32(ctx, 5);
@@ -352,6 +429,7 @@ namespace static_aim
             if (active && g_call.far && !g_call.farDone)
                 placeFar(rdram); // (no body check this call)
             g_call.in = false;
+            notePin(rdram, context, active);
             if (g_call.havePivot)
             {
                 g_lastPivot.at = g_call.pivot;
@@ -380,14 +458,26 @@ namespace static_aim
                 {
                     last = now;
                     const V3 t = readV3(rdram, context + kTarget);
-                    std::fprintf(stderr, "[aim] eye from the pivot: ahead %.2f right %.2f up %.2f (%s), the crosshair %.3f up (%s); the line %s; point %.1f %.1f %.1f at %.1f\n",
+                    std::fprintf(stderr, "[aim] eye from the pivot: ahead %.2f right %.2f up %.2f (%s), the crosshair %.3f up (%s); the line %s; point %.1f %.1f %.1f at %.1f; the camera at least %.3f along the aim\n",
                                  g_offset.ahead, g_offset.right, g_offset.up, g_offset.valid ? "known" : "not known", g_offset.share,
                                  g_offset.shareKnown ? "learnt" : "not yet",
                                  g_call.lineDone ? "from the eye's line" : g_call.farDone ? "in-between on the eye's line" : "the game's", t.x, t.y, t.z,
-                                 fword(rdram, context + kRange));
+                                 fword(rdram, context + kRange), g_offset.leastAhead);
+                    g_offset.leastAhead = 2.0f;
                 }
             }
         }
+    }
+
+    bool pinned(float &share)
+    {
+        if (!g_pinOn.load(std::memory_order_relaxed))
+            return false;
+        const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (now - g_pinAtNs.load(std::memory_order_relaxed) > 150000000) // (no CalculateCrosshair lately: the car, a menu, a cut)
+            return false;
+        share = g_pinShare.load(std::memory_order_relaxed);
+        return true;
     }
 
     bool cameraPivot(float point[3])
@@ -425,8 +515,8 @@ namespace static_aim
         s.key = "TF_STATIC_AIM";
         s.section = "Mouse";
         s.label = "Still crosshair";
-        s.help = "The crosshair keeps one place on the screen, near or far, and shots go where it points. With the mouse: while "
-                 "the mouse turns the view (a controller keeps the game's aim). Off: the game's aim.";
+        s.help = "The crosshair keeps one place on the screen, near or far, turning or not, and shots go where it points. With the "
+                 "mouse: while you play with mouse and keyboard (a controller's input gives the game's own aim back). Off: the game's aim.";
         s.choices = {{"1", "With the mouse"}, {"2", "Always"}, {"0", "Off"}};
         s.defaultValue = "1";
         s.apply = [](const std::string &value)

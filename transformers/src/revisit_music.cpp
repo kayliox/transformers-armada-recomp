@@ -1,4 +1,5 @@
-// Antarctica's music on a revisit (docs/TODO.md item 83): an original PS2 bug, fixed here.
+// Antarctica's music on a revisit (docs/TODO.md item 83), and the music-step triggers landing on their own track
+// (TODO 305 (12), (13)): original PS2 bugs, fixed here.
 //
 // The bug (the console's own, confirmed by the user on PCSX2): Antarctica's music list by warp gate is
 // `0 1 1 1` (METAGAME.TDB WarpGateMusicTrack) - from the first gate the level opens its music file 0,
@@ -26,6 +27,29 @@
 //   [music] level start (episode 1): level done - its story objects are not placed
 //
 // TF_REVISIT_MUSIC=0: the PS2's behaviour (a finished Antarctica silent from its first gate).
+//
+// The step triggers (TODO 305 (12), (13)). A level's music is a list (MUSICSTYLE.BT), the warp gate picks where it
+// starts (METAGAME.TDB WarpGateMusicTrack), and a NextMusicTrack event moves it one entry on
+// (the event's listener, taMusicManager 0x2E64C0: CrossfadeToTrack 0x2E6980(this, current + 1); the current entry at
+// +0x10C, one being crossfaded to at +0x114 while +0x110 is set). The level's triggers that fire it are placed for one way
+// through the level, so a trigger reached out of order steps from the wrong entry:
+//   Deep Amazon (amazon2.ms, temple.ms, cyclonus.alb_t; gates 0 0 0 1 0 0): trigger 155 at the temple steps to
+//     temple.ms, trigger 228 (the Cyclonus fight, with FMV_3_1) to cyclonus.alb_t. Skip the temple and Cyclonus's
+//     trigger steps amazon2 -> temple.ms: the temple music for the boss (13, the PS2 does it too). From gate 3 (on
+//     temple.ms already) the temple's trigger would step to Cyclonus's music.
+//   Antarctica (silence.ms, anta.ms, starscream.alb_t; gates 0 1 1 1): trigger 201 at the cliff steps to anta.ms,
+//     688 (the Starscream fight, with CS_StarscreamIntro) to his theme. On a first visit 201 is crossed from gate 0
+//     only, before the boss (it fires once: RepeatCount, CREATURE.TMD default 1, then it is killed). Kept on a
+//     revisit (above), it is still waiting when you come from gates 1-3 on anta.ms, so crossing it - walking back from
+//     the Research Center after the boss too - stepped anta.ms -> Starscream's theme (12).
+// So each of these triggers moves the music to ITS entry: while the trigger's enter events fire
+// (DelayBeforeTriggerEnterEvents 0x2F9CB0; taEvent::Fire calls the listeners at once), the next-track listener
+// crossfades to the trigger's entry if the music is before it, and does nothing if the music is already on it or past:
+//   [music] step trigger at (328.0, 1395.5, 288.0), Deep Amazon's Cyclonus fight: entry 0 -> 2 (the PS2: 1)
+//   [music] step trigger at (336.9, 1157.5, -16.0), Antarctica's cliff: the music already on entry 1 - no step (the PS2: 2)
+// Played in the levels' own order this is the PS2's single step. The other levels' step triggers (Amazon's 29,
+// Alaska's 244, Easter Island's 145: a two-entry list and one trigger) and 06/08's cutscene steps can't land wrong.
+// TF_MUSIC_STEPS=0: the PS2's one-entry steps.
 // Decomp equivalent: the spawn filter keeping CreatureTrigger 201 on a finished Antarctica, its
 // TriggerEvent left empty.
 
@@ -79,6 +103,27 @@ namespace revisit_music
         bool g_on = true;
         bool g_fixLevel = false; // this level: a finished Antarctica, the fix on
         bool g_trim = false;     // trigger 201 kept: its voice event still to be taken out
+
+        // The step triggers and the music entry each is placed to start (TODO 305 (12), (13)), by episode and centre.
+        constexpr uint32_t kTriggerEnter = 0x002F9CB0u; // taCreatureTrigger::DelayBeforeTriggerEnterEvents(this, dt)
+        constexpr uint32_t kNextTrack = 0x002E64C0u;    // taMusicManager's NextMusicTrack listener (this)
+        constexpr uint32_t kCrossfade = 0x002E6980u;    // taMusicManager::CrossfadeToTrack(this, index)
+        struct StepTrigger
+        {
+            uint32_t episode;
+            float centre[3];
+            int32_t entry;
+            const char *what;
+        };
+        constexpr StepTrigger kSteps[] = {
+            {1u, {336.888f, 1157.54f, -16.0233f}, 1, "Antarctica's cliff"},            // 201 -> anta.ms
+            {1u, {-126.233f, 3067.3f, -20.9207f}, 2, "Antarctica's Starscream fight"}, // 688 -> starscream.alb_t
+            {2u, {328.728f, 1347.15f, 229.15f}, 1, "Deep Amazon's temple"},            // 155 -> temple.ms
+            {2u, {327.993f, 1395.5f, 288.0f}, 2, "Deep Amazon's Cyclonus fight"},      // 228 -> cyclonus.alb_t
+        };
+        PS2Runtime::RecompiledFunction g_triggerEnter = nullptr, g_nextTrack = nullptr, g_crossfade = nullptr;
+        bool g_stepsOn = true;
+        const StepTrigger *g_firing = nullptr; // the step trigger whose enter events are firing
 
         uint32_t word(const uint8_t *rdram, uint32_t a)
         {
@@ -202,6 +247,55 @@ namespace revisit_music
                 }
             }
             g_waiting(rdram, ctx, runtime);
+        }
+
+        void triggerEnter(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const StepTrigger *step = nullptr;
+            if (ctx->pc == kTriggerEnter && g_stepsOn)
+            {
+                const uint32_t self = getRegU32(ctx, 4), episode = word(rdram, kEpisodeNow);
+                for (const StepTrigger &t : kSteps)
+                {
+                    bool here = t.episode == episode;
+                    for (int i = 0; i < 3 && here; ++i)
+                        here = std::fabs(fword(rdram, self + 0x40u + 4u * static_cast<uint32_t>(i)) - t.centre[i]) < 0.5f;
+                    if (here)
+                        step = &t;
+                }
+            }
+            const StepTrigger *outer = g_firing;
+            g_firing = step;
+            g_triggerEnter(rdram, ctx, runtime);
+            g_firing = outer;
+        }
+
+        // NextMusicTrack's listener (a tail call to CrossfadeToTrack with this + 0x10C plus one) while a step trigger fires.
+        void nextTrack(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            if (ctx->pc == kNextTrack && g_firing && g_crossfade)
+            {
+                const uint32_t music = getRegU32(ctx, 4);
+                const int32_t current = static_cast<int32_t>(word(rdram, music + 0x10Cu)), asked = current + 1;
+                const uint8_t *pending = getConstMemPtr(rdram, music + 0x110u);
+                const int32_t now = (pending && *pending) ? static_cast<int32_t>(word(rdram, music + 0x114u)) : current;
+                const StepTrigger &t = *g_firing;
+                g_firing = nullptr; // (once)
+                if (now >= t.entry)
+                {
+                    std::fprintf(stderr, "[music] step trigger at (%.1f, %.1f, %.1f), %s: the music already on entry %d - no step (the PS2: %d)\n",
+                                 t.centre[0], t.centre[1], t.centre[2], t.what, now, asked);
+                    ctx->pc = getRegU32(ctx, 31);
+                    return;
+                }
+                std::fprintf(stderr, "[music] step trigger at (%.1f, %.1f, %.1f), %s: entry %d -> %d%s\n", t.centre[0], t.centre[1],
+                             t.centre[2], t.what, now, t.entry, asked == t.entry ? " (as the PS2)" : asked == t.entry - 1 ? " (the PS2: one short)" : "");
+                SET_GPR_U32(ctx, 5, static_cast<uint32_t>(t.entry));
+                ctx->pc = kCrossfade;
+                g_crossfade(rdram, ctx, runtime);
+                return;
+            }
+            g_nextTrack(rdram, ctx, runtime);
         }
 
         float health(const uint8_t *rdram, uint32_t actor)
@@ -328,6 +422,11 @@ namespace revisit_music
         hook(runtime, kStrip, g_strip, strip);
         hook(runtime, kFilter, g_filter, filter);
         hook(runtime, kWaiting, g_waiting, waiting);
+        const char *steps = std::getenv("TF_MUSIC_STEPS");
+        g_stepsOn = !(steps && *steps == '0');
+        hook(runtime, kTriggerEnter, g_triggerEnter, triggerEnter);
+        g_crossfade = runtime.lookupFunction(kCrossfade);
+        hook(runtime, kNextTrack, g_nextTrack, nextTrack);
         if (const char *e = std::getenv("TF_EVENT_TRACE"); e && *e == '1')
         {
             hook(runtime, kFire, g_fire, fire);

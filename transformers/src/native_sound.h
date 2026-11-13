@@ -7,6 +7,9 @@
 // the original module on the emulated IOP and SPU2 instead.
 
 #include <cstdint>
+#include <functional>
+#include <string>
+#include <vector>
 #include <mutex>
 
 class PS2Runtime;
@@ -15,6 +18,13 @@ namespace native_sound
 {
     // From applyTransformers (it adds no guest code).
     void install(PS2Runtime &runtime);
+    // A mod's bank in place of the game's: given the tone library the game asks for, the one to load
+    // instead, or "" (the Playable Decepticons' vehicle engine banks). Set before the game runs.
+    void setLibraryRedirect(std::function<std::string(const std::string &)> redirect);
+    // A mod's own banks with each level's: called when a level's bank (.tla) has loaded, it names tone libraries
+    // of the sound archive (the mods' copy) to load beside it, looked in after every bank of the game's (the
+    // Playable Decepticons' STARSCREAM_SFX while Starscream plays). Set before the game runs.
+    void setModLibraries(std::function<std::vector<std::string>()> libraries);
     // From applyTransformers, after everything else that adds guest code (the record's block, so
     // the addresses before it stay put): the engine's setup kept in guest memory, so a save state
     // carries it.

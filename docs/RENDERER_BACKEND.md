@@ -45,10 +45,11 @@ and `gfx::device()` are defined there; the Direct3D 12 backend's own are `d3d12B
 | `waitForFrameSlot()` | render thread | Wait until the next frame slot is free; returns the ms waited. |
 | `render(frame, shotPath)` | render thread | Draw the frame (section 3). With `shotPath`, also save the picture as a BMP. |
 | `preUpload(texture)` | any | A game texture made ahead, handed to the uploader at the next frame. |
-| `latestPicture(pixels, w, h, serial, has3D)` | window thread | The newest picture as CPU pixels. |
+| `latestPicture(pixels, rowPitch, index, serial, meta)`, `pictureShown(index)` | window thread | Linux only: the next CPU picture, in the order the pictures were handed over: the hand-over's mapped read-back itself, held (not read back into again) until the window calls `pictureShown` after its upload. Windows keeps 0.6's `latestPicture(pixels, width, height, serial, has3D)`, which copies the newest picture into a vector. |
 | `setSharedPictures(on)`, `latestShared(picture, serial)`, `sharedHeld(index)` | window thread | The newest picture as a texture the window imports, and which one the window still holds. |
 | `waitPicture(serial, untilNs, lastNs)`, `pacingMode()` | window thread | The pacer: wait for the next picture by its due time. |
-| `setWindowLines`, `setAntiAliasing`, `setSupersampling`, `setSpeedupsForced` | any | Settings, used from the next frame. |
+| `setWindowSize(w, h)` (Linux) / `setWindowLines(h)` (Windows: what 0.6 and earlier use) | window thread | The window's size in pixels, called every frame by the picture provider, not only on a resize. It is one or two relaxed atomic stores (Linux also stores the width), so calling it each frame costs next to nothing; the next picture uses it (Linux: as many lines as the window shows, or its width over the picture's shape in a narrower window; Windows: the window's lines, as 0.6 does). |
+| `setAntiAliasing(mode)`, `setSupersampling(on)`, `setSpeedupsForced(on)` | any | Settings, used from the next frame: the anti-aliasing pass (0 off, 1 FXAA, 2 SMAA 1x), supersampling (the 3D drawn at 1.5x the picture's pixels and averaged down), and a checking aid that forces the picture-keeping speed-ups on or off (-1: as the settings say). |
 | `largeImageBytes`, `adapterMemoryMB` | any | The HD textures' bytes on the GPU and the graphics card's video memory (nothing while the device's GPU is not chosen yet). The quality preset and the HD textures' cap and budget are made of that figure by the shared rules (`nr::policy`, `nr_policy.h`). |
 | `gpuPictureMs`, `gpuExtraMs`, `cpuPictureMs`, `replayWaitMs`, `slotWaitMs`, `pacerDelayMs` | render or window thread | Timing figures for the frame pacer and the stats lines. |
 
@@ -64,7 +65,7 @@ slots (`frameSlot()`: 0 or 1). A slot owns its command list, its part of each ri
 its read-backs. The frame builder calls, in this order:
 
 1. **`prepareFrame(width, height)`**, before anything is recorded. The device makes the picture's surfaces at the
-   window's size (again when the size changes), waits until the slot's previous frame (two frames back) has finished
+   picture's size (again when the size changes), waits until the slot's previous frame (two frames back) has finished
    on the GPU, and calls the frame-done callback for every slot that has finished. False: no picture; the frame is not
    drawn.
 2. **`beginFrame(tick)`**. The device takes the textures its uploader has finished, starts the slot's command list,
@@ -300,8 +301,11 @@ The native picture reaches the window in one of two ways, chosen at start:
   `kSharedPictures` (24) shareable `RGBA8` textures with NT handles. The window imports them into OpenGL with
   `GL_EXT_memory_object_win32` (`nr_glshare.cpp`) and draws the one handed over (`latestShared`). The backend never draws
   into a texture the window holds (`sharedHeld`) or the newest one handed over.
-- **CPU pixels**: the picture is read back and the window uploads it (`latestPicture`). This is the fallback when the
-  import fails (for example under Wine/Proton) and with `TF_NATIVE_SHARE=0`.
+- **CPU pixels**: the picture is read back and the window uploads it: on Linux straight from the mapped read-back
+  (`latestPicture`, then `pictureShown`), one hand-over of four in turn so a newer picture never replaces one
+  waiting, presented as it is handed over, paced like the shared textures; on Windows as 0.6 does, the newest
+  picture copied into a vector. This is the path on Linux, the fallback when the import fails (for example under
+  Wine/Proton), and with `TF_NATIVE_SHARE=0`.
 
 The pacer (`nr::pace::Pacer` in `nr_pace.cpp`, `waitPicture` on the window's side) hands each picture over at its due
 time (`PictureOut::dueNs`) plus a delay that follows the GPU's times, so pictures reach the screen evenly. Its rules
@@ -334,7 +338,7 @@ only the tone mapping's SDR part exists (`ToneMap`). For an HDR mode:
 - A setting for paper white and peak brightness, since displays differ.
 
 The hand-over is the part of the backend that is least separated today: the window's side lives in `nr_present.cpp`
-and `nr_glshare.cpp`, and calls `nr::d3d` directly. Changing it is part of the SDL3 work.
+and `nr_glshare.cpp`, the calls go through `nr::backend()`, and changing it is part of the SDL3 work.
 
 **As built (milestone 3).** SDL3's window is a run-time choice of the runtime (`PS2X_PLATFORM=sdl3` in a build with
 `PS2X_SDL3`; PS2Recomp's `ps2_platform.h`, runtime patch 0176): the runtime answers raylib's window, input and 2D calls
@@ -430,4 +434,6 @@ same frame rate as before. S1 named the neutral types (`nr_backend.h`). S2 moved
 the targets; the textures, meshes and rings; the state and draws; the copies, the effects and the anti-aliasing; the
 queries, statistics, predication and read-backs (the occlusion probe became an effect read back through `readTarget`);
 and finally the frame's life (`prepareFrame`, `beginFrame`, `endFrame`), after which the frame builder moved into
-`nr_frame.cpp`. Left for later: the window hand-over (section 7) and the callers' switch to `nr::backend()`.
+`nr_frame.cpp`. The callers then moved to `nr::backend()`, and the hand-over followed: Linux hands over its mapped
+read-back in turn, keeping each picture until the window has uploaded it, while Windows keeps 0.6's copied newest
+picture. The window's own side stayed in `nr_present.cpp` and `nr_glshare.cpp` (section 7).

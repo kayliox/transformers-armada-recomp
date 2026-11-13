@@ -1,0 +1,133 @@
+Subject: [PATCH] Runtime: whether the Xbox pads plugged in are 360 ones (ps2_host_input::xbox360Pads)
+
+The Xbox prompts are drawn as the pad looks: the Xbox 360 pad's coloured buttons or the Xbox One / Series pad's dark ones.
+GLFW names both "Xbox Controller"; the USB product id in the pad's Windows device path tells them apart (raw input).
+
+--- a/ps2xRuntime/include/runtime/ps2_host_input.h
++++ b/ps2xRuntime/include/runtime/ps2_host_input.h
+@@ -119,6 +119,40 @@ namespace ps2_host_input
+     }
+     // The style of the gamepad used last; PlayStation before any gamepad is seen. Any thread.
+     PadStyle lastPadStyle();
++    // (The Xbox prompts' look) An XInput pad's USB ids from its Windows device path ("\\?\HID#VID_045E&PID_028E&IG_00#...":
++    // the IG_ part marks an XInput pad). False: not an XInput pad, or no ids in it.
++    inline bool xinputPadIds(const char *path, unsigned &vid, unsigned &pid)
++    {
++        std::string p = path ? path : "";
++        for (char &c : p)
++            if (c >= 'a' && c <= 'z') c -= 'a' - 'A';
++        const size_t v = p.find("VID_"), d = p.find("PID_"), ig = p.find("IG_");
++        if (v == std::string::npos || d == std::string::npos || ig == std::string::npos || v + 8 > p.size() || d + 8 > p.size())
++            return false;
++        const auto hex = [&p](size_t at, unsigned &out)
++        {
++            out = 0;
++            for (size_t i = at; i < at + 4; ++i)
++            {
++                const char c = p[i];
++                const int digit = c >= '0' && c <= '9' ? c - '0' : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
++                if (digit < 0)
++                    return false;
++                out = out * 16u + static_cast<unsigned>(digit);
++            }
++            return true;
++        };
++        return hex(v + 4, vid) && hex(d + 4, pid);
++    }
++    // Microsoft's Xbox 360 pads (wired, Play & Charge cable, the wireless receivers); the many third-party 360 pads that
++    // present themselves with these ids count too. Every other id (the Xbox One and Series pads, other makers'): false.
++    inline bool isXbox360Pad(unsigned vid, unsigned pid)
++    {
++        return vid == 0x045Eu && (pid == 0x028Eu || pid == 0x028Fu || pid == 0x0291u || pid == 0x02A1u || pid == 0x0719u);
++    }
++    // Whether the XInput pads plugged in are all Xbox 360 pads (Windows; false elsewhere, with none, or with a mix): the Xbox
++    // prompts are then drawn as the 360 pad's buttons. Looked at again when a gamepad appears and every few seconds. Any thread.
++    bool xbox360Pads();
+     // The texture pack's replacements in its keyboard/ folder (the button prompts as keys) are
+     // used while this is on and the keyboard is the last device (on by default).
+     void setKeyboardPrompts(bool on);
+--- a/ps2xRuntime/src/lib/ps2_xinput_rumble.cpp
++++ b/ps2xRuntime/src/lib/ps2_xinput_rumble.cpp
+@@ -1,5 +1,6 @@
+ // XInput vibration for GLFW gamepads (TODO 200): see ps2_xinput_rumble.h.
+ #include "runtime/ps2_xinput_rumble.h"
++#include "runtime/ps2_host_input.h"
+ #include "runtime/ps2_sony_pad.h"
+ #include "runtime/ps2_platform.h"
+ 
+@@ -9,6 +10,7 @@
+ #include <climits>
+ #include <cstdio>
+ #include <cstdlib>
++#include <vector>
+ 
+ #if defined(_WIN32)
+ #ifndef WIN32_LEAN_AND_MEAN
+@@ -196,8 +198,58 @@ namespace ps2x::xinput
+         }
+     }
+ 
++    namespace
++    {
++        // (The Xbox prompts' look, ps2_host_input::xbox360Pads) Whether the XInput pads plugged in are all Xbox 360 ones,
++        // and when that was last looked at.
++        std::atomic<bool> g_pads360{false};
++        std::atomic<int64_t> g_padsCheckedMs{LLONG_MIN / 2};
++        constexpr int64_t kPadsCheckMs = 3000;
++
++        // The pads Windows lists (raw input: no new link dependency), each XInput one's USB ids (its device path).
++        void checkPads()
++        {
++            bool any = false, all360 = true;
++#if defined(_WIN32)
++            UINT count = 0;
++            if (GetRawInputDeviceList(nullptr, &count, sizeof(RAWINPUTDEVICELIST)) == 0 && count > 0)
++            {
++                std::vector<RAWINPUTDEVICELIST> list(count);
++                const UINT got = GetRawInputDeviceList(list.data(), &count, sizeof(RAWINPUTDEVICELIST));
++                for (UINT i = 0; i < got && got != static_cast<UINT>(-1); ++i)
++                {
++                    if (list[i].dwType != RIM_TYPEHID)
++                        continue;
++                    char name[512] = {};
++                    UINT size = sizeof(name);
++                    if (GetRawInputDeviceInfoA(list[i].hDevice, RIDI_DEVICENAME, name, &size) == static_cast<UINT>(-1))
++                        continue;
++                    unsigned vid = 0, pid = 0;
++                    if (!ps2_host_input::xinputPadIds(name, vid, pid))
++                        continue;
++                    any = true;
++                    all360 = all360 && ps2_host_input::isXbox360Pad(vid, pid);
++                }
++            }
++#endif
++            const bool now = any && all360;
++            if (g_pads360.exchange(now, std::memory_order_relaxed) != now)
++                std::fprintf(stderr, "[pad] Xbox prompts: %s\n", now ? "the Xbox 360 pad's buttons" : "the Xbox One / Series pad's buttons");
++        }
++    }
++
+     void notePadRead(bool glfwGamepad)
+     {
++        // (a GLFW gamepad that just appeared, then every few seconds while one is there: the pads' models looked at again)
++        if (glfwGamepad)
++        {
++            const int64_t now = nowMs();
++            if (!g_glfwGamepad.load(std::memory_order_relaxed) || now - g_padsCheckedMs.load(std::memory_order_relaxed) >= kPadsCheckMs)
++            {
++                g_padsCheckedMs.store(now, std::memory_order_relaxed);
++                checkPads();
++            }
++        }
+         g_glfwGamepad.store(glfwGamepad, std::memory_order_relaxed);
+         g_lastReadMs.store(nowMs(), std::memory_order_relaxed);
+     }
+@@ -265,3 +317,8 @@ namespace ps2x::xinput
+ #endif
+     }
+ }
++
++namespace ps2_host_input
++{
++    bool xbox360Pads() { return ps2x::xinput::g_pads360.load(std::memory_order_relaxed); }
++}

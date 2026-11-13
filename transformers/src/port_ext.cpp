@@ -143,6 +143,15 @@ namespace ext
         return {};
     }
 
+    std::filesystem::path cardRoot(const std::filesystem::path &normalRoot)
+    {
+        for (const Extension *e : registry())
+            if (e->cardRoot)
+                if (std::filesystem::path root = e->cardRoot(normalRoot); !root.empty())
+                    return root;
+        return {};
+    }
+
     void menuSection(const char *section)
     {
         for (const Extension *e : registry())
@@ -188,6 +197,32 @@ namespace ext
                 return true;
         return false;
     }
+
+    bool stateLoaded(PS2Runtime &runtime)
+    {
+        bool ok = true;
+        for (const Extension *e : registry())
+            if (e->stateLoaded && !e->stateLoaded(runtime))
+                ok = false;
+        return ok;
+    }
+
+    bool skipMovie(std::string_view movieKey)
+    {
+        for (const Extension *e : registry())
+            if (e->skipMovie && e->skipMovie(movieKey))
+                return true;
+        return false;
+    }
+
+    namespace
+    {
+        const RenderHooks *g_renderHooks = nullptr;
+    }
+
+    void setRenderHooks(const RenderHooks *hooks) { g_renderHooks = hooks; }
+
+    const RenderHooks *renderHooks() { return g_renderHooks; }
 
     std::vector<std::string> loadoutTags()
     {

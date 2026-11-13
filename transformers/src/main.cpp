@@ -16,8 +16,10 @@
 #include "port_ext.h"
 #include "hd_movies.h"
 #include "graphics_driver.h"
+#include "laptop_reset.h"
 #include "hd_progress.h"
 #include "mod_menu.h"
+#include "nr_backend.h"
 #include "nr_install.h"
 #include "menu_mouse.h"
 #include "playrec.h"
@@ -29,12 +31,14 @@
 #include "self_log.h"
 #include "install_layout.h"
 #include "iop_tripwire.h"
+#include "restart_wait.h"
 #if defined(PS2X_ENABLE_DEBUG_UI)
 #include "ps2_debug_panel.h"
 #endif
 
 #include <cstring>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -45,6 +49,13 @@
 #include <string>
 #include <thread>
 #include <vector>
+#if defined(__linux__)
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+#include <spawn.h>
+#include <sys/wait.h>
+extern char **environ;
+#endif
 
 namespace fs = std::filesystem;
 
@@ -54,6 +65,9 @@ void tfShowWindowWithoutFocus(void *window, int x, int y); // profiler.cpp
 #endif
 void tfNoteWindow(void *window); // profiler.cpp (TF_TEST_WINDOW)
 void tfKeepFullSpeedInBackground(); // profiler.cpp (TODO 197: no Windows throttling with the window left)
+#if defined(__linux__)
+std::atomic<int> g_tfMonitorHz{0}; // overrides.cpp's frame rate cap (Linux has no vertical blank timing to give it)
+#endif
 
 namespace
 {
@@ -229,6 +243,56 @@ namespace
                      ready ? "was ready: it draws alone from the first frame" : "had not got ready after 60 s: the GS draws until it is",
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     }
+
+#if defined(__linux__)
+    // The emulated renderer's GPU path needs GL_ARB_fragment_shader_interlock (gs_gpu.cpp); without it the GS draws on
+    // the CPU. Of Mesa's GL drivers only iris and Zink have it (docs/features.txt): AMD's radeonsi (the Steam Deck) and
+    // virgl do not, while Zink over a Vulkan driver with VK_EXT_fragment_shader_interlock (RADV, Venus) does. A hidden
+    // window in a child process asks, before this process makes any GL.
+    int glProbe()
+    {
+        SetTraceLogLevel(LOG_NONE);
+        SetConfigFlags(FLAG_WINDOW_HIDDEN);
+        InitWindow(16, 16, "gl probe");
+        const bool interlock = IsWindowReady() && glfwExtensionSupported("GL_ARB_fragment_shader_interlock");
+        CloseWindow();
+        return interlock ? 0 : 1;
+    }
+
+    bool glHasInterlock()
+    {
+        char self[] = "/proc/self/exe", flag[] = "--gl-probe";
+        char *args[] = {self, flag, nullptr};
+        pid_t pid = 0;
+        int status = 0;
+        return posix_spawn(&pid, self, nullptr, nullptr, args, environ) == 0 && waitpid(pid, &status, 0) == pid &&
+               WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+
+    // Zink when the default driver lacks the interlock and Zink has it. TF_ZINK=0: never, =1: always; a
+    // MESA_LOADER_DRIVER_OVERRIDE already set wins.
+    void chooseGlDriver()
+    {
+        const char *force = std::getenv("TF_ZINK");
+        if (std::getenv("MESA_LOADER_DRIVER_OVERRIDE") || (force && *force == '0'))
+            return;
+        const bool forced = force && *force == '1';
+        if (!forced && glHasInterlock())
+            return;
+        setenv("MESA_LOADER_DRIVER_OVERRIDE", "zink", 1);
+        if (!forced && !glHasInterlock())
+        {
+            unsetenv("MESA_LOADER_DRIVER_OVERRIDE");
+            std::fprintf(stderr, "[gl] no OpenGL driver here has GL_ARB_fragment_shader_interlock: the GS draws on the CPU\n");
+            return;
+        }
+        // Zink's command reordering garbles the F1 menu (ImGui through raylib's batches: stripes, wrong triangles;
+        // seen with Mesa 26.1 on Venus and on lavapipe); a ZINK_DEBUG already set wins.
+        setenv("ZINK_DEBUG", "noreorder", 0);
+        std::fprintf(stderr, "[gl] OpenGL through Zink (%s): the GPU renderer's pixel interlock (TF_ZINK=0: the default driver)\n",
+                     forced ? "TF_ZINK=1" : "the default driver lacks the interlock");
+    }
+#endif
 }
 
 #if defined(_WIN32)
@@ -241,6 +305,10 @@ extern "C" __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 
 int main(int argc, char *argv[])
 {
+#if defined(__linux__)
+    if (argc > 1 && std::string(argv[1]) == "--gl-probe") // (chooseGlDriver's child)
+        return glProbe();
+#endif
     // build.ps1, after linking: the native renderer's shaders compiled into the table the next link builds in
     // (nr_install.h). Nothing else runs: no game folder, window or device.
     if (argc >= 3 && std::strcmp(argv[1], "--bake-shaders") == 0)
@@ -302,6 +370,9 @@ int main(int argc, char *argv[])
     // A play recording's replay (TF_PLAY_REPLAY, playrec.h): its recorded settings into the environment, settings.ini
     // left out, hidden, silent, turbo.
     playrec::prepareReplay();
+    // (0.7.1) Built-in or low-end graphics: once, the graphics rows of settings.ini back to the laptop defaults (a copy
+    // kept; laptop_reset.h). Before the file is read.
+    laptop_reset::run();
     // The settings panel's choices (settings.ini, F5 while playing) into the environment before
     // anything reads it: a variable already set wins (ps2_settings.h).
     ps2_settings::loadFile();
@@ -318,13 +389,33 @@ int main(int argc, char *argv[])
     // (TODO 219) An HD set still being made: the sign that the game runs (the upscale waits), the window that carries on
     // with it when nothing does, and the watcher that tells the renderer and the F1 menu (hd_progress.h).
     hd_progress::start();
+#if defined(__linux__)
+    chooseGlDriver(); // (after settings.ini: TF_ZINK there counts; before any GL)
+    // Steam's Gaming Mode (gamescope, a Steam Deck): full screen unless settings.ini says otherwise - a window there is
+    // scaled up to the screen, the game and its F1 menu drawn at a lower resolution than the screen's.
+    if (std::getenv("GAMESCOPE_WAYLAND_DISPLAY"))
+        setenv("PS2X_FULLSCREEN", "1", 0);
+#endif
     // (TODO 290) The graphics card and its driver in the log, and a warning when the driver is known to be too old.
     graphics_driver::logOnce();
     graphics_driver::showOnce();
+    // (TODO 295) Built-in or low-end graphics: the Low preset's values for the graphics settings settings.ini does not
+    // set (after the file is read, before anything reads them).
+    graphics_driver::applyLowEndDefaults();
     // (TODO 163) The renderer the settings choose by default: the native one (N1, the port's own - Emulated stays a
     // choice). Set before anything reads TF_RENDERER (the scale below, the native renderer's install, VU1's); a
     // settings.ini line or a variable already set wins.
-    if (!std::getenv("TF_RENDERER"))
+    if (!nr::nativeBackendChosen())
+    {
+        // No native backend built or selected (nr_none.cpp: TF_GFX_API unset, or a backend this build does not have):
+        // always the emulated one, whatever settings.ini says.
+#if defined(_WIN32)
+        _putenv_s("TF_RENDERER", "emulated");
+#else
+        setenv("TF_RENDERER", "emulated", 1);
+#endif
+    }
+    else if (!std::getenv("TF_RENDERER"))
     {
 #if defined(_WIN32)
         _putenv_s("TF_RENDERER", "native");
@@ -522,6 +613,9 @@ int main(int argc, char *argv[])
         g_tfRuntime = &runtime;
 #endif
         tfNoteWindow(GetWindowHandle()); // (the window's state for TODO 117: tfWindowAway, TF_TEST_WINDOW)
+#if defined(__linux__)
+        g_tfMonitorHz.store(GetMonitorRefreshRate(GetCurrentMonitor())); // (GLFW: on the main thread)
+#endif
         if (!runtime.loadELF(elfPath.string()))
         {
             std::cerr << "Failed to load " << elfPath.string() << std::endl;
@@ -534,6 +628,17 @@ int main(int argc, char *argv[])
             PS2Runtime::IoPaths paths = PS2Runtime::getIoPaths();
             paths.mcRoot = fs::absolute(mcRoot).lexically_normal();
             PS2Runtime::setIoPaths(paths);
+        }
+        // (TODO 316) The save profile's card: an extension may move the memory card (the Cheats profile's own copy).
+        // A card the caller chose (TF_MC_ROOT other than the install's own saves\mc0: tests) is left as it is.
+        if (!install_layout::callerCardRoot())
+        {
+            PS2Runtime::IoPaths paths = PS2Runtime::getIoPaths();
+            if (const fs::path card = ext::cardRoot(paths.mcRoot); !card.empty())
+            {
+                paths.mcRoot = card;
+                PS2Runtime::setIoPaths(paths);
+            }
         }
         // TF_HOST_ROOT=<folder>: what the game sees as host0: (a development kit's PC).
         // The sound driver reads its tracing options from host0:./SIRENS3.INI.
@@ -574,6 +679,7 @@ int main(int argc, char *argv[])
         std::cerr.flush();
         std::fflush(stdout);
         std::fflush(stderr);
+        restart_wait::wait(); // (after a restart: stays until the game started again ends, so a launcher keeps the game's place)
         std::_Exit(0);
     }
     catch (const std::exception &e)

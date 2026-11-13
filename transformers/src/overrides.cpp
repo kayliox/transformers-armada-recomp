@@ -1,5 +1,6 @@
 // Game-specific runtime hooks for Transformers (USA, SLUS-20668).
 
+#include "graphics_driver.h"
 #include "controller_settings.h"
 #include "game_config.h"
 #include "ultrawide.h"
@@ -15,6 +16,7 @@
 #include "nr_backend.h" // (the native renderer's backend in use: its slot waits for the slow-frame report)
 #include "speedrun_timer.h"
 #include "start_screens.h"
+#include "pc_settings_row.h"
 #include "tuning.h"
 #include "photo_mode.h"
 #include "view_turn.h"
@@ -27,6 +29,8 @@
 #include "key_text.h"
 #include "actor_guard.h"
 #include "revisit_music.h"
+#include "objective_guide.h"
+#include "surround_mode.h"
 #include "pool_growth.h"
 #include "movement.h"
 #include "ragdoll_step.h"
@@ -46,6 +50,7 @@
 #include "menu_mouse.h"
 #include "mod_menu.h"
 #include "frustum_native.h"
+#include "nr_forest.h"
 #include "playrec.h"
 #include "decomp.h"
 #include "timing/timing.h"
@@ -92,6 +97,7 @@ namespace ps2_stubs
     void clearPadOverrideState();
     void setMpegGuestBuffersStream(bool enabled);
     void setVarArgSlotBytes(uint32_t bytes);
+    void setVsprintfBufferBytes(uint32_t returnAddress, uint32_t bytes); // (runtime patch 0180)
 }
 
 // The native renderer's counters for the slow-frame report (TODO 112, TF_HITCH_MS; native_render/nr_types.h).
@@ -107,7 +113,6 @@ namespace nr
     }
 }
 
-#if defined(_WIN32)
 // profiler.cpp
 void tfLogCallStack(const char *label);
 void tfGuardGuestWrites(uint32_t address, uint32_t length, uint32_t expected, bool useExpected);
@@ -118,6 +123,9 @@ void tfNoteFrameWork(bool begins, double workMs); // (profiler.cpp: TF_PROFILE_S
 void tfTestWindow(uint64_t vblank); // (profiler.cpp: TF_TEST_WINDOW, the window minimised / shown in tests)
 bool tfWindowAway(); // (profiler.cpp, TODO 117: the player has left the window - minimised, or another one has the focus)
 double tfThreadCpuMs();
+bool tfRaiseThreadPriority();
+#if defined(__linux__)
+extern std::atomic<int> g_tfMonitorHz; // (main.cpp: the monitor's refresh when the window was made)
 #endif
 
 namespace
@@ -365,6 +373,22 @@ namespace
     uint32_t g_fmvFrames = 0;
     bool g_skipFmv = false;
     bool g_skipIntroMovie = false; // (the movie playing is a start movie the "Intro screens" switch skips: game_config)
+    // An extension's skipped movie (port_ext.h skipMovie: e.g. the overlay's Playable Decepticons, a story movie
+    // skipped as the player skips it). Only the cut-scene system's movies (fmvStream's maker 0x2749A0 called from the cinema
+    // player func_00319520, returning to 0x3197B0): the title's start movies are skipped by start_screens (its own
+    // items only), and the Extras' movie viewer (taUIIntro's 0x4CDB00) plays what the player picks.
+    bool g_skipExtensionMovie = false;
+    constexpr uint32_t kMakeFmvStream = 0x002749A0u;
+    constexpr uint32_t kCinemaMovieReturn = 0x003197B0u;
+    PS2Runtime::RecompiledFunction g_makeFmvStream = nullptr;
+    uint32_t g_fmvCaller = 0u;
+    void makeFmvStream(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        g_fmvCaller = getRegU32(ctx, 31);
+        ctx->pc = kMakeFmvStream;
+        g_makeFmvStream(rdram, ctx, runtime);
+        g_fmvCaller = 0u;
+    }
 
     // Widescreen. The game has a 16:9 mode of its own: the widescreen switch of its Options
     // menu (option 4, kept at 0x6CF004 for the renderer), on by default when the console's TV
@@ -485,6 +509,17 @@ namespace
     // the game's and NO stays the default. TF_INVERT_FLIP=0: the original meaning.
     constexpr uint32_t kOptionByIndex = 0x00278080u;
     PS2Runtime::RecompiledFunction g_optionByIndex = nullptr;
+    // (TODO 290 1, bbatts) The menus read the option through the same 0x278080 - the Controller Options screen
+    // (0x385530, return 0x385548) and the pause menu's options (0x385EB0, return 0x385F80) - and on confirm write their row
+    // back through its setter 0x278010 (option, value: a byte at options + index) from 0x385174 / 0x385184 and 0x385A5C /
+    // 0x385A6C, the value as the reader gave it. With only the reader flipped, a row changed with the pad was written
+    // back as the stored value again ("resets to No"), and confirming without a change flipped the stored byte. The
+    // setter flips index 1 too for those two menus' writes (their return addresses below; the PC settings pages call the
+    // setter too, with the label's own byte, and are left alone), so a menu's write is the reader's inverse: the stored
+    // byte is what the row shows (YES = 1, the mouse's own note of it below agrees), the label and NO stay as in TODO 178.
+    constexpr uint32_t kOptionSet = 0x00278010u;
+    constexpr uint32_t kOptionSetMenuReturns[] = {TF_GA(0x00385174u), TF_GA(0x00385184u), TF_GA(0x00385A5Cu), TF_GA(0x00385A6Cu)};
+    PS2Runtime::RecompiledFunction g_optionSet = nullptr;
     bool invertFlipped()
     {
         static const bool off = std::getenv("TF_INVERT_FLIP") && *std::getenv("TF_INVERT_FLIP") == '0';
@@ -588,6 +623,20 @@ namespace
         if (index == 1u && invertFlipped() && ctx->pc == getRegU32(ctx, 31))
             SET_GPR_U32(ctx, 2, getRegU32(ctx, 2) == 0u ? 1u : 0u);
     }
+    void optionSet(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t caller = getRegU32(ctx, 31);
+        if (getRegU32(ctx, 4) == 1u && invertFlipped() &&
+            std::find(std::begin(kOptionSetMenuReturns), std::end(kOptionSetMenuReturns), caller) != std::end(kOptionSetMenuReturns))
+        {
+            const uint32_t value = getRegU32(ctx, 5) & 0xFFu;
+            static const bool trace = std::getenv("TF_INVERT_TRACE") != nullptr;
+            if (trace)
+                std::fprintf(stderr, "[tf] invert Y written by %08x: the menu's %u, stored %u\n", getRegU32(ctx, 31), value, value == 0u ? 1u : 0u);
+            SET_GPR_U32(ctx, 5, value == 0u ? 1u : 0u);
+        }
+        g_optionSet(rdram, ctx, runtime);
+    }
     // (TODO 287, the user's choice) The mouse has its own Invert setting, F1 > Controls > "Invert mouse up / down"
     // (PS2X_MOUSE_INVERT_Y, Off by default: moved up looks up), applied by the runtime to the mouse's travel. A save's own
     // Invert Y option is the controller stick's alone: saves made before TODO 178 (2026-11-06) carry the game's old
@@ -683,6 +732,7 @@ namespace
             if (!movie.empty())
                 hd_movies::movieStarted(*runtime, movie);
             g_skipIntroMovie = game_config::skipIntroMovie(hd_movies::movieKey(movie)); // (the "Intro screens" switch Off)
+            g_skipExtensionMovie = g_fmvCaller == kCinemaMovieReturn && ext::skipMovie(hd_movies::movieKey(movie));
             {
                 const std::string key = hd_movies::movieKey(movie);
                 g_liveFmvIsFilm = key != "NATARI" && key != "NMH_LOGO" && key != "NATTRACT";
@@ -729,6 +779,10 @@ namespace
             ps2_stubs::clearPadOverrideState();
             updateDisplayAspect(rdram);
             applyVBlankPeriod(runtime);
+            if (g_skipExtensionMovie)
+                std::fprintf(stderr, "[tf] the movie an extension skips ended after %u frames (skipped, vblank %llu)\n", g_fmvFrames,
+                             static_cast<unsigned long long>(runtime->eeScheduler().currentVSyncTick()));
+            g_skipExtensionMovie = false;
         }
     }
 
@@ -823,7 +877,7 @@ namespace
     // Buttons (active high) the FMV skip wants pressed this frame.
     uint16_t fmvSkipButtons()
     {
-        if (!(g_skipFmv || g_skipIntroMovie) || g_liveFmvStreams == 0)
+        if (!(g_skipFmv || g_skipIntroMovie || g_skipExtensionMovie) || g_liveFmvStreams == 0)
             return 0u;
         ++g_fmvFrames;
         const bool press = g_fmvFrames >= 15u && (g_fmvFrames % 30u) < 3u;
@@ -1488,7 +1542,10 @@ namespace
                     float p[3] = {0.0f, 0.0f, 0.0f};
                     if (const uint8_t *m = getConstMemPtr(rdram, at))
                         std::memcpy(p, m, sizeof(p));
-                    std::fprintf(stderr, "[tf:pos] tick %llu: %.2f %.2f %.2f\n", static_cast<unsigned long long>(tick), p[0], p[1], p[2]);
+                    // (TODO 160: with the host's clock since the start, so a run shows its game time against real time)
+                    static const auto posStart = std::chrono::steady_clock::now();
+                    std::fprintf(stderr, "[tf:pos] tick %llu: %.2f %.2f %.2f (real %.3f s)\n", static_cast<unsigned long long>(tick), p[0], p[1], p[2],
+                                 std::chrono::duration<double>(std::chrono::steady_clock::now() - posStart).count());
                 }
             }
         }
@@ -1502,6 +1559,8 @@ namespace
             std::memcpy(&game, rdram + 0x006CF2B8u, sizeof(game)); // (kGame, below)
             camera_mode::frame(rdram, game != 0u);
             dualsense::frame(rdram, game != 0u, playerPositionAddress(rdram)); // the pad's light bar (dualsense.h)
+            objective_guide::frame(rdram, game != 0u, playerPositionAddress(rdram), g_liveFmvStreams != 0,
+                                   runtime->eeScheduler().currentVSyncTick()); // (TODO 315: objective_guide.h)
             speedrun_timer::frame(rdram, g_liveFmvStreams != 0, runtime->eeScheduler().currentVSyncTick());
             discord_presence::frame(rdram, game != 0u, g_executorVtable == 0x006B7360u, g_liveFmvStreams != 0 && g_liveFmvIsFilm);
             photo_mode::frame(rdram, game != 0u); // (before tuning: the game's speed it sets)
@@ -1528,6 +1587,7 @@ namespace
                 facts.inHq = g_executorVtable == 0x006B7360u;
                 facts.levelRate = g_levelRate;
                 facts.playerPosition = playerPositionAddress(rdram);
+                facts.moviePlaying = g_liveFmvStreams != 0;
                 ext::frame(rdram, *runtime, facts);
             }
             tuning::frame(rdram, game != 0u);
@@ -1544,7 +1604,7 @@ namespace
             walk = WalkSticks{};
         }
         pressed |= walk.buttons;
-        const bool overriding = photo || pressed != 0u || sticks != 0u || walk.active || ((g_skipFmv || g_skipIntroMovie) && g_liveFmvStreams != 0);
+        const bool overriding = photo || pressed != 0u || sticks != 0u || walk.active || ((g_skipFmv || g_skipIntroMovie || g_skipExtensionMovie) && g_liveFmvStreams != 0);
         const auto axis = [sticks, stickPercent](unsigned low, unsigned high)
         {
             const int reach = 127 * stickPercent / 100;
@@ -3580,7 +3640,7 @@ namespace
     // when a level (or the HQ) begins. TF_RATE_STEPS=fine / divisors (tests) goes over it.
     std::atomic<int> g_pacingChoice{-1}; // (the panel's choice: 0 auto, 1 even, 2 any; -1 none - the environment's)
     // ---- The frame-rate cap (TODO 160, 2026-11-04, the user: "behave like every other PC game") --------------------
-    // The settings' "Frame rate cap" (TF_FPS_CAP: 30, 60, 90, 120, 144, 165, 240, 0 = unlimited; 60 by default - the user's choice, 2026-11-12) is the
+    // The settings' "Frame rate cap" (TF_FPS_CAP: 30, 45 (Linux), 60, 90, 120, 144, 165, 240, 0 = unlimited; 60 by default - the user's choice, 2026-11-12) is the
     // top of the levels' rate. The game's logic moves a fixed step a frame (a level reads FramePeriod when it begins:
     // its clock's step, the gravity a frame), so a PC that cannot draw the cap would play it in slow motion: the rate
     // follows what the PC manages instead - any whole rate from the cap down to 30, down on a miss that lasts, up again
@@ -3608,12 +3668,73 @@ namespace
     std::chrono::steady_clock::time_point g_rateExplainUntil{}; // (after the window came back: why a lower rate is held, said)
     double g_switchMsMax = 0.0, g_switchMsSum = 0.0; // (the changes' own cost, said with the rates' times)
     int g_switches = 0;
+    std::chrono::steady_clock::time_point g_rateTrackSaid{}; // (TODO 160: Unlimited following the PC - its changes said at most every 2 s)
 
     bool followRates()
     {
         static const bool ladder = std::getenv("TF_RATE_LADDER") && *std::getenv("TF_RATE_LADDER") == '1';
         return !ladder;
     }
+
+#if defined(__linux__)
+    // A cap between 30 and 60 (45, half a 90 Hz screen's refresh) decides the pictures as any
+    // other: one a frame. The picture lock's 60 would pull the game up to it and the in-between
+    // pictures would double the VBlanks; TF_MOMENTS=1 needs those fields, so they stay then, and
+    // TF_IN_BETWEEN keeps its own choice.
+    bool g_capBelow60 = false; // (applyCapBelow60's picture rules are in force: the cap has not left 30-60 yet)
+    void applyCapBelow60()
+    {
+        if (g_capBelow60)
+            return; // (an unrelated settings change while the cap stays below 60: the state is already set)
+        g_capBelow60 = true;
+        g_pictureLock = 0;
+        g_lockShown.store(0);
+        g_fastGameFallback = false;
+        const char *moments = std::getenv("TF_MOMENTS");
+        const bool momentsOn = moments && *moments && *moments != '0';
+        g_moments.store(momentsOn);
+        g_momentsShown.store(momentsOn);
+        const char *inBetween = std::getenv("TF_IN_BETWEEN");
+        if (!(inBetween && *inBetween))
+            g_inBetween = momentsOn;
+    }
+
+    // The cap left 30-60 at a settings change: the pictures' start-up rules for the new rate, so the fast rate's
+    // fallback and its in-between pictures come back without a restart. TF_MOMENTS and TF_IN_BETWEEN keep the
+    // choices they set; it is not run for any settings change that leaves the cap in force.
+    void leaveCapBelow60()
+    {
+        if (!g_capBelow60)
+            return;
+        g_capBelow60 = false;
+        const char *lock = std::getenv("TF_FPS_LOCK");
+        const char *rateSet = std::getenv("TF_FRAME_RATE");
+        const char *gpuEnv = std::getenv("PS2X_GPU");
+        const char *nativeEnv = std::getenv("PS2X_GPU_NATIVE");
+        const bool nativePath = !(gpuEnv && *gpuEnv == '0') && !(nativeEnv && *nativeEnv == '0');
+        const bool refresh = (lock && *lock) ? std::strcmp(lock, "refresh") == 0 : !(rateSet && *rateSet) && nativePath;
+        const bool fastGame = (followRates() || (rateSet && *rateSet)) && g_frameRate > 60;
+        const char *moments = std::getenv("TF_MOMENTS");
+        g_moments.store(moments && *moments ? *moments != '0' : (refresh && !fastGame));
+        g_momentsShown.store(g_moments.load());
+        const char *inBetween = std::getenv("TF_IN_BETWEEN");
+        if (!(inBetween && *inBetween))
+        {
+            g_fastGameFallback = fastGame && g_frameRate / 2 >= 60;
+            g_inBetween = fastGame ? g_fastGameFallback : true;
+        }
+        // (the pictures' lock the start-up gives this rate: TF_FPS_LOCK=60/120 or the default refresh locks them at
+        // 60, a fast rate leaves them out - entering 30-60 cleared it, so a 60-45-60 change would otherwise run the
+        // in-between pictures instead of the lock the start-up had)
+        const int pictures = refresh ? 120 : (lock && *lock ? std::atoi(lock) : (rateSet && *rateSet ? 0 : 120));
+        if (!fastGame && g_frameRate > 30 && (pictures == 60 || pictures == 120))
+        {
+            g_pictureLock = pictures;
+            g_lockShown.store(g_pictureLock);
+        }
+    }
+#endif
+
     std::atomic<bool> g_vrrSteady{false};
     // (TODO 35: the time the level spent at each rate - `[tf] frame rates: ...` every 30 s and when the ladder starts again)
     std::map<int, double> g_rateTimeMs;
@@ -3714,12 +3835,26 @@ namespace
         bool capped = false; // (any rate: its top under the setting's - the refresh's, a variable one's margin)
         std::chrono::steady_clock::time_point screenVBlank{};
         std::chrono::steady_clock::duration screenPeriod{};
-        const double screenHz = ps2_host_display::screenTiming(screenVBlank, screenPeriod) && screenPeriod.count() > 0
-                                    ? 1.0 / std::chrono::duration<double>(screenPeriod).count()
-                                    : 0.0;
+        double screenHz = ps2_host_display::screenTiming(screenVBlank, screenPeriod) && screenPeriod.count() > 0
+                              ? 1.0 / std::chrono::duration<double>(screenPeriod).count()
+                              : 0.0;
+#if defined(__linux__)
+        // (no vertical blank timing on Linux: the monitor's refresh, so the rates stop at what the screen shows - a
+        // Steam Deck's 90 Hz panel ran menus at 175 frames a second.) shortcut: the refresh as the window was made, a
+        // refresh changed later (the Deck's own setting) not followed; upgrade with a Linux vertical blank source.
+        if (screenHz <= 0.0)
+            screenHz = g_tfMonitorHz.load(std::memory_order_relaxed);
+#endif
         // (TODO 161 a: the logic at its fixed rate, one rate - no steps; the renderer leaves out pictures it cannot draw)
         const bool fixed = g_logicRate.load() > 0 && g_fastGameFallback && nativeOnePicture();
         const bool follow = !fixed && followRates() && g_fastGameFallback && nativeOnePicture() && !steps;
+        // (TODO 323) What the graphics driver says about the screen's variable refresh, asked in every case (it was asked
+        // only for the fine steps, so with a frame rate cap - the usual - the range never reached the log). A range the
+        // driver reports keeps the top under the screen's even while the measure reads a fixed refresh: the measure cannot
+        // see a variable refresh while the game runs at the screen's top (each picture then comes on the mode's period),
+        // so the game stayed at the top, outside the range, and the screen did not follow it.
+        const tf::vrr::Range range = tf::vrr::screenRange(screenHz);
+        const bool vrrReported = range.known && screenHz >= 50.0 && std::fabs(range.maxHz - screenHz) <= 2.0;
         if (fixed)
         {
             g_rates.push_back(g_frameRate);
@@ -3735,10 +3870,15 @@ namespace
             // the cap itself, Unlimited as many as the PC manages - TODO 266.)
             // (TODO 283: with variable refresh the top stays a little under the screen's also with VSync off - Off is
             // the default now, and past its range a FreeSync / G-Sync screen stops following the pictures and tears)
+            // (TODO 323, the user's rules for the range: Unlimited is never touched by it - literally unlimited; and the
+            // margin under the screen's top only where the chosen cap is at or above that top - a lower cap is used as is)
             int top = g_frameRate;
-            if (screenHz >= 50.0 && (ps2_host_present::sync() != 0 || vrr))
+            const bool unlimited = g_rateSetting >= kUnlimitedRate;
+            const int screenTop = static_cast<int>(std::floor(screenHz + 0.5));
+            if (screenHz >= 50.0 && (ps2_host_present::sync() != 0 || ((vrr || vrrReported) && !unlimited)))
             {
-                const double margin = vrr ? std::max(3.0, 0.02 * screenHz) : 0.0;
+                const bool underTop = (vrr || vrrReported) && !unlimited && g_frameRate >= screenTop;
+                const double margin = underTop ? std::max(3.0, 0.02 * screenHz) : 0.0;
                 top = std::max(30, std::min(top, static_cast<int>(std::floor(screenHz - margin + 0.5))));
             }
             capped = top < g_frameRate; // (the setting's rate not added back below)
@@ -3771,10 +3911,11 @@ namespace
             // little under it, 2% and at least 3 frames (Blur Busters' advice, 2026: about 3 fps under, more at 240 Hz and up):
             // the screen stays in its variable range rather than wait at its top - 240 Hz: 235, 144: 141, 60: 57)
             int top = g_frameRate;
-            const tf::vrr::Range range = tf::vrr::screenRange(screenHz);
             if (screenHz >= 50.0)
             {
-                const double margin = vrr ? std::max(3.0, 0.02 * screenHz) : 0.0;
+                // (TODO 323: the reported range's margin as in the cap's case - never for Unlimited, only from the top up)
+                const bool fromTop = g_rateSetting < kUnlimitedRate && g_frameRate >= static_cast<int>(std::floor(screenHz + 0.5));
+                const double margin = (vrr || (vrrReported && fromTop)) ? std::max(3.0, 0.02 * screenHz) : 0.0;
                 top = std::min(top, static_cast<int>(std::floor(screenHz - margin + 0.5)));
                 capped = top < g_frameRate;
             }
@@ -4124,6 +4265,12 @@ namespace
         // for 3 s after: the loading screen's frames are slow but under 100 ms, and were taken for a
         // host that cannot keep up - 120 down to 40 in a level's first seconds, then held there by
         // the failed rate's 30 s. The user's playtest log, 2026-10-23.)
+        // (TODO 160: Unlimited following the PC - the tracker below - follows from a level's first frames: the settle and the
+        // holds after a load, a movie or the window's return kept the level at 480 while the PC drew ~200, the game in slow
+        // motion (0.4-0.5 of real time) for its first 6 s. A load's frames are still not judged.)
+        static const bool track = !(std::getenv("TF_RATE_TRACK") && *std::getenv("TF_RATE_TRACK") == '0');
+        const bool tracking = track && followRates() && g_rateSetting >= kUnlimitedRate && g_rates.size() >= 2u &&
+                              g_rates.front() - g_rates.back() + 1 == static_cast<int>(g_rates.size());
         static bool loadingBefore = false;
         if (const uint8_t *loading = getConstMemPtr(rdram, 0x006CD324u); loading && *loading != 0u && !g_inHq) // (the HQ holds it set throughout)
         {
@@ -4135,15 +4282,16 @@ namespace
         {
             loadingBefore = false;
             g_rateSamples.clear();
-            g_rateHeldUntil = std::max(g_rateHeldUntil, now + std::chrono::seconds(3));
+            if (!tracking)
+                g_rateHeldUntil = std::max(g_rateHeldUntil, now + std::chrono::seconds(3));
             return;
         }
-        if (now < g_rateSettleUntil)
+        if (now < g_rateSettleUntil && !tracking)
         {
             g_rateSamples.clear();
             return;
         }
-        if (now < g_rateHeldUntil || intervalMs <= 0.0 || intervalMs > 100.0)
+        if ((now < g_rateHeldUntil && !tracking) || intervalMs <= 0.0 || intervalMs > 100.0)
             return;
         g_rateSamples.push_back({static_cast<float>(intervalMs), static_cast<float>(std::max(0.0, intervalMs - waitedMs)),
                                  static_cast<double>(nr::framesLeftOutBehind())});
@@ -4210,6 +4358,87 @@ namespace
         };
         const auto drawWalled = [&](int rate)
         { return g_drawWallRate > 0 && now < g_drawWallUntil && rate >= 0.97 * g_drawWallRate; };
+        // (TODO 160, 2026-11-12: Unlimited is unlimited - "if the user wants, he should frame cap it to 60 manually". With the frame rate cap at
+        // Unlimited the rate follows what this PC does, as it does it: no ladder, no bars, no holds. Every quarter second the
+        // last second's frames give the rate this PC holds - the EE's work (its mean with 10% to spare, its 90th percentile
+        // within 1.25 periods: a late frame is caught up by the ones after) and the drawing's (render thread, GPU: its 90th
+        // percentile within 95% of the period, a late picture is left out), the three running side by side - and the level
+        // goes there: down at once when it is 3% under, up when it was 4% over for half a second. A change costs no time
+        // (0.00 ms measured), so the rate moves with the scene a few frames a second at a time instead of falling a rung and
+        // waiting 15 s to climb. A capped rate keeps the governor above. TF_RATE_TRACK=0: Unlimited the governor's too.)
+        if (tracking)
+        {
+            static auto lastJudged = std::chrono::steady_clock::time_point{};
+            static auto lastChange = std::chrono::steady_clock::time_point{};
+            static int upCount = 0;
+            if (g_rateSamples.size() > 4096u)
+                g_rateSamples.erase(g_rateSamples.begin(), g_rateSamples.begin() + 2048);
+            if (now - lastJudged < std::chrono::milliseconds(250))
+                return;
+            lastJudged = now;
+            std::vector<float> work = lastOf(1000.0, &RateSample::work);
+            if (work.empty())
+                work = lastOf(250.0, &RateSample::work); // (a level's first second: a quarter of one)
+            if (work.empty())
+                return;
+            // (the EE's late frames are caught up by the ones after - TF_CATCH_UP_MS -, so its work counts by its mean with 10%
+            // to spare and its 90th percentile within 1.25 periods; the drawing's are left out, so its 90th within 0.95)
+            double eeMean = 0.0;
+            for (const float w : work)
+                eeMean += w;
+            eeMean /= static_cast<double>(work.size());
+            const double ee90 = percentile(work, 0.90);
+            const double drawMs = nativeDraw ? std::max(0.0, drawnP90(1000.0)) : 0.0;
+            const double eeMs = std::max(eeMean / 0.90, ee90 / 1.25);
+            const double costMs = std::max({eeMs, drawMs / 0.95, 1000.0 / kUnlimitedRate});
+            const int top = g_rates.front(), bottom = g_rates.back();
+            const int fits = std::clamp(static_cast<int>(std::floor(1000.0 / costMs + 1e-6)), bottom, top);
+            // (behind now - the last half second's median frame over 1.15 periods: down to what was done, whatever the work says)
+            const std::vector<float> lastHalf = lastOf(500.0, &RateSample::interval);
+            const double behindMs = lastHalf.empty() ? 0.0 : percentile(lastHalf, 0.5);
+            const int done = behindMs > 1.15 * periodMs(g_levelRate) ? std::clamp(static_cast<int>(std::floor(1000.0 / behindMs)), bottom, top) : top;
+            const int target = std::min(fits, done);
+            int to = g_levelRate;
+            if (target < g_levelRate && (target <= 0.97 * g_levelRate || target <= g_levelRate - 3))
+            {
+                to = target;
+                upCount = 0;
+            }
+            else if (target > g_levelRate && (target >= 1.04 * g_levelRate || target >= g_levelRate + 4))
+            {
+                if (++upCount >= 2 && now - lastChange >= std::chrono::milliseconds(500))
+                    to = target;
+            }
+            else
+                upCount = 0;
+            if (to == g_levelRate)
+                return;
+            if (to < g_levelRate && forestCanGiveWay())
+                return;
+            const int from = g_levelRate;
+            upCount = 0;
+            lastChange = now;
+            g_rateIndex = static_cast<size_t>(top - to);
+            playrec::noteRate(2, to);
+            const auto switchStart = std::chrono::steady_clock::now();
+            g_carsPhase = g_carsPhase * to / from;
+            switchFrameRate(rdram, ctx, runtime, to, false, true);
+            if (!g_inHq)
+                convertLevel(rdram, ctx, runtime, from, to);
+            if (g_fastGameFallback)
+                setInBetween(rdram, runtime, to * 2 <= g_frameRate);
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - switchStart).count();
+            ++g_switches;
+            g_switchMsSum += ms;
+            g_switchMsMax = std::max(g_switchMsMax, ms);
+            if (g_rateLog || now - g_rateTrackSaid >= std::chrono::seconds(2))
+            {
+                g_rateTrackSaid = now;
+                std::fprintf(stderr, "[tf] rate %d -> %d following the PC (Unlimited): the EE's work %.2f ms (mean) / %.2f (90%%), the drawing's %.2f (90%%)%s, in %.2f ms\n",
+                             from, to, eeMean, ee90, drawMs, done < fits ? ", behind" : "", ms);
+            }
+            return;
+        }
         size_t index = g_rateIndex;
         int inBetweenChange = 0; // (+1 on, -1 off)
         const std::vector<float> recent = lastOf(500.0, &RateSample::interval);
@@ -4775,6 +5004,18 @@ namespace
             return;
         // (TODO 161 a: the cap caps pictures; TODO 217: with the cap deciding the rates, a picture lock no longer means 60)
         g_frameRate = g_pictureLock != 0 && !followRates() ? 60 : g_logicRate.load() > 0 ? g_logicRate.load() : g_rateSetting;
+#if defined(__linux__)
+        // (The cap between 30 and 60 chosen live sets the pictures as it does at start-up: no picture lock, no in-between
+        // pictures unless the environment asks for them. Leaving it puts the start-up's fast-rate fallback and in-between
+        // pictures back; any other settings change leaves that state alone.)
+        if (cap >= 0)
+        {
+            if (followRates() && g_frameRate > 30 && g_frameRate < 60)
+                applyCapBelow60();
+            else
+                leaveCapBelow60();
+        }
+#endif
         std::fprintf(stderr, "[tf] settings: %d frames a second, %s\n", g_frameRate,
                      g_moments.load() ? "pictures at the screen's refresh"
                                       : (g_pictureLock != 0 ? (g_pictureLock == 120 ? "120 pictures" : "60 pictures") : "unlocked"));
@@ -7921,6 +8162,7 @@ namespace
         discord_presence::addSettings(); // the Discord status (discord_presence.h)
         ultrawide::addSettings();   // Graphics: the picture's shape (ultrawide.h)
         native_sound::addSettings(); // Sound: the native sound server (native_sound.h)
+        surround_mode::addSettings(); // Sound: plain stereo or Pro Logic II for the 3D sounds (surround_mode.h)
         fast_load::addSettings();   // Gameplay: fast loading (fast_load.h)
         language::addSettings();    // Gameplay: the PAL release's language (language.h)
         mod_menu::addSettings();    // Controls: driving with W / S (mod_menu.h)
@@ -8005,7 +8247,12 @@ namespace
             c.help = "The most pictures a second the game draws. It draws as many as your PC can, up to this. With VSync on, also "
                      "no more than the screen's refresh; with VSync off, Unlimited means as many as your PC can draw. The game "
                      "itself always moves at its true speed, whatever is drawn.";
+#if defined(__linux__)
+            // (45: half a 90 Hz handheld's refresh - the Steam Deck OLED's battery choice, each picture two refreshes)
+            c.choices = {{"30", "30"}, {"45", "45"}, {"60", "60"}, {"90", "90"}, {"120", "120"}, {"144", "144"}, {"165", "165"}, {"240", "240"}, {"0", "Unlimited"}};
+#else
             c.choices = {{"30", "30"}, {"60", "60"}, {"90", "90"}, {"120", "120"}, {"144", "144"}, {"165", "165"}, {"240", "240"}, {"0", "Unlimited"}};
+#endif
             c.defaultValue = "60"; // (the user's choice, 2026-11-12: 60 unless the player picks another)
             c.available = []() { return followRates(); };
             c.unavailableHelp = "TF_RATE_LADDER=1 is set: the frame-rate ladder decides the rates (Game frame rate, Frame pacing).";
@@ -8029,13 +8276,28 @@ namespace
             v.section = "Graphics";
             v.label = "VSync";
             v.order = 6;
-            // (TODO 283, the user's choice: Off by default. With no line in settings.ini the presents go at once -
-            // the runtime's ps2_host_present::sync, patch 0168; "on" is what the row writes for On.)
-            v.help = "Off: more frames, up to the frame rate cap; the picture may tear. On: no tearing, never above the "
-                     "screen's refresh. With FreeSync or G-Sync the game stays a little under the screen's top rate "
-                     "either way, so the screen keeps following it.";
-            v.choices = {{"0", "Off"}, {"on", "On"}};
-            v.defaultValue = "0";
+            // (TODO 283: Off by default, the user's choice - kept in TODO 323, where Off tore on his 240 Hz screen, whose
+            // FreeSync follows only 210..240 Hz: at ~190 frames a second the screen kept its own 240 Hz and pictures landed
+            // mid-refresh. On = by the screen: at its refresh on a fixed one (no tearing), at once while FreeSync / G-Sync
+            // follows. The Screen line below tells which applies.)
+            // THE DEFAULT, one line: what no line in settings.ini means (the runtime's own default, patch 0168, is Off;
+            // this sets it at the start when settings.ini has no PS2X_PRESENT_SYNC).
+            constexpr bool kVSyncOnByDefault = false;
+            if (!std::getenv("PS2X_PRESENT_SYNC") || !*std::getenv("PS2X_PRESENT_SYNC"))
+                ps2_host_present::setSync(kVSyncOnByDefault ? -1 : 0);
+            // (the presenter opens before this - its line tells the runtime's default; this is the one in effect)
+            std::fprintf(stderr, "[tf] VSync %s%s\n",
+                         ps2_host_present::sync() == 0 ? "off: the presents go at once (may tear)"
+                                                       : "on: the presents wait for the screen's refresh, or go at once while "
+                                                         "FreeSync / G-Sync follows (no tearing)",
+                         std::getenv("PS2X_PRESENT_SYNC") && *std::getenv("PS2X_PRESENT_SYNC") ? "" : " (the default)");
+            v.help = "On: no tearing - each picture waits for the screen's refresh, or goes at once while FreeSync or "
+                     "G-Sync follows the game. Off: pictures go at once, up to the frame rate cap, so the picture may "
+                     "tear (a line across the screen) where the screen does not follow them. With FreeSync or G-Sync "
+                     "and a frame rate cap at the screen's rate or above (not Unlimited), the game stays a little under "
+                     "the screen's top rate either way.";
+            v.choices = {{"0", "Off (may tear)"}, {"on", "On (no tearing)"}};
+            v.defaultValue = kVSyncOnByDefault ? "on" : "0";
             v.current = []() { return std::string(ps2_host_present::sync() == 0 ? "0" : "on"); };
             v.apply = [](const std::string &value)
             {
@@ -8045,6 +8307,49 @@ namespace
                 return true;
             };
             ps2_settings::add(v);
+        }
+        {
+            // (TODO 323) A line under VSync that only tells: the screen's refresh, what the graphics driver reports about
+            // its FreeSync range, and whether the screen follows the game now (the vblank watcher's measure). A FreeSync
+            // screen whose range starts high (the user's: 210..240 Hz) stops following when the game runs under it.
+            const auto status = []() -> std::string
+            {
+                std::chrono::steady_clock::time_point vblank{};
+                std::chrono::steady_clock::duration period{};
+                const double hz = ps2_host_display::screenTiming(vblank, period) && period.count() > 0
+                                      ? 1.0 / std::chrono::duration<double>(period).count()
+                                      : 0.0;
+                if (hz < 1.0)
+                    return "Not measured yet";
+                const tf::vrr::Range r = tf::vrr::screenRange(hz);
+                const bool follows = ps2_host_display::screenVariable();
+                char text[240];
+                if (r.known && std::fabs(r.maxHz - hz) <= 2.0)
+                    std::snprintf(text, sizeof(text), "%.0f Hz, FreeSync %.0f-%.0f Hz: %s", hz, r.minHz, r.maxHz,
+                                  follows ? "following the game" : "not following now (the game outside that range)");
+                else if (follows)
+                    std::snprintf(text, sizeof(text), "%.0f Hz, variable refresh: following the game", hz);
+                else
+                    std::snprintf(text, sizeof(text), "%.0f Hz, fixed refresh (no FreeSync / G-Sync seen)", hz);
+                std::string out = text;
+                // (TODO 323, the user's wording: with VSync Off where the screen does not follow, say what stops the tearing)
+                if (ps2_host_present::sync() == 0 && !follows)
+                    out += ". VSync Off: may tear; turn VSync On to stop tearing";
+                return out;
+            };
+            Setting s;
+            s.key = "TF_SCREEN_SYNC_STATUS";
+            s.section = "Graphics";
+            s.label = "Screen";
+            s.order = 7;
+            s.help = "What your screen does now: its refresh rate, the FreeSync range the graphics driver reports, and "
+                     "whether the screen follows the game's frame rate. Without that, VSync On keeps the picture from "
+                     "tearing.";
+            s.choices = {{"", "Not measured yet"}};
+            s.makeChoices = [status]() { return std::vector<ps2_settings::Choice>{{"", status()}}; };
+            s.defaultValue = "";
+            s.current = []() { return std::string(); };
+            ps2_settings::add(s);
         }
         {
             // (TODO 35) Frame pacing: how the levels' rates step - see pacingChoice. Taken when a level begins. (Only
@@ -8129,7 +8434,7 @@ namespace
                      "detail). The settings below set each one apart (Auto: from this).";
             for (const char *value : {"1", "1.5", "2", "3", "4"})
                 s.choices.push_back(Choice{value, std::string(value) + times + (std::string(value) == "1" ? " (the console's)" : "")});
-            s.defaultValue = "2";
+            s.defaultValue = graphics_driver::defaultFor("TF_DRAW_DISTANCE", "2"); // (TODO 295: the Low preset's on built-in graphics)
             s.current = []()
             {
                 char text[32];
@@ -8359,7 +8664,7 @@ namespace
                          "their finest model, at any distance. Their movement and the game's rules are the console's. "
                          "Off: the console's.";
                 s.choices = {Choice{"0", "Off"}, Choice{"1", "One step finer"}, Choice{"4", "Full"}};
-                s.defaultValue = "4";
+                s.defaultValue = graphics_driver::defaultFor("TF_ENEMY_DETAIL", "4"); // (TODO 295: the Low preset's on built-in graphics)
                 s.apply = [](const std::string &value)
                 {
                     g_enemyDetail.store(enemyDetailOf(value));
@@ -8440,7 +8745,7 @@ namespace
             s.help = "Smooths the edges of the scene's geometry (the grass and leaves are their textures': FXAA smooths those). "
                      "Costs the graphics card more at higher counts.";
             s.choices = {{"0", "Off"}, {"2", std::string("2") + times}, {"4", std::string("4") + times}, {"8", std::string("8") + times}};
-            s.defaultValue = "4";
+            s.defaultValue = graphics_driver::defaultFor("PS2X_GPU_MSAA", "4"); // (TODO 295: the Low preset's on built-in graphics)
             s.available = []()
             { return ps2_settings::choice("PS2X_GPU") != "0" && ps2_settings::choice("PS2X_GPU_NATIVE") != "0"; };
             s.unavailableHelp = "Needs the native pixel path.";
@@ -8460,6 +8765,23 @@ namespace
     uint32_t g_workFrames = 0u;
 
     uint32_t g_lastFrameWorkCycles = 0u; // (the slow-frame report)
+
+    // (TODO 295, TF_HITCH_MS) The idle time spent in the frame's wait for the VBlank (0x25DE90): how much of a slow frame's
+    // "waited for the clock" is that wait, and whether the frame was already late when it began (the VBlank count past the
+    // one the frame began at) - a late frame that still waits a whole VBlank.
+    EeScheduler *g_hitchEe = nullptr;
+    uint8_t *g_hitchRdram = nullptr;
+    std::chrono::steady_clock::duration g_flipIdleAt{};
+    double g_flipIdleMs = 0.0;
+    int32_t g_flipFrameBegan = 0, g_flipLateBy = -1, g_flipWaited = 0;
+    int32_t hitchVBlankCount()
+    {
+        const uint8_t *p = g_hitchRdram ? getConstMemPtr(g_hitchRdram, 0x006CEED0u) : nullptr;
+        int32_t v = 0;
+        if (p)
+            std::memcpy(&v, p, 4);
+        return v;
+    }
 
     void noteFrameWork(uint32_t cycles)
     {
@@ -8619,6 +8941,7 @@ namespace
         static int linesInWindow = 0;
         const double intervalMs = std::chrono::duration<double, std::milli>(now - last).count();
         const double idleMs = std::chrono::duration<double, std::milli>(ee.idleHostTime() - idleBefore).count();
+        const std::string idleBy = ee.takeIdleBreakdown(); // (TODO 295: the clock wait by what it waited for)
         const double cpuMs = cpu - cpuBefore, renderWait = nr::gameWaitMs() - renderWaitBefore,
                      slotWait = nr::backend().slotWaitMs() - slotWaitBefore;
         const uint64_t pipelines = nr::pipelinesMade();
@@ -8638,13 +8961,15 @@ namespace
                 std::fprintf(stderr,
                              "[tf] slow frame %.1f ms at vblank %llu (%s at %d): game thread CPU %.1f ms, waited for the clock %.1f "
                              "(game work %.1f ms of EE time), for the renderer %.1f, not running %.1f; render thread waited for "
-                             "the GPU %.1f ms; large images %u queued, %u decoding, +%llu compressed, +%llu PNGs; +%llu pipelines\n",
+                             "the GPU %.1f ms; large images %u queued, %u decoding, +%llu compressed, +%llu PNGs; +%llu pipelines; "
+                             "the VBlank wait %.1f ms of the clock (began %d VBlanks after the frame's, waited %d); the clock waits by deadline: %s\n",
                              intervalMs, static_cast<unsigned long long>(ee.currentVSyncTick()), g_inHq ? "HQ" : g_levelRate ? "level" : "menus",
                              g_levelRate, cpuMs, idleMs, g_lastFrameWorkCycles / kEeCyclesPerMs, renderWait,
                              std::max(0.0, intervalMs - cpuMs - idleMs - renderWait), slotWait, queued, heavy,
                              static_cast<unsigned long long>(compressed - compressedBefore), static_cast<unsigned long long>(pngs - pngsBefore),
-                             static_cast<unsigned long long>(pipelines - pipelinesBefore));
+                             static_cast<unsigned long long>(pipelines - pipelinesBefore), g_flipIdleMs, g_flipLateBy, g_flipWaited, idleBy.empty() ? "-" : idleBy.c_str());
         }
+        g_flipIdleMs = 0.0;
         last = now;
         idleBefore = ee.idleHostTime();
         cpuBefore = cpu;
@@ -9468,6 +9793,7 @@ namespace
         distance_meter::install(runtime); // the distance meter (distance_meter.cpp)
         boss_cheat::install(runtime); // one-hit kills leave the bosses' fights to play out (boss_cheat.h, TODO 199)
         start_screens::install(runtime);  // boot straight to the main menu (start_screens.h, TODO 110)
+        pc_settings_row::install(runtime); // the PC settings as pages in the game's Options menus (pc_settings_row.h)
         camera_mode::install(runtime);    // first / third person (camera_mode.cpp)
         photo_mode::install(runtime);     // the free camera, F8 (photo_mode.cpp)
         static_aim::install(runtime);     // the camera's pivot, the crosshair (static_aim.cpp, TODO 292)
@@ -9475,6 +9801,8 @@ namespace
         if (!ext::install(ext::Phase::AfterPhotoMode, runtime)) runtime.requestStop(); // (the jet bike: its addresses stay put)
         actor_guard::install(runtime);    // freed actors' child walks left out (actor_guard.h, TODO 51)
         revisit_music::install(runtime);  // a finished Antarctica's cliff music (revisit_music.h, TODO 83: an original PS2 bug)
+        objective_guide::install(runtime); // (TODO 315) the objective guide: the triggers' wait, after revisit_music's (objective_guide.h)
+        surround_mode::install(runtime);  // the 3D sounds' Pro Logic II phase inversion, off by default (surround_mode.h, TODO 305 (10))
         pool_growth::install(runtime);    // the game's look-and-sound pools x4 with the 256 MB RAM (pool_growth.h, N7 step 3)
         movement::install(runtime);       // the run on a modern stick (movement.h, TODO 41)
         ragdoll_step::install(runtime);   // the ragdolls stepped at the console's 1/30 s (ragdoll_step.cpp, TODO 182/172)
@@ -9524,6 +9852,17 @@ namespace
         // two parts ("%s%s": the cutscene scripts of a level, among others) ended in
         // "(null)" and those files were never found.
         ps2_stubs::setVarArgSlotBytes(8u);
+        // vsprintf (0x118048, a host stub) writes its whole result since runtime patch 0180 (it stopped at 255
+        // characters: TODO 305 item 8, the HQ's Situation texts cut mid-word). The game's five call sites and their
+        // buffers, so a longer result can never run past one (the same addresses in the European build):
+        //   tdgFormatString's 0x104640 and 0x1045C0: a 4096-byte buffer at 0x6CFFA0 (they end it at 0x6D0F9F);
+        //   sceDevConsPrintf 0x11B220 and the text printer 0x227BF0: 1024 bytes on their stack;
+        //   vlxConsoleText_Playstation2::VPrintAtPixel 0x235E40: 256 bytes on its stack (debug text).
+        ps2_stubs::setVsprintfBufferBytes(0x00104660u, 4096u);
+        ps2_stubs::setVsprintfBufferBytes(0x00104620u, 4096u);
+        ps2_stubs::setVsprintfBufferBytes(0x0011B268u, 1024u);
+        ps2_stubs::setVsprintfBufferBytes(0x00227E40u, 1024u);
+        ps2_stubs::setVsprintfBufferBytes(0x00235E78u, 256u);
         // At the end of every frame (0x25BF50) the game reads a counter that its VU1
         // microcode keeps in data memory (vector 0x0B, x), stores it times 8 at 0x6CF068 and
         // clears it. Nothing reads 0x6CF068. With VIF1 on its own thread that read would
@@ -9552,6 +9891,9 @@ namespace
         menu_mouse::install(runtime); // the mouse in the HQ's screens (menu_mouse.h, TODO 175)
         // The native PC renderer (native_render/), wrapping the render calls (TF_NATIVE_RENDER).
         nr::install(runtime);
+        // The extensions that hook the native renderer (port_ext.h AfterRender: e.g. the overlay's Playable Decepticons,
+        // its skin renderer and player observer when that mod is on).
+        if (!ext::install(ext::Phase::AfterRender, runtime)) runtime.requestStop();
         nr::n5::install(runtime); // (N5: the render device native - docs/N5_PLAN.md)
 #if defined(_WIN32)
         if (const char *guard = std::getenv("TF_GUARD_FRAME"))
@@ -9569,12 +9911,15 @@ namespace
         {
             runtime.registerFunction(kCreateFmvStream, createFmvStream);
             runtime.registerFunction(kFmvStreamDtor, destroyFmvStream);
+            if ((g_makeFmvStream = runtime.lookupFunction(kMakeFmvStream)) != nullptr)
+                runtime.registerFunction(kMakeFmvStream, makeFmvStream); // (its caller: the cut scenes' movies, ext::skipMovie)
             const char *pace = std::getenv("TF_HQ_MOVIE_PACE");
             if (!(pace && *pace == '0') && (g_fmvStreamUpdate = runtime.lookupFunction(kFmvStreamUpdate)) != nullptr)
                 runtime.registerFunction(kFmvStreamUpdate, fmvStreamUpdate);
         }
         installDrawDistance(runtime);
         frustum_native::install(runtime); // mlxFrustum::Test in one native call (frustum_native.h, TODO 94; TF_FRUSTUM_NATIVE=0: off)
+        nr::forest::install(runtime); // (TODO 287, phase 0) TF_NATIVE_FOREST=measure: the forest's submits timed (nr_forest.h; after the forest's own wrappers)
         if ((g_sceneNodeDtor = runtime.lookupFunction(kSceneNodeDtor)) != nullptr)
             runtime.registerFunction(kSceneNodeDtor, sceneNodeDtor); // (a child with no vtable: see above)
         installHeapWatch(runtime);
@@ -9592,12 +9937,15 @@ namespace
         runtime.eeScheduler().setStateLoadedHook(
             [&runtime]()
             {
+                if (!ext::stateLoaded(runtime))
+                    return; // (an extension could not adopt the state: the runtime is stopping)
                 static R5900Context scratch{}; // (for the FPU's flags of the conversion's arithmetic)
                 adoptLoadedState(runtime.memory().getRDRAM(), &scratch, &runtime);
                 guest_code::writeAll(runtime.memory().getRDRAM()); // (the added data, whatever the state had)
                 native_sound::stateLoaded(runtime.memory().getRDRAM()); // (its engine from the state's record)
                 iop_boot::stateLoaded(runtime); // (a state made with the other boot told; the IOP parked again)
                 sound_nodes::stateLoaded(); // (the console frames they owe: none, as in a game started with the state)
+                pc_settings_row::stateLoaded(); // (pages open before the load are not the state's: pc_settings_row.h)
             });
         // The frame rate (see "The frame rate"): TF_FRAME_RATE=<frames a second>, 60 by default;
         // 30 (or TF_60FPS=0) for the console's. TF_60FPS=force also plays the level of a state
@@ -9655,16 +10003,30 @@ namespace
             // settings.ini from an older version (TF_FPS_LOCK=60 / 120 / refresh, the default "refresh" too) no longer
             // pulls the levels and the HQ down to 60 (a player at a 165 cap stayed at 60).
             const bool fastGame = (followRates() || (rateSet && *rateSet)) && g_frameRate > 60;
-            g_moments.store(momentsEnv && *momentsEnv ? *momentsEnv != '0' : (refresh && !fastGame));
-            g_momentsShown.store(g_moments.load());
-            if (fastGame && !(std::getenv("TF_IN_BETWEEN") && *std::getenv("TF_IN_BETWEEN")))
+#if defined(__linux__)
+            // (A cap between 30 and 60 - 45, half a 90 Hz handheld's refresh - decides the pictures too: the picture
+            // lock would pull it up to 60 and the in-between pictures would double its VBlanks.)
+            const bool capBelow60 = followRates() && g_frameRate > 30 && g_frameRate < 60;
+            if (capBelow60)
+                applyCapBelow60();
+            else
+#endif
             {
-                // (the in-between pictures would double the VBlanks at the fast rate: 240-480 a
-                // second; they come on at half the rate, when the host falls behind)
-                g_fastGameFallback = g_frameRate / 2 >= 60;
-                g_inBetween = g_fastGameFallback;
+                g_moments.store(momentsEnv && *momentsEnv ? *momentsEnv != '0' : (refresh && !fastGame));
+                g_momentsShown.store(g_moments.load());
+                if (fastGame && !(std::getenv("TF_IN_BETWEEN") && *std::getenv("TF_IN_BETWEEN")))
+                {
+                    // (the in-between pictures would double the VBlanks at the fast rate: 240-480 a
+                    // second; they come on at half the rate, when the host falls behind)
+                    g_fastGameFallback = g_frameRate / 2 >= 60;
+                    g_inBetween = g_fastGameFallback;
+                }
             }
+#if defined(__linux__)
+            if ((fastGame || capBelow60) && (pictures == 60 || pictures == 120))
+#else
             if (fastGame && (pictures == 60 || pictures == 120))
+#endif
                 std::fprintf(stderr, "[tf] %s%d: levels at %d frames, a picture each (the picture lock TF_FPS_LOCK left out)\n",
                              rateSet && *rateSet ? "TF_FRAME_RATE=" : "the frame rate cap ", g_frameRate, g_frameRate);
             else if (g_frameRate > 30 && (pictures == 60 || pictures == 120))
@@ -9756,10 +10118,13 @@ namespace
             runtime.registerFunction(kSlerp, slerpAtRate);
         if ((g_optionByIndex = runtime.lookupFunction(kOptionByIndex)) != nullptr)
             runtime.registerFunction(kOptionByIndex, optionByIndex); // (TODO 178)
+        if ((g_optionSet = runtime.lookupFunction(kOptionSet)) != nullptr)
+            runtime.registerFunction(kOptionSet, optionSet); // (TODO 290 1)
         if ((g_optionsDefaults[0] = runtime.lookupFunction(kOptionsDefaults[0])) != nullptr)
             runtime.registerFunction(kOptionsDefaults[0], optionsDefaults<0>); // (TODO 178)
         if ((g_optionsDefaults[1] = runtime.lookupFunction(kOptionsDefaults[1])) != nullptr)
             runtime.registerFunction(kOptionsDefaults[1], optionsDefaults<1>);
+        pc_settings_row::installLate(runtime); // the stored game options applied after the profile's and the defaults (pc_settings_row.h)
         if ((g_cameraTurn = runtime.lookupFunction(kCameraTurn)) != nullptr)
             runtime.registerFunction(kCameraTurn, cameraTurn); // (mouse look)
         if ((g_turretTurn = runtime.lookupFunction(kTurretTurn)) != nullptr)
@@ -9769,6 +10134,7 @@ namespace
         installCallCounter(runtime);
         installCoverage(runtime);
         installCallMap(runtime);
+        if (!ext::install(ext::Phase::BeforeSettings, runtime)) runtime.requestStop(); // (e.g. the overlay's Playable Decepticons: its adapters and added code)
         addSettings();
         for (const auto &[key, value] : g_ultraMigrated) // (the old Ultra's forest moved to the new: into the settings file)
             ps2_settings::noteChanged(key, value);
@@ -9833,6 +10199,12 @@ namespace tf::port
     uint64_t testTickNow() { return static_cast<uint64_t>(g_testTick + 1e-6); }
 
     bool mouseTurnsView() { return mouseIsTurning(); }
+
+    bool cutscenePlaying(const uint8_t *rdram)
+    {
+        const uint8_t *flag = rdram ? getConstMemPtr(const_cast<uint8_t *>(rdram), 0x006CFB94u) : nullptr;
+        return flag && *flag != 0u;
+    }
 
     bool lateFramesTakeNextVBlank()
     {
@@ -9906,6 +10278,11 @@ namespace tf::port
 
     void vblankWaitBegins(uint32_t count)
     {
+        if (g_hitchEe)
+        {
+            g_flipIdleAt = g_hitchEe->idleHostTime();
+            g_flipLateBy = hitchVBlankCount() - g_flipFrameBegan;
+        }
         if (g_waitEndCount != 0u)
         {
             noteFrameWork(count - g_waitEndCount - g_skippedSinceWait);
@@ -9915,6 +10292,13 @@ namespace tf::port
 
     void vblankWaitEnds(uint32_t count)
     {
+        if (g_hitchEe)
+        {
+            g_flipIdleMs += std::chrono::duration<double, std::milli>(g_hitchEe->idleHostTime() - g_flipIdleAt).count();
+            const int32_t vb = hitchVBlankCount();
+            g_flipWaited = vb - g_flipFrameBegan - std::max(0, g_flipLateBy);
+            g_flipFrameBegan = vb;
+        }
         g_waitEndCount = count;
         g_skippedSinceWait = 0u;
         tfNoteFrameWork(true, 0.0);
@@ -9927,6 +10311,19 @@ namespace tf::port
 
     void frameBegins(uint8_t *rdram, PS2Runtime *runtime)
     {
+        // (TODO 295) TF_GAME_THREAD_PRIORITY=above: the game thread a step above normal priority, once (A/B; off by default).
+        static const bool raised = []()
+        {
+            const char *e = std::getenv("TF_GAME_THREAD_PRIORITY");
+            const bool want = e && std::string(e) == "above";
+            const bool done = want && tfRaiseThreadPriority();
+            if (want)
+                std::fprintf(stderr, "[tf] the game thread above normal priority: %s (TF_GAME_THREAD_PRIORITY)\n", done ? "set" : "refused");
+            return done;
+        }();
+        (void)raised;
+        g_hitchEe = &runtime->eeScheduler();
+        g_hitchRdram = rdram;
         reportSlowFrame(rdram, runtime);
         if (g_printFps)
             noteGameFrame();

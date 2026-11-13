@@ -167,6 +167,18 @@ namespace install_layout
         return today;
     }
 
+    bool callerCardRoot()
+    {
+        const char *set = std::getenv("TF_MC_ROOT");
+        if (!set || !*set)
+            return false;
+        if (!g_new)
+            return true;
+        std::error_code ec;
+        // (not the same folder, or one that cannot be compared: the caller's own)
+        return !fs::equivalent(fs::path(set), place("saves", "mc0"), ec);
+    }
+
     std::string summary()
     {
         if (!g_new)

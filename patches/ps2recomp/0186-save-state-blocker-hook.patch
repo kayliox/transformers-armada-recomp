@@ -1,0 +1,37 @@
+Subject: [PATCH] Runtime: a host layer can keep a state from being saved (a native function in the middle of a call)
+
+A state holds the guest machine, not the host's own stacks. A native host layer can run functions natively on stacks of
+their own, and a native function that waits in the middle of a call (the pause menu, in a level) has native frames no
+state can carry: a state saved then fails when loaded (the bridge's sentinel finds nothing to resume - TPepperoni, private
+PR #16). setSaveStateBlockerHook lets such a layer say why a state cannot be taken right now; saveStateBlocker asks it
+after the scheduler's own reasons, so the save waits and retries as it does for those (600 ticks).
+
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -587,6 +587,9 @@
+     // What keeps a state from being taken right now (host callbacks that cannot be
+     // written to a file), or empty.
+     [[nodiscard]] std::string saveStateBlocker() const;
++    // A host layer's own reason a state cannot be taken right now (empty: none), asked by saveStateBlocker after the
++    // scheduler's reasons - a host layer's native frames in the middle of a call. On the EE executor.
++    void setSaveStateBlockerHook(std::function<std::string()> hook) { m_saveStateBlockerHook = std::move(hook); }
+     void saveState(ps2x::StateWriter &out) const;
+     void loadState(ps2x::StateReader &in);
+
+@@ -828,5 +831,6 @@
+     mutable std::mutex m_refusedStateMutex;
+     std::string m_lastRefusedState;
+     std::function<void()> m_stateLoadedHook; // setStateLoadedHook
++    std::function<std::string()> m_saveStateBlockerHook; // setSaveStateBlockerHook
+     uint64_t m_saveStateGiveUpTick = 0;
+ };
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -2784,5 +2784,7 @@
+         if (invocation.onComplete)
+             return "a guest call for the host is queued";
+     }
++    if (m_saveStateBlockerHook)
++        return m_saveStateBlockerHook();
+     return {};
+ }

@@ -1,7 +1,9 @@
-# The PS2Recomp patches are applied to a fresh clone by build.ps1: keep them byte for byte as
-# tools/make_patches.py writes them, whatever core.autocrlf says.
+# The PS2Recomp patches are applied to a fresh clone by build.ps1 and build.sh: keep them byte
+# for byte as their authors wrote them, whatever core.autocrlf says.
 *.patch -text
 # The README's screenshots (docs/images): binary, never touched by line endings.
 *.jpg binary
 # The git hooks run under sh: LF line endings, whatever core.autocrlf says.
 .githooks/* text eol=lf
+# The Linux scripts (build.sh, setup.sh, update.sh, play.sh) run under bash: LF line endings too.
+*.sh text eol=lf
