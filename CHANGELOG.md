@@ -1,5 +1,12 @@
 # What's new
 
+## 0.7.6
+
+**Fixed**
+- 0.7.5 could fail to build in its last step ("Unknown arguments specified" in CopyFfmpegDlls.cmake) on PCs that
+  have an older CMake, version 3, such as Visual Studio's own. If your update to 0.7.5 said the build failed, update
+  again.
+
 ## 0.7.5
 
 **New**
