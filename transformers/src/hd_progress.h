@@ -45,6 +45,13 @@ namespace hd_progress
     // while the set is being made, "Making sharp text" while its fonts are, and "HD textures ready. Restart to use them
     // (F1)" for a minute once a set this run saw being made is done ("" otherwise: nothing shows).
     std::string cornerLine();
+    // (TODO 352) Whether the small window makes them while the game runs (hd_options.json's "while_playing": the setup's
+    // "Keep making HD textures while I play"); otherwise it waits until the game is closed.
+    bool makesWhilePlaying();
+    // (TODO 352) F1 > Graphics, under Make HD textures: what the small window is doing now, in a sentence that stays while
+    // it is true - preparing, waiting for the game to close (with the count so far), making N of M, not finished (the
+    // window closed), ready to restart - "" when nothing is under way.
+    std::string statusLine();
     // (TODO 267) A set (or its sharp text) finished while this run was going: F1's Restart button restarts the game
     // (the settings' restart: back where the player was) so that they are used.
     bool readyToRestart();

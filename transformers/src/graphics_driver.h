@@ -13,6 +13,9 @@ namespace graphics_driver
     // (User decision 2026-11-11) Built-in graphics or a card with under 3.5 GB of video memory (the GTX 1650's 4 GB
     // and up are not): no HD textures are made or streamed on it. TF_LOW_END=1 / 0 says so for tests.
     bool lowEnd();
+    // (TODO 356) Only Microsoft's basic or remote display adapter was found (no real card, e.g. over Remote Desktop):
+    // not low end - nothing of the player's settings is reset or defaulted for it - but no HD textures are made either.
+    bool softwareOnly();
     // (TODO 295) On such a card the graphics settings start on the Low preset's values where the player has not set them:
     // a setting's default there (for its settings row) - the given one elsewhere.
     const char *defaultFor(const char *key, const char *normal);

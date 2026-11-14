@@ -30,6 +30,7 @@
 
 #include "camera_mode.h"
 #include "static_aim.h" // (TODO 322: the crosshair pinned to one screen point)
+#include "crosshair_row.h" // (TODO 358: the crosshair's size)
 #include "game_config.h"
 #include "menu_mouse.h"
 #include "port_ext.h"
@@ -153,7 +154,22 @@ namespace photo_mode
             bool widescreen = false;
         } g_seen;
         std::mutex g_seenLock;
+        float g_viewTurn[4] = {1.0f, 0.0f, 0.0f, 0.0f}; // (TODO 355: noteViewTurn's, under g_seenLock)
+        std::chrono::steady_clock::time_point g_viewTurnAt{};
         constexpr uint32_t kWidescreenOption = 0x006CF004u; // the game's own 16:9 switch (option 4)
+
+        // (TODO 355) The view as the picture will have it: the camera's as seen this frame, with the first-person free look's
+        // turn where that replaced the camera's own (noteViewTurn - the two differ while walking and turning). For the
+        // crosshair's pin, the small cross's place and the other things drawn over the picture by the view.
+        Seen seenForPicture()
+        {
+            std::lock_guard<std::mutex> guard(g_seenLock);
+            Seen v = g_seen;
+            if (std::chrono::steady_clock::now() - g_viewTurnAt < std::chrono::milliseconds(150))
+                for (int i = 0; i < 4; ++i)
+                    v.turn[i] = g_viewTurn[i];
+            return v;
+        }
 
         // (TODO 322) The ray from the view through the crosshair's pinned screen point: the view's ahead raised by `share` of half
         // the view's height (its turn and field of view as seen this frame - the camera's SetPosition / SetOrientation come
@@ -163,11 +179,7 @@ namespace photo_mode
             static const bool off = std::getenv("TF_XHAIR_PIN") && *std::getenv("TF_XHAIR_PIN") == '0';
             if (off)
                 return false;
-            Seen v;
-            {
-                std::lock_guard<std::mutex> guard(g_seenLock);
-                v = g_seen;
-            }
+            const Seen v = seenForPicture();
             if (!(v.fov > 1.0f && v.fov < 179.0f))
                 return false;
             const float w = v.turn[0], qx = v.turn[1], qy = v.turn[2], qz = v.turn[3];
@@ -428,8 +440,9 @@ namespace photo_mode
                 const char *e = std::getenv("TF_CROSSHAIR_CONSTANT");
                 return e && *e ? std::atoi(e) : 1;
             }();
-            if (from == kCrosshairSetScaleReturn && constantMode > 0 && g_crosshairDrawnAt > 0.01f &&
-                (constantMode >= 2 || camera_mode::firstPerson()))
+            // (TODO 343 / 355) The Fixed crosshair's, in first AND third person (a size changing with the aim's distance read
+            // as the crosshair moving); with Original the game's own sizes.
+            if (from == kCrosshairSetScaleReturn && constantMode > 0 && g_crosshairDrawnAt > 0.01f && static_aim::fixed())
             {
                 float fov = 0.0f;
                 {
@@ -464,6 +477,15 @@ namespace photo_mode
                 }
                 ctx->f[12] *= g_crosshairScale;
             }
+            // (TODO 358) F1 > Gameplay > Crosshair size: the ring's scale times the chosen share - about the model's own
+            // centre, where it is placed (in Fixed the pinned point), so it shrinks in place and points where it did. At 1
+            // (the default) nothing here acts. The game reads its own scale back (getScale), as with the factors above.
+            if (from == kCrosshairSetScaleReturn)
+                if (const float k = crosshair_row::size(); k < 1.0f)
+                {
+                    ctx->f[12] *= k;
+                    g_crosshairScaled = true;
+                }
             if (from == kCrosshairSetScaleReturn)
             {
                 // (TODO 307 h) The ring's top bracket over the half screen's height: its model reaches 1.39 units above its
@@ -532,6 +554,14 @@ namespace photo_mode
         return true;
     }
 
+    void noteViewTurn(const float turn[4])
+    {
+        std::lock_guard<std::mutex> guard(g_seenLock);
+        for (int i = 0; i < 4; ++i)
+            g_viewTurn[i] = turn[i];
+        g_viewTurnAt = std::chrono::steady_clock::now();
+    }
+
     bool crosshair(float point[3])
     {
         std::lock_guard<std::mutex> guard(g_seenLock);
@@ -550,11 +580,7 @@ namespace photo_mode
 
     bool viewFrame(float ahead[3], float left[3], float up[3], float &tanUp)
     {
-        Seen v;
-        {
-            std::lock_guard<std::mutex> guard(g_seenLock);
-            v = g_seen;
-        }
+        const Seen v = seenForPicture();
         if (!(v.fov > 1.0f && v.fov < 179.0f))
             return false;
         const float w = v.turn[0], qx = v.turn[1], qy = v.turn[2], qz = v.turn[3];
@@ -573,11 +599,7 @@ namespace photo_mode
 
     bool project(const float point[3], float windowW, float windowH, float pictureAspect, float &x, float &y)
     {
-        Seen v;
-        {
-            std::lock_guard<std::mutex> guard(g_seenLock);
-            v = g_seen;
-        }
+        const Seen v = seenForPicture();
         if (!(v.fov > 1.0f && v.fov < 179.0f) || pictureAspect <= 0.0f)
             return false;
         // the view's axes: +x ahead, +z up (the view matrix's rows), +y to the left

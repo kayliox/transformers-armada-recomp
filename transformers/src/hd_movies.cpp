@@ -54,6 +54,10 @@ namespace hd_movies
         }();
         std::atomic<uint64_t> g_startTick{0};
         std::atomic<bool> g_playing{false};
+        std::atomic<float> g_shownShape{0.0f}; // (TODO 341: the band's shape on the screen now - setShownShape)
+        // (TODO 341, the follow-up) The share of the decoded picture's height that is the movie's own black bar, top and
+        // bottom each, when the copy holds the whole 384-row frame (0: the copy is the picture alone). The window thread's.
+        float g_barShare = 0.0f;
         int g_width = 0, g_height = 0;
 
         std::string folder()
@@ -134,6 +138,8 @@ namespace hd_movies
 
     bool playing() { return g_playing.load(); }
 
+    void setShownShape(float widthOverHeight) { g_shownShape.store(widthOverHeight, std::memory_order_relaxed); }
+
     bool movieShapeAsPs2()
     {
         static const bool ps2 = [] {
@@ -194,7 +200,21 @@ namespace hd_movies
                 // (TODO 341 (4)) Decoded at the movie's own shape, not the file's (the reforged films' 1.42:1 squeezed the
                 // picture); TF_MOVIE_SHAPE=file: the file's, as before.
                 static const bool fileShape = std::getenv("TF_MOVIE_SHAPE") && std::tolower(static_cast<unsigned char>(*std::getenv("TF_MOVIE_SHAPE"))) == 'f';
-                if (!fileShape)
+                // (TODO 341, the follow-up) The copies come in two layouts: the picture alone (the films: 1.42:1 files, no
+                // bars), and the movie's whole 640 x 384 frame with its own 12 black rows above and below the picture (the
+                // Melbourne House logo: a 5:3 file). The second kind was squeezed into the picture's rectangle bars and
+                // all - the logo 6% flat with two thin black bars. It is decoded at the frame's own shape now and drawn
+                // without its bar rows. The Atari logo (384 rows of picture) has none. (The level previews' copies are not
+                // shown here: they play inside the HQ's scene, nr_movie.cpp.)
+                const float fileIs = static_cast<float>(width) / static_cast<float>(height);
+                const float wholeFrame = 640.0f / 384.0f;
+                // (told by the file's shape: 1.60 to 1.74 is the whole frame - its stream says 1856 x 1082 for a shown
+                // 1800 x 1080 - a film's copy is 1.42, a 16:9 copy 1.78)
+                const bool hasBars = key != "NATARI" && !fileShape && fileIs > 1.60f && fileIs < 1.74f;
+                g_barShare = hasBars ? (key.find("NPSA") != std::string::npos ? 13.0f : 12.0f) / 384.0f : 0.0f;
+                if (hasBars)
+                    width = (static_cast<int>(height * wholeFrame + 0.5f) + 1) & ~1;
+                else if (!fileShape)
                     width = (static_cast<int>(height * movieShape(key) + 0.5f) + 1) & ~1;
                 if (hd_movies_decoder::start(file, width, height, fps))
                 {
@@ -204,7 +224,8 @@ namespace hd_movies
                     g_playing = true;
                     g_shownFrames = 0u;
                     g_shownSince = std::chrono::steady_clock::now();
-                    std::fprintf(stderr, "[hd movies] %s: %s (%dx%d, %.3f a second)\n", key.c_str(), file.c_str(), width, height, fps);
+                    std::fprintf(stderr, "[hd movies] %s: %s (%dx%d, %.3f a second%s)\n", key.c_str(), file.c_str(), width, height, fps,
+                                 g_barShare > 0.0f ? "; the whole frame: shown without its black bars" : "");
                 }
             }
             else
@@ -230,12 +251,18 @@ namespace hd_movies
             haveFrame = true;
             ++g_shownFrames;
         }
+        // (TODO 341) Over the rectangle the game's own movie has (the window's presenter, ps2_runtime.cpp): the band's shape
+        // "Menus and movies" asks for (overrides.cpp movieFrameAspect), as large as the window allows, in its middle - the
+        // same picture with and without an HD copy. Before it is told (0): the shape it was decoded at.
         const float sw = static_cast<float>(GetScreenWidth()), sh = static_cast<float>(GetScreenHeight());
-        const float scale = std::min(sw / static_cast<float>(g_width), sh / static_cast<float>(g_height));
-        const float w = g_width * scale, h = g_height * scale;
+        const float told = g_shownShape.load(std::memory_order_relaxed);
+        const float pictureTop = g_barShare * static_cast<float>(g_height);
+        const float pictureRows = static_cast<float>(g_height) - 2.0f * pictureTop;
+        const float shape = told > 0.5f ? told : static_cast<float>(g_width) / pictureRows;
+        const float w = std::min(sw, sh * shape), h = w / shape;
         DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), BLACK);
         if (haveFrame)
-            DrawTexturePro(texture, Rectangle{0, 0, static_cast<float>(g_width), static_cast<float>(g_height)},
+            DrawTexturePro(texture, Rectangle{0, pictureTop, static_cast<float>(g_width), pictureRows},
                        Rectangle{(sw - w) * 0.5f, (sh - h) * 0.5f, w, h}, Vector2{0, 0}, 0.0f, WHITE);
 #else
         (void)runtime;

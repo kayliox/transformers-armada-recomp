@@ -243,6 +243,9 @@ instructions = [
 # which overrides.cpp keeps as the game's (F1 "Trees close to you": fade) or -1 (stay: no tree is that near).
   { address = "0x429f30", value = "0xc7818008" }, # 0x429510: lwc1 $f1, -0x7FF8($gp) (was lwc1 $f1, -0x5190($gp))
   { address = "0x42a000", value = "0xc7818004" }, # 0x429510: lwc1 $f1, -0x7FFC($gp) (was lwc1 $f1, -0x518C($gp): the far one, 0x6CB0F4)
+  # (TODO 346) Where a 3D tree starts to fade out: instanceFar1 read from the padding word 0x6CB0F0, set every frame
+  # (overrides.cpp setEcoSprites) - the level's own, or moved towards the reach's edge with "Far trees: 3D to the edge".
+  { address = "0x429e98", value = "0xc7808000" }, # 0x429510: lwc1 $f0, -0x8000($gp) (was lwc1 $f0, -0x2028($at): the level's record, 0x61DFD8)
   # (`replaces`: the word each one replaces - the three move instructions around, so another release's build checks
   # these words as they are, tools/make_config.py)
   { address = "0x429fe0", value = "0x9381800c", replaces = "0x24420001" }, # 0x429510 fade out: lbu $at, -0x7FF4($gp) (was addiu $v0, $v0, 0x1)

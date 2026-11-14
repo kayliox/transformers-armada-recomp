@@ -140,7 +140,13 @@ function TakeWorkerLock {
     return $false
 }
 
-function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan; Write-StepLog "hd: $msg" }
+# (TODO 352) The small window (-Resume) says in its title where it is, read on the taskbar while it is minimized:
+# the step, then "HD textures: N of M made", "waiting for the game to close", and "ready" at the end.
+function HdTitle([string]$Text) { if ($Resume -and -not $Verify) { try { $Host.UI.RawUI.WindowTitle = $Text } catch {} } }
+function Step($msg) {
+    Write-Host "`n==> $msg" -ForegroundColor Cyan; Write-StepLog "hd: $msg"
+    HdTitle ("HD textures: " + ($msg -replace ' into .*$', '' -replace ' \(.*$', ''))
+}
 function Run([string]$Exe, [string[]]$Arguments) {
     $ErrorActionPreference = "Continue"
     & $Exe @Arguments 2>&1 | ForEach-Object { "$_" }
@@ -350,7 +356,9 @@ $ErrorActionPreference = "Continue"
 & $Python (Join-Path $Py "upscale_textures.py") $converted --out (Join-Path $Out "upscaled") `
     --work (Join-Path $Out "work") --exe $exe --quality $Quality --match-colour @withGame @(if ($Gentle) { "--gentle" }) 2>&1 | ForEach-Object {
         $l = "$_"
-        if ($l.StartsWith("HD textures: ")) { Write-StepLog "hd:     $l" }   # (TODO 310: the batch it was at)
+        if ($l.StartsWith("HD textures: ")) { Write-StepLog "hd:     $l"; HdTitle $l }   # (TODO 310: the batch it was at)
+        elseif ($l -match '^paused while the game runs \((.*)\)') { HdTitle "HD textures: waiting for the game to close ($($Matches[1]))" }
+        elseif ($l -eq "the game closed: carrying on") { HdTitle "HD textures: being made now" }
         $l
     } | Tee-Object -Variable lines | Out-Host
 $code = $LASTEXITCODE
@@ -398,3 +406,27 @@ Run $Python @((Join-Path $Py "match_colour.py"), "--upscaled", (Join-Path $Out "
 CrispFonts
 SetStatus $(if ($cardBroken) { "card_broken" } elseif ($stoppedByResets) { "working" } else { "done" })
 Write-Host "`nDone. Start the game from this folder (Play.bat): the log says '[native render] upscaled textures: N images'." -ForegroundColor Green
+# (TODO 352) The small window: a done message the player sees - shown again (not taking the focus) and left up a while.
+# (Not after a run the graphics driver's resets stopped with images left: that set is not ready.)
+if ($stoppedByResets) { HdTitle "HD textures: not finished - the next start of the game carries on" }
+if ($Resume -and -not $Verify -and -not $cardBroken -and -not $stoppedByResets) {
+    HdTitle "HD textures: ready - start the game to use them"
+    Write-Host "`nThe HD textures are ready. Start the game again to use them." -ForegroundColor Green
+    try {
+        if (-not ("TfHd.TfHdWindow" -as [type])) {
+            Add-Type -Namespace TfHd -Name TfHdWindow -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow();
+[DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr hwnd, int command);
+'@
+        }
+        [TfHd.TfHdWindow]::ShowWindow([TfHd.TfHdWindow]::GetConsoleWindow(), 4) | Out-Null   # (SW_SHOWNOACTIVATE)
+    } catch {}
+    Write-Host "This window closes in 5 minutes, or press Enter."
+    $until = (Get-Date).AddMinutes(5)
+    try {
+        while ((Get-Date) -lt $until) {
+            if ([Console]::KeyAvailable -and [Console]::ReadKey($true).Key -eq [ConsoleKey]::Enter) { break }
+            Start-Sleep -Milliseconds 250
+        }
+    } catch { Start-Sleep -Seconds 300 }
+}

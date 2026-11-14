@@ -19,6 +19,7 @@
 #include "small_crosshair.h"
 
 #include "camera_mode.h"
+#include "crosshair_row.h" // (TODO 358: the crosshair's size)
 #include "distance_meter.h"
 #include "photo_mode.h"
 #include "static_aim.h" // (TODO 322: the crosshair pinned)
@@ -182,9 +183,17 @@ namespace small_crosshair
         else if (addOn)
             edge = Color{channel(floatAt(rdram, kAddOnRed)), channel(floatAt(rdram, kAddOnGreen)), channel(floatAt(rdram, kAddOnBlue)), 255};
 
-        // The cross: four short bars around a gap, and a dot.
+        // The cross: four short bars around a gap, and a dot. (TODO 358) Its bars and gap times the Crosshair size row's
+        // share (1, the default: as before), the thickness by its square root, each kept to a readable floor.
         const float h = static_cast<float>(GetScreenHeight());
-        const float length = std::max(6.0f, h / 95.0f), thick = std::max(2.0f, h / 450.0f), gap = std::max(3.0f, h / 220.0f);
+        const float k = crosshair_row::size();
+        float length = std::max(6.0f, h / 95.0f), thick = std::max(2.0f, h / 450.0f), gap = std::max(3.0f, h / 220.0f);
+        if (k < 1.0f)
+        {
+            length = std::max(3.0f, length * k);
+            thick = std::max(1.5f, thick * std::sqrt(k));
+            gap = std::max(2.0f, gap * k);
+        }
         const float outline = addOn ? std::max(1.5f, thick * 0.8f) : std::max(1.0f, thick * 0.5f);
         const Color fill{240, 246, 255, 235};
         bar(x - thick * 0.5f, y - gap - length, thick, length, outline, fill, edge); // up

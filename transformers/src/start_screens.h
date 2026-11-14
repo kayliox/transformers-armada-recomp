@@ -61,8 +61,14 @@ namespace start_screens
     // the whole picture by the display mode's own pixel shape while it is up, black at the sides).
     bool copyrightShown();
     bool legalShapeOn();
-    // (TODO 341 (2)) The title ("press Start") or the card check's notices are up and the option (TF_START_SHAPE, F1
-    // Display, on by default) shows them at 4:3 in a wide picture: pictures made for a 4:3 TV, stretched across a wide one
-    // before (overrides.cpp: the whole picture at 4:3 while they are up, black at the sides).
-    bool startScreen43();
+    // (TODO 341, the follow-up) The shape of the pictures made for a 4:3 TV - the start screens, the main menu and its
+    // pages, the loading screens, the movies - on any screen: TF_SCREEN_SHAPE, F1 Display "Menus and movies" (live).
+    //   Original  - at their own shape (the default): the front end's whole picture at 4:3, black at the sides (the
+    //               copyright screen narrower still, above); a movie's band of rows at the shape it was made at;
+    //   Wide      - "16:9": the front end's picture as the game's widescreen mode draws it, no wider than 16:9; a movie's
+    //               band at 16:9;
+    //   Stretched - the front end's picture as wide as the level's (the screen's); a movie's band as wide as the window.
+    // overrides.cpp applies it (updateDisplayAspect), the same whatever the game's own widescreen option says for a movie.
+    enum class ScreenShape : int { Original = 0, Wide = 1, Stretched = 2 };
+    ScreenShape screenShape();
 }

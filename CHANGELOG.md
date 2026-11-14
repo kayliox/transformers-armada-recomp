@@ -1,5 +1,69 @@
 # What's new
 
+## 0.7.3
+
+**New**
+- F1: a Back to game button beside Quit game closes the menu.
+- F1 > Gameplay > Crosshair: Original (the game's own crosshair, the default: it moves with your aim and with what is
+  under it) or Fixed (it stays still in the exact centre of the screen, and shots go where it points; with mouse or
+  controller). It changes at once, no restart, and is remembered.
+- F1 > Gameplay > Crosshair size: a slider under it that makes the crosshair smaller, from 100% (the game's own size,
+  the default) down to 25%. It shrinks in place: where it points does not change. The row under it, Crosshair look,
+  is the old Crosshair row (Small cross or the game's ring).
+- F1 > Graphics > Trees: one choice for how far the trees are real 3D models: Console (as on the PS2), Near 3D (the
+  default, the same look as before), Far 3D, Very far 3D and Full 3D (every tree). The separate Forest distance, Far
+  trees and Every tree 3D rows are still there under Show all settings.
+- F1 > Display > "Menus and movies": the shape of the start screens, the main menu, its loading and save screens and
+  the movies. Original (4:3), the default, shows them at the shape they were made for, with black at the sides. 16:9
+  widens them to 16:9, and Stretched fills the screen. Levels and the headquarters are not changed by it. It replaces
+  the two start screen rows of 0.7.2 (if you had set those to Stretched, the new row starts as Stretched).
+
+**Changed**
+- The crosshair moves as in the original game again by default (choose Fixed in the new Crosshair row to keep it
+  still).
+- On laptops with built-in graphics the picture's resolution now adjusts itself to keep the frame rate up: it drops
+  where the graphics chip cannot keep up and comes back when there is room. F1 shows it as Render scale: Auto; pick a
+  value there to fix it.
+- The Low preset (the start on laptops with built-in graphics) now leaves Smooth edges off, for a higher frame rate.
+  You can turn it back on in F1 (Graphics).
+- In a window on Intel graphics (and other cards that hand pictures over through the processor), the pictures are
+  now spaced more evenly, so play looks smoother at a frame rate cap. Thanks to TheBrousse.
+
+**Fixed**
+- Waterfalls, rivers and the jungle's background sounds no longer fade away during a long session (after about half
+  an hour a waterfall could go silent). Thanks to bbatts.
+- Movies no longer lose their top and bottom edges and no longer look squeezed tall: with the game's widescreen
+  setting on, every movie was cut and shown too narrow, and the films inside the levels were cut at 4:3 as well. A
+  movie now has the same shape whatever the aspect ratio setting. Thanks to wayneng1997.
+- HD movies: the Melbourne House logo no longer looks squeezed flat, with thin black bars above and below it.
+- The main menu's background and the save and loading screens around it are no longer stretched on a wide screen.
+  Thanks to wayneng1997.
+- After loading a saved state from the title screen, the picture no longer stays at the title's narrow shape for a
+  while.
+- A hint on screen no longer mixes controller and keyboard prompts for a moment (a keyboard key beside "Left analog
+  stick") when you switch between the two.
+- F1 > Make HD textures now says what really happens: the HD textures are made in a small window after you close the
+  game. A line under the button shows where it stands (waiting for the game to close, how many are made, done), the
+  small window's title shows its progress, and when it is done it comes up and says so.
+- Waterfalls, rivers and other continuous sounds could go silent after a big fight and stay silent until the level
+  was loaded again. Now a sound crowded out by the battle comes back as soon as there is room, as on the PS2. (A
+  waterfall that had already gone silent in an older version comes back when the level is loaded again.)
+- F1: a long help text at the bottom of the menu is no longer cut off by the window's edge (most noticeable in a
+  4:3 or small window), and no longer runs into the Restart button.
+- Starting the game over Remote Desktop, or on a PC whose graphics driver is not installed at that moment, no longer
+  resets your graphics settings and no longer removes your HD textures.
+- F1 > Graphics > HD textures no longer shows a third button "1" when the settings file says TF_HIRES=1 (written by
+  hand or by an older version): it shows On, as the game treats it.
+- The farther 3D trees no longer lose their crowns: beyond a certain distance many 3D trees were drawn as bare
+  trunks, because the game's budget for leaves and fronds was made for the console's shorter tree distance. In thick
+  forest this can cost a few percent of the frame rate on mid-range graphics cards; laptops on the Low preset are not
+  changed by this.
+- Trees at the far edge of the 3D trees no longer turn half see-through and then pop in as flat trees (also when you
+  zoom in with the aim view): a 3D tree now stays solid until its flat picture is in place behind it.
+- A wide screen (21:9 and wider) or a wider Field of view no longer shortens how far the trees are 3D. On a 21:9
+  screen at Field of view 1.2 thick forest now shows about 30 to 70% more 3D trees, as the setting promises, for a
+  frame rate about 2 to 3% lower there. At 16:9 and the normal Field of view nothing changes.
+
 ## 0.7.2
 
 **New**

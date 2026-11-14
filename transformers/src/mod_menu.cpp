@@ -1502,7 +1502,9 @@ namespace mod_menu
             {"TF_FPS_LOCK", "Picture rate", "How many pictures a second are shown in levels."},
             {"TF_FRAME_PACING", "Frame pacing", "Fixed steps suit screens without FreeSync or G-Sync."},
             {"TF_CRISP_TEXT", "Sharp text", "Redrawn, sharper fonts."},
-            {"TF_SMALL_CROSSHAIR", "Crosshair", "The aiming crosshair's size."},
+            {"TF_SMALL_CROSSHAIR", "Crosshair look",
+             "Small cross: a small cross where the game aims, outlined in the Mini-Con weapon's colour while one is equipped. "
+             "Game's ring: the game's own crosshair."},
             {"TF_HQ_PANELS", "HQ menu panels", "The size of the HQ's hologram menus."},
             {"TF_DISTANCE_METER", "Distance meter", "The prototype's distance to the target, under the crosshair."},
             {"TF_SPEEDRUN_TIMER", "Speedrun timer", "A timer with a split for each level."},
@@ -1511,8 +1513,8 @@ namespace mod_menu
             {"TF_DRAW_DISTANCE", "Draw distance", "How far you can see detail: scenery, trees, grass and the ground."},
             {"TF_SCENERY_DISTANCE", "Scenery distance", "How far buildings and ruins keep their detail."},
             {"TF_FOREST_DISTANCE", "Forest distance", "How far the trees are full 3D models. Auto: 2x at most. 3x and 4x are very heavy: can drop the frame rate a lot, even on strong graphics cards."},
-            {"TF_FOREST_SPRITES", "Far trees", "The farthest trees: 3D models or flat pictures."},
-            {"TF_FOREST_FULL_DETAIL", "Trees", "Every tree as a full 3D model at any distance. Very heavy: can drop the frame rate a lot, even on strong graphics cards."},
+            {"TF_FOREST_SPRITES", "Far trees", "The outer part of the 3D trees: 3D to their edge, or flat pictures as on the console."},
+            {"TF_FOREST_FULL_DETAIL", "Every tree 3D", "Every tree as a full 3D model at any distance. Very heavy: can drop the frame rate a lot, even on strong graphics cards."},
             {"TF_GRASS_DISTANCE", "Grass distance", "How far the grass reaches."},
             {"TF_TERRAIN_DETAIL", "Ground detail distance", "How far the ground keeps its close-up texture."},
             {"TF_FOREST_ADAPTIVE", "Forest on slower PCs", "Adaptive shortens the forest when the frame rate drops."},
@@ -1532,7 +1534,6 @@ namespace mod_menu
             {"PS2X_MOUSE_INVERT_Y", "Invert mouse up / down", "On: moving the mouse up looks down. The game's own Invert Y is for the controller."},
             {"TF_MENU_MOUSE", "Mouse in menus", "Point and click in the game's menus."},
             {"TF_RIGHT_AIM", "Right-click aim", "Click: a click each for aim, zoom, zoom, out. Hold: aim while held, the wheel zooms (unless the wheel is bound in Keys)."},
-            {"TF_STATIC_AIM", "Still crosshair", "The crosshair keeps its place on the screen, near or far, and shots go where it points. With the mouse: while the mouse turns the view."},
             {"PS2X_SONYPAD_RUMBLE", "Vibration", "Controller vibration strength."},
             {"PS2X_SONYPAD_LIGHTBAR", "Light bar", "The DualSense or DualShock 4 light colour. Your Autobot's: Optimus red, Hot Shot yellow, Red Alert blue."},
             {"TF_LIGHTBAR_ALERTS", "Light bar warnings", "The light blinks blue and red when your health is low, and blinks your Autobot's colour when he is destroyed."},
@@ -1577,6 +1578,7 @@ namespace mod_menu
             {"TF_START_SCREENS=menu", "Main menu"}, {"TF_START_SCREENS=title", "Title screen"},
             {"TF_START_SCREENS=all", "Everything (PS2)"},
             {"TF_RENDERER=native", "Native (DX12)"}, {"TF_RENDERER=emulated", "Emulated (PS2)"},
+            {"TF_SMALL_CROSSHAIR=1", "Small cross"}, {"TF_SMALL_CROSSHAIR=0", "Game's ring"}, // (TODO 358: beside Original / Fixed)
         };
         std::string choiceLabel(const SettingRow &r, const ps2_settings::Choice &c)
         {
@@ -1784,7 +1786,7 @@ namespace mod_menu
                 o.pairs.push_back({"TF_SHARP_TEXTURES", "", {}});
                 return o;
             };
-            std::vector<Option> list{preset("Low", "1", "1", "1", "0", "0", "low", {}),
+            std::vector<Option> list{preset("Low", "1", "1", "0", "0", "0", "low", {}), // (TODO 295: no edge smoothing on Low)
                                      preset("Medium", "2", "4", "1", "4", "0", "medium", {"auto"}), // (today's defaults)
                                      preset("High", "3", "4", "2", "4", "0", "high", {}),
                                      preset("Ultra", "4", "4", "2", "8", "1", "ultra", {})};
@@ -1795,6 +1797,35 @@ namespace mod_menu
                     std::end(kUltraMax))
                     p.value = kMax;
             }
+            return list;
+        }
+
+        // (TODO 350 b, the user's ladder) Trees: one choice for the forest - how far the trees are 3D models - in place of
+        // Forest distance, Far trees and Every tree 3D, which stay under "Show all settings". It reads and writes those
+        // three keys, so an older settings.ini shows as its step, or as Custom (e.g. 3x, or flat far trees at 4x), and
+        // nothing is changed until the player picks a step. Near 3D is the default as it was: Forest distance and Far
+        // trees on Auto (from Draw distance: 2x at most, 3D to the edge of that reach) - the same look and cost as
+        // before the row. Beyond the 3D trees every tree is the game's own flat tree. At Draw distance 1x (the Low
+        // preset) Auto is the console's 1x with its flat far trees, so there Auto counts as Console and the 3D steps
+        // set the reach and "3D to the edge" themselves. Full 3D only turns Every tree 3D on (the other two are not
+        // used while it is), so leaving it for another step gives that step's look at once.
+        std::vector<Option> trees()
+        {
+            const SettingRow *draw = rowFor("TF_DRAW_DISTANCE");
+            const bool drawConsole = draw && valueOf(*draw) == "1";
+            using Also = std::vector<std::string>;
+            const auto step = [&](const char *name, const char *distance, Also distanceAlso, bool flat)
+            {
+                Pair far = flat ? Pair{"TF_FOREST_SPRITES", "0", drawConsole ? Also{""} : Also{}}
+                                : Pair{"TF_FOREST_SPRITES", drawConsole ? "1" : "", drawConsole ? Also{} : Also{"1"}};
+                return Option{name, {{"TF_FOREST_DISTANCE", distance, std::move(distanceAlso)}, std::move(far), {"TF_FOREST_FULL_DETAIL", "0", {}}}};
+            };
+            std::vector<Option> list;
+            list.push_back(step("Console", "1", drawConsole ? Also{""} : Also{}, true));
+            list.push_back(step("Near 3D", drawConsole ? "2" : "", drawConsole ? Also{} : Also{"2"}, false));
+            list.push_back(step("Far 3D", "4", {}, false));
+            list.push_back(step("Very far 3D", "8", {}, false));
+            list.push_back(Option{"Full 3D", {{"TF_FOREST_FULL_DETAIL", "1", {}}}});
             return list;
         }
 
@@ -1845,13 +1876,13 @@ namespace mod_menu
 
         // The keys the layouts place (the merged rows' too): left out of the leftover rows.
         const char *const kPlaced[] = {"PS2X_MOUSE_INVERT_Y", "PS2X_PRESENT_SYNC", "TF_SCREEN_SYNC_STATUS", "TF_NATIVE_BLOOM",
-            "PS2X_FULLSCREEN", "PS2X_MONITOR", "PS2X_WIDESCREEN", "TF_ASPECT", "TF_FOV", "TF_HQ_FOV", "TF_FPS_CAP", "PS2X_SHOW_FPS",
+            "PS2X_FULLSCREEN", "PS2X_MONITOR", "PS2X_WIDESCREEN", "TF_ASPECT", "TF_SCREEN_SHAPE", "TF_FOV", "TF_HQ_FOV", "TF_FPS_CAP", "PS2X_SHOW_FPS",
             "TF_FRAME_RATE", "TF_FPS_LOCK", "TF_FRAME_PACING", "TF_CRISP_TEXT", "TF_BUTTON_SYMBOLS", "TF_KEY_PROMPTS", "TF_PAD_PROMPTS",
-            "TF_SMALL_CROSSHAIR", "TF_HQ_PANELS", "TF_DISTANCE_METER", "TF_SPEEDRUN_TIMER", "TF_RENDERER", "PS2X_GPU_SCALE",
+            "TF_SMALL_CROSSHAIR", "TF_CROSSHAIR", "TF_CROSSHAIR_SIZE", "TF_HQ_PANELS", "TF_DISTANCE_METER", "TF_SPEEDRUN_TIMER", "TF_RENDERER", "PS2X_GPU_SCALE",
             "TF_DRAW_DISTANCE", "TF_SCENERY_DISTANCE", "TF_FOREST_DISTANCE", "TF_FOREST_SPRITES", "TF_GRASS_DISTANCE",
             "TF_TERRAIN_DETAIL", "TF_FOREST_ADAPTIVE", "TF_FOREST_FULL_DETAIL", "TF_ENEMY_DETAIL", "TF_NATIVE_AA", "PS2X_GPU_AA", "PS2X_GPU_MSAA",
             "TF_NATIVE_SSAA", "TF_NATIVE_QUALITY", "TF_SHARP_TEXTURES", "TF_SMOOTH_TEXTURES", "PS2X_TEXTURE_PACK", "PS2X_GPU_ANISOTROPY", "TF_HIRES",
-            "TF_MOUSE", "PS2X_MOUSE_SENSITIVITY", "TF_MENU_MOUSE", "TF_STATIC_AIM", "TF_RIGHT_AIM", "TF_FP_STEADY_EYE", "PS2X_SONYPAD_RUMBLE", "PS2X_SONYPAD_LIGHTBAR", "TF_LIGHTBAR_ALERTS", "TF_ADAPTIVE_TRIGGERS", "TF_TRIGGER_STRENGTH", "TF_PAD_SPEAKER", "TF_PAD_SPEAKER_VOLUME", "TF_PAD_SPEAKER_DELAY", "PS2X_GAMEPAD_BACKEND",
+            "TF_MOUSE", "PS2X_MOUSE_SENSITIVITY", "TF_MENU_MOUSE", "TF_RIGHT_AIM", "TF_FP_STEADY_EYE", "PS2X_SONYPAD_RUMBLE", "PS2X_SONYPAD_LIGHTBAR", "TF_LIGHTBAR_ALERTS", "TF_ADAPTIVE_TRIGGERS", "TF_TRIGGER_STRENGTH", "TF_PAD_SPEAKER", "TF_PAD_SPEAKER_VOLUME", "TF_PAD_SPEAKER_DELAY", "PS2X_GAMEPAD_BACKEND",
             "PS2X_STICK_LEFT_DEADZONE", "PS2X_STICK_RIGHT_DEADZONE",
             "PS2X_STICK_RESPONSE", "PS2X_STICK_VEHICLE_MODE", "PS2X_STICK_LEFT_LIFT", "PS2X_STICK_LEFT_SENSITIVITY",
             "PS2X_STICK_RIGHT_LIFT", "PS2X_STICK_VEHICLE_LIFT", "PS2X_STICK_VEHICLE_RESPONSE",
@@ -1894,6 +1925,7 @@ namespace mod_menu
             keyRow("PS2X_FULLSCREEN");
             keyRow("PS2X_MONITOR");
             mergedRow("aspect", "Aspect ratio", "The shape of the picture. Wider shows more at the sides.", aspectRatios(), false);
+            keyRow("TF_SCREEN_SHAPE"); // (TODO 341: the menus' and the movies' shape - start_screens.cpp)
             keyRow("TF_FOV");
             if (advanced("display-screen"))
                 keyRow("TF_HQ_FOV");
@@ -1950,6 +1982,13 @@ namespace mod_menu
                 ImGui::PopTextWrapPos();
             }
             keyRow("TF_DRAW_DISTANCE");
+            mergedRow("trees", "Trees",
+                      "How far the trees are real 3D models; farther away the game shows its own flat trees. Console: as on "
+                      "the PS2. Near 3D: about twice the console's distance. Far 3D: four times. Very far 3D: eight times. "
+                      "Full 3D: every tree in view is 3D, so far mountains look clean (up to 4,096 trees at once). More 3D "
+                      "trees cost frame rate, mostly processor time: in thick forest Far 3D draws about a fifth fewer "
+                      "pictures a second than Near 3D, Very far 3D and Full 3D a third to a half fewer.",
+                      trees(), true);
             if (advanced("graphics-distance"))
             {
                 keyRow("TF_SCENERY_DISTANCE");
@@ -1989,11 +2028,15 @@ namespace mod_menu
                         noteAt = ImGui::GetTime();
                     }
                     // (User decision 2026-11-11) Built-in or low-end graphics: no HD textures are made here, so no Make button.
-                    if (graphics_driver::lowEnd())
+                    if (graphics_driver::lowEnd() || graphics_driver::softwareOnly())
                     {
                         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(menu_style::colour("amber")));
-                        ImGui::TextWrapped("Built-in or low-end graphics: HD textures are not made on this PC (they make the game "
-                                           "stutter or crash on it).");
+                        if (graphics_driver::softwareOnly()) // (TODO 356)
+                            ImGui::TextWrapped("Windows shows this session no graphics card (a remote desktop, or no graphics driver "
+                                               "installed): HD textures are not made now.");
+                        else
+                            ImGui::TextWrapped("Built-in or low-end graphics: HD textures are not made on this PC (they make the "
+                                               "game stutter or crash on it).");
                         ImGui::PopStyleColor();
                         if (!note.empty() && ImGui::GetTime() - noteAt < 6.0)
                             ImGui::TextWrapped("%s", note.c_str());
@@ -2056,13 +2099,24 @@ namespace mod_menu
                             std::snprintf(disk, sizeof disk, "Needs about %.1f GB of disk (%.0f GB free on this drive).", cost.needGb, cost.freeGb);
                         else
                             std::snprintf(disk, sizeof disk, "Needs about %.1f GB of disk.", cost.needGb);
-                        std::snprintf(time, sizeof time, "Takes about %d to %d minutes on this graphics card, while you play.", cost.minutesLo,
-                                      cost.minutesHi);
+                        // (TODO 352) What really happens: since TODO 338 the small window waits while the game runs and makes
+                        // them once it is closed - unless the setup's "Keep making HD textures while I play" is on.
+                        const bool whilePlaying = hd_progress::makesWhilePlaying();
+                        if (whilePlaying)
+                            std::snprintf(time, sizeof time, "Takes about %d to %d minutes on this graphics card, while you play.", cost.minutesLo,
+                                          cost.minutesHi);
+                        else
+                            std::snprintf(time, sizeof time, "Made in a small window once you close the game: about %d to %d minutes on this "
+                                          "graphics card.", cost.minutesLo, cost.minutesHi);
                         ImGui::Dummy(ImVec2(0.0f, 6.0f));
                         menu_style::heading("Make HD textures?");
+                        ImGui::PushTextWrapPos(0.0f);
                         ImGui::TextUnformatted(disk);
                         ImGui::TextUnformatted(time);
-                        ImGui::TextUnformatted("The game runs a little slower until they are done.");
+                        ImGui::TextUnformatted(whilePlaying ? "The game runs a little slower until they are done."
+                                                            : "Nothing changes while you play: the window prepares the disc's images, then "
+                                                              "waits. Start the game again afterwards to use them.");
+                        ImGui::PopTextWrapPos();
                         ImGui::Dummy(ImVec2(0.0f, 4.0f));
                         if (menu_style::button("Start", true))
                         {
@@ -2084,6 +2138,14 @@ namespace mod_menu
                             ImGui::TextDisabled("%s", l.c_str());
                         ImGui::PopTextWrapPos();
                     }
+                    // (TODO 352) What the small window is doing, for as long as it is so (the note above lasts seconds).
+                    if (!card && verify.state != "running")
+                        if (const std::string status = hd_progress::statusLine(); !status.empty())
+                        {
+                            ImGui::PushTextWrapPos(0.0f);
+                            ImGui::TextColored(ImVec4(0.55f, 0.75f, 1.0f, 1.0f), "%s", status.c_str());
+                            ImGui::PopTextWrapPos();
+                        }
                     // (PR #20) The preset: saved to hd_options.json, and the small window shrinks or makes what it needs.
                     const int preset = hd_progress::presetIndex();
                     const int picked = menu_style::choiceRow(
@@ -2126,9 +2188,7 @@ namespace mod_menu
             keyRow("PS2X_MOUSE_INVERT_Y"); // (TODO 287: the mouse's own, not the save's Invert Y)
             keyRow("TF_MENU_MOUSE");
             keyRow("TF_RIGHT_AIM"); // (TODO 292 H: right-click aim, Click / Hold)
-            if (advanced("controls-mouse"))
-                keyRow("TF_STATIC_AIM"); // (TODO 292 B: the still crosshair)
-            advancedEnd();
+            // (TODO 343: the still crosshair is the Apex mod's - no row of its own)
             settingRows(Page::Controls, "Mouse");
             pageHeading("Controller");
             keyRow("PS2X_SONYPAD_RUMBLE");
@@ -2198,10 +2258,15 @@ namespace mod_menu
                 // (TF_FIRST_PERSON + TF_FIRST_PERSON_AIM, camera_mode.h)
                 const bool first = camera_mode::firstPerson(), aim = camera_mode::aim();
                 const int current = !first ? 0 : aim ? 2 : 1;
+                // (TODO 344) With the Apex mod on its page's own Camera row sets the view: this one is shown, greyed out,
+                // and takes no choice. The mod itself says it is on (apex_keys::modOn, set every game frame while it runs):
+                // never a setting's text, which a build without the mod could carry over in its settings file.
+                const bool apexOn = apex_keys::modOn();
                 const int chosen = menu_style::choiceRow("camera", "Camera", {"Third person", "First person", "First person, aim on foot"},
-                                                         current, true, nullptr,
-                                                         "First person is for the robot; the car keeps its own camera. Aim on foot: the game's own aiming view (strafe, R3 zooms, no run or jump).");
-                if (chosen >= 0 && chosen != current)
+                                                         current, !apexOn, apexOn ? "SET BY THE APEX MOD" : nullptr,
+                                                         apexOn ? "Set by the Apex mod: change it on its page (Apex movement > Camera)."
+                                                                : "First person is for the robot; the car keeps its own camera. Aim on foot: the game's own aiming view (strafe, R3 zooms, no run or jump).");
+                if (!apexOn && chosen >= 0 && chosen != current)
                 {
                     camera_mode::setFirstPerson(chosen != 0);
                     if (chosen != 0)
@@ -2230,6 +2295,10 @@ namespace mod_menu
             mergedRow("prompts", "Button prompts",
                       "Which buttons the game shows in its hints. Match device: your keys, or your controller's buttons.",
                       buttonPrompts(), false);
+            // (TODO 355, 358) The crosshair: its place, Original / Fixed, then its size (a slider, 25-100%: crosshair_row.cpp),
+            // then its look, the Small cross or the game's ring (small_crosshair.cpp).
+            keyRow("TF_CROSSHAIR");
+            keyRow("TF_CROSSHAIR_SIZE");
             keyRow("TF_SMALL_CROSSHAIR");
             keyRow("TF_START_SCREENS");
             keyRow("TF_OBJECTIVE_GUIDE"); // (TODO 315: objective_guide.h)
@@ -2503,7 +2572,7 @@ namespace mod_menu
         // must be in the list (a page of the game's menus, or F1Only). The differences are logged; none is the aim.
         void checkGameMenuList()
         {
-            static const char *const kMergedIds[] = {"aspect", "preset", "antialiasing", "volume", "prompts"};
+            static const char *const kMergedIds[] = {"aspect", "preset", "antialiasing", "volume", "prompts", "trees"};
             const auto isMerged = [&](const std::string &id)
             { return std::find_if(std::begin(kMergedIds), std::end(kMergedIds), [&](const char *m) { return id == m; }) != std::end(kMergedIds); };
             int differences = 0;
@@ -3027,7 +3096,6 @@ namespace mod_menu
 
             // The footer: what the pointer is on, and a restart when a choice waits for one.
             dl->AddLine(ImVec2(pad, bottom + size * 0.4f), ImVec2(w - pad, bottom + size * 0.4f), colour("line"), 1.0f);
-            const float restartWidth = size * 13.0f;
             // (TODO 286 c) Quit game at the bottom right: its button, or once pressed "Yes, quit" and "No, keep playing" in
             // its place; the restart button (when one waits) to its left.
             ++g_menuFrames;
@@ -3041,7 +3109,21 @@ namespace mod_menu
             const bool quitAsked = g_quitAskedFrame != 0u;
             const float gap = size * 0.5f;
             const float quitWidth = quitAsked ? buttonWidth("Yes, quit") + gap + buttonWidth("No, keep playing") : buttonWidth("Quit game");
+            // (TODO 353, the user) "Back to game" left of Quit game: closes the menu, as F1 / Esc / Circle do. Hidden while
+            // the quit question is up (its "No, keep playing" is there then).
+            const float backWidth = quitAsked ? 0.0f : buttonWidth("Back to game") + gap;
+            const float rightWidth = quitWidth + backWidth;
             const bool modRestart = ext::restartPending();
+            // (TODO 267: HD textures or sharp text made while the game ran: a restart, back where the player is, uses them)
+            const bool hdRestart = hd_progress::readyToRestart() && !anyPending();
+            // (TODO 353) The restart button's room: only while it shows, and as wide as it is (it was 13 letters' worth
+            // kept free at all times - with Back to game beside it the help text had a third less room than before).
+            const bool restartShown = anyPending() || hdRestart || ps2_settings::restarting() || g_modRestarting;
+            const char *const restartLabel = modRestart ? "Restart game" : hdRestart ? "Restart for HD textures" : "Restart to apply";
+            const float restartWidth = !restartShown ? 0.0f
+                                       : (ps2_settings::restarting() || g_modRestarting)
+                                             ? f.text->CalcTextSizeA(size, FLT_MAX, 0.0f, "Restarting...").x + gap
+                                             : buttonWidth(restartLabel) + gap;
             const std::string helpText = quitAsked ? std::string("Quit the game? Your settings are kept; what you did since "
                                                                  "the game last saved is lost.")
                                          : modRestart ? std::string("Mod changes need a restart. Save your game first; restart returns to the title screen.")
@@ -3049,8 +3131,20 @@ namespace mod_menu
                                              ? std::string("The HD textures made in the background are ready. Restart to use them: you come back where you are.")
                                          : help().empty() ? std::string("Point at a setting for what it does. Changes are saved at once.")
                                                           : help();
-            dl->AddText(f.text, size * 0.85f, ImVec2(pad, bottom + size * 0.9f), colour(quitAsked ? "amber" : "dim"), helpText.c_str(), nullptr,
-                        w - pad * 2.0f - restartWidth - quitWidth - gap);
+            {
+                // (TODO 353) The help text: up to the buttons, and all of it inside the footer - three lines start a little
+                // higher, a longer text (a narrow window) is written smaller; it was cut off at the window's edge.
+                const float helpWidth = std::max(size * 8.0f, w - pad * 2.0f - restartWidth - rightWidth - gap);
+                const float room = footerHeight - size * 0.15f;
+                float helpSize = size * 0.85f, helpTop = size * 0.9f;
+                const auto tall = [&] { return helpTop + f.text->CalcTextSizeA(helpSize, FLT_MAX, helpWidth, helpText.c_str()).y; };
+                if (tall() > room)
+                    helpTop = size * 0.6f;
+                while (tall() > room && helpSize > size * 0.6f)
+                    helpSize -= size * 0.05f;
+                dl->AddText(f.text, helpSize, ImVec2(pad, bottom + helpTop), colour(quitAsked ? "amber" : "dim"), helpText.c_str(), nullptr,
+                            helpWidth);
+            }
             {
                 // (TODO 212) The Restart button appearing takes the pad's focus (it is the next widget drawn); Circle
                 // gives the focus back to the row that made it appear.
@@ -3060,15 +3154,13 @@ namespace mod_menu
                     navFocusNext();
                 restartWas = restartNow;
             }
-            // (TODO 267: HD textures or sharp text made while the game ran: a restart, back where the player is, uses them)
-            const bool hdRestart = hd_progress::readyToRestart() && !anyPending();
-            if (anyPending() || hdRestart || ps2_settings::restarting() || g_modRestarting)
+            if (restartShown)
             {
-                ImGui::SetCursorScreenPos(ImVec2(w - pad - quitWidth - gap - restartWidth, bottom + size * 0.8f));
+                ImGui::SetCursorScreenPos(ImVec2(w - pad - rightWidth - restartWidth, bottom + size * 0.8f));
                 ImGui::PushFont(f.text, size);
                 if (ps2_settings::restarting() || g_modRestarting)
                     ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(colour("amber")), "Restarting...");
-                else if (button(modRestart ? "Restart game" : hdRestart ? "Restart for HD textures" : "Restart to apply", true))
+                else if (button(restartLabel, true))
                 {
                     if (modRestart && ext::restartGame(true))
                     {
@@ -3088,6 +3180,14 @@ namespace mod_menu
                     else
                         ps2_settings::restartNow(runtime);
                 }
+                ImGui::PopFont();
+            }
+            if (!quitAsked)
+            {
+                ImGui::SetCursorScreenPos(ImVec2(w - pad - rightWidth, bottom + size * 0.8f));
+                ImGui::PushFont(f.text, size);
+                if (button("Back to game", false))
+                    g_open = false; // (a click is a release: the game gets no press from it)
                 ImGui::PopFont();
             }
             {
@@ -3167,6 +3267,15 @@ namespace mod_menu
                       "Takes effect after a restart.";
             hd.choices = {ps2_settings::Choice{"", "On"}, ps2_settings::Choice{"0", "Off"}};
             hd.defaultValue = "";
+            // The value in effect as one of the two choices: a settings file written by hand or by an older version can
+            // hold "1", "on" or "true", which the row showed as a third button "1". As the renderer reads it (nr_hires.cpp:
+            // Off only when the value starts with "0"), anything else is On. (From the environment, as the renderer reads
+            // it: ps2_settings::value would call this again, and add() calls it under the settings lock.)
+            hd.current = []()
+            {
+                const char *v = std::getenv("TF_HIRES");
+                return std::string(v && *v == '0' ? "0" : "");
+            };
             hd.apply = [](const std::string &) { return false; };
             hd.available = []()
             {

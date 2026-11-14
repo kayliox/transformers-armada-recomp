@@ -25,4 +25,7 @@ namespace hd_movies
     // are 1536x1082, 1.42:1 - shown at that, every cutscene came out about a fifth too narrow).
     float movieShape(const std::string &key);
     bool movieShapeAsPs2();
+    // (TODO 341, the follow-up) The shape the playing movie's band is shown at now (overrides.cpp, each game frame while
+    // it plays: its own, 16:9 or the window's - F1 Display "Menus and movies"): the HD copy is drawn over that rectangle.
+    void setShownShape(float widthOverHeight);
 }

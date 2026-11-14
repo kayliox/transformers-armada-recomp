@@ -48,6 +48,7 @@
 // offset.
 
 #include "camera_mode.h"
+#include "photo_mode.h" // (TODO 355: noteViewTurn)
 #include "port.h"
 
 #include "ps2_runtime.h"
@@ -270,11 +271,13 @@ namespace camera_mode
                 return;
             // Rz(yaw) x Ry(pitch), stored w x y z
             const float cz = std::cos(0.5f * yaw), sz = std::sin(0.5f * yaw), cy = std::cos(0.5f * pitch), sy = std::sin(0.5f * pitch);
-            setFloat(rdram, transform + 0x40u, cz * cy);
-            setFloat(rdram, transform + 0x44u, -sz * sy);
-            setFloat(rdram, transform + 0x48u, cz * sy);
-            setFloat(rdram, transform + 0x4Cu, sz * cy);
+            const float turn[4] = {cz * cy, -sz * sy, cz * sy, sz * cy};
+            setFloat(rdram, transform + 0x40u, turn[0]);
+            setFloat(rdram, transform + 0x44u, turn[1]);
+            setFloat(rdram, transform + 0x48u, turn[2]);
+            setFloat(rdram, transform + 0x4Cu, turn[3]);
             setByte(rdram, transform + 0x0Cu, 0u); // (its matrix rebuilt)
+            photo_mode::noteViewTurn(turn); // (TODO 355: the Fixed crosshair's pin goes by the view as it will be drawn)
         }
 
         void setStateFn(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)

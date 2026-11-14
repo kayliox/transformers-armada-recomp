@@ -54,6 +54,14 @@ namespace hd_progress
         std::atomic<bool> g_ready{false};
         std::atomic<bool> g_fontsReady{false};
         std::atomic<bool> g_makerAlive{false};
+        // (TODO 352) The watcher's checks in a row that found no maker (Windows; every 5 s). "The small window was
+        // closed" is said only after two of them: a window just started needs a few seconds to take its place, and
+        // elsewhere the maker is not looked for at all.
+        std::atomic<int> g_makerGone{0};
+        bool makerClosed() { return !g_makerAlive && g_makerGone >= 2; }
+        // (TODO 352; g_mutex) The status last read was "paused": the header's and the corner's ending say what the maker
+        // does now - waits for the game to close, or is not there any more.
+        bool g_linePaused = false, g_cornerPaused = false;
         std::atomic<int64_t> g_readyAtMs{0};
 
         int64_t nowMs()
@@ -81,6 +89,7 @@ namespace hd_progress
             long long done = 0, total = 0;
             std::string quality; // (PR #20) the preset the set was made for ("" in sets from before)
         };
+        Status g_lastStatus; // (TODO 352: the status file as last read, for statusLine; g_mutex)
 
         // A field of the status file (a flat JSON object the tools write): its text, quotes taken off.
         std::string field(const std::string &text, const char *name)
@@ -209,6 +218,7 @@ namespace hd_progress
         void setLine(const Status &s)
         {
             std::string line;
+            bool linePaused = false, cornerPaused = false;
             if (s.ok && s.state == "card_broken")
                 line = "HD TEXTURES: NOT MADE (THIS GRAPHICS CARD'S COME OUT BLACK)";
             else if (s.ok && s.state == "checking" && s.total > 0)
@@ -220,20 +230,26 @@ namespace hd_progress
             else if (s.ok && s.state != "done" && s.total > 0)
             {
                 char text[96];
-                std::snprintf(text, sizeof text, "HD TEXTURES %lld OF %lld%s", s.done, s.total,
-                              s.state == "paused" ? " (PAUSED WHILE YOU PLAY)" : "");
+                std::snprintf(text, sizeof text, "HD TEXTURES %lld OF %lld", s.done, s.total);
                 line = text;
+                linePaused = s.state == "paused"; // (its ending: line())
             }
             // (TODO 267) The corner's, in plain words; the counts as the status file has them.
             std::string corner;
             if (s.ok && s.total > 0 && s.state != "done" && s.state != "card_broken")
-                corner = s.state != "checking" && s.done >= s.total
-                             ? std::string("Finishing HD textures") // (all made: their colours matched, the sharp text again)
-                             : std::string(s.state == "checking" ? "Checking HD textures " : "HD textures ") + grouped(s.done) + " / " +
-                                   grouped(s.total) + (s.state == "paused" ? ": paused while you play (carries on when you close the game)" : "");
+            {
+                const bool finishing = s.state != "checking" && s.done >= s.total;
+                corner = finishing ? std::string("Finishing HD textures") // (all made: their colours matched, the sharp text again)
+                                   : std::string(s.state == "checking" ? "Checking HD textures " : "HD textures ") + grouped(s.done) +
+                                         " / " + grouped(s.total);
+                cornerPaused = !finishing && s.state == "paused"; // (its ending: cornerLine())
+            }
             std::lock_guard<std::mutex> lock(g_mutex);
             g_line = std::move(line);
             g_corner = std::move(corner);
+            g_linePaused = linePaused;
+            g_cornerPaused = cornerPaused;
+            g_lastStatus = s; // (TODO 352: F1's lasting status line, statusLine)
         }
 
         // (TODO 338, game-breaking; a one-line switch) false: the window that makes the rest of the set WAITS while the game
@@ -310,6 +326,7 @@ namespace hd_progress
             std::error_code ec;
             if (!fs::exists(script, ec))
                 return;
+            g_makerGone = 0; // (TODO 352: a window is on its way, not "closed")
             // (TODO 338: waiting for the game - no -GamePid, so the script waits while the game runs and goes on after it; a
             // verify still runs beside the game, as before)
             const bool beside = kMakerBesideGame || std::wstring(mode) == L"-Verify";
@@ -376,11 +393,15 @@ namespace hd_progress
             // sharp text as it was when the watch began)
             bool sawUnfinished = !fromNow;
             const bool fontsBefore = nr::crispFontsFound();
+#if defined(_WIN32)
+            g_makerAlive = makerRunning(g_dir); // (TODO 352: known at once, not only after the first 5 s)
+#endif
             for (unsigned n = 1;; ++n)
             {
                 std::this_thread::sleep_for(std::chrono::seconds(5));
 #if defined(_WIN32)
                 g_makerAlive = makerRunning(g_dir);
+                g_makerGone = g_makerAlive ? 0 : std::min(g_makerGone.load() + 1, 1000);
 #endif
                 if (!fontsBefore && !g_fontsReady && nr::crispFontsFound())
                 {
@@ -468,6 +489,13 @@ namespace hd_progress
         // (User decision 2026-11-11) The card, for the HD tools (make_hd_textures.ps1 reads it: on built-in or low-end
         // graphics it makes nothing, and an update takes away a set made before).
         graphics_driver::writeGpuFile(g_dir.string());
+        if (graphics_driver::softwareOnly())
+        {
+            // (TODO 356: no maker started, nothing of a set touched; the next start on the real card carries on)
+            std::fprintf(stderr, "[hd textures] no graphics card in this session (Microsoft's basic or remote display adapter): "
+                                 "none are made now, the set stays as it is\n");
+            return;
+        }
         if (graphics_driver::lowEnd())
         {
             std::fprintf(stderr, "[hd textures] built-in or low-end graphics: no HD textures are made here\n");
@@ -548,6 +576,8 @@ namespace hd_progress
 
     std::string makeHdTextures()
     {
+        if (graphics_driver::softwareOnly())
+            return "Not now: Windows shows this session no graphics card (a remote desktop, or no graphics driver installed).";
         if (graphics_driver::lowEnd())
             return "Not on this PC: its graphics are built-in or low-end, and making HD textures would make the game stutter or crash.";
 #if defined(_WIN32)
@@ -853,6 +883,9 @@ namespace hd_progress
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_line.empty() && g_fontsReady)
             return "SHARP TEXT READY: RESTART TO USE IT";
+        if (g_linePaused)
+            return g_line + (makerClosed() ? ": NOT BEING MADE NOW (THE SMALL WINDOW WAS CLOSED)"
+                                           : ": WAITING FOR THE GAME TO CLOSE, THEN MADE IN A SMALL WINDOW");
         return g_line;
     }
 
@@ -873,15 +906,75 @@ namespace hd_progress
         {
             std::lock_guard<std::mutex> lock(g_mutex);
             if (!g_corner.empty())
-                return g_corner;
+                return !g_cornerPaused ? g_corner
+                                       : g_corner + (makerClosed() ? ": not being made now (the small window was closed)"
+                                                                   : ": waiting for the game to close, then made in a small window");
         }
         if (g_fontsReady)
             return recent ? "Sharp text ready. Restart to use it (F1)" : std::string();
         // (the maker's first minute: the sharp text, before any count)
         if (g_makerAlive && !crispFontsFound())
             return "Making sharp text";
+        // (TODO 352) Before the first count: the small window prepares the disc's images; the upscale itself waits for the
+        // game to close unless they are made while playing.
         if (g_makerAlive && g_watching)
-            return "Making HD textures";
+            return makesWhilePlaying() ? "Making HD textures" : "HD textures: preparing, then made once you close the game";
+        return {};
+    }
+
+    bool makesWhilePlaying()
+    {
+        if (kMakerBesideGame)
+            return true;
+        std::error_code ec;
+        const fs::path dir = g_dir.empty() ? fs::absolute(fs::path("hd_textures"), ec) : g_dir;
+        std::string t = optionsText(dir);
+        t.erase(std::remove_if(t.begin(), t.end(), [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }), t.end());
+        return t.find("\"while_playing\":true") != std::string::npos;
+    }
+
+    std::string statusLine()
+    {
+        // (asked every frame F1 is open: the options file and the maker check at most every 2 s)
+        static std::chrono::steady_clock::time_point at{};
+        static bool whilePlaying = false;
+        const auto now = std::chrono::steady_clock::now();
+        if (at == std::chrono::steady_clock::time_point{} || now - at > std::chrono::seconds(2))
+        {
+            at = now;
+            whilePlaying = makesWhilePlaying();
+        }
+        if (g_ready)
+            return "The HD textures are ready: restart the game to use them (the Restart button below).";
+#if defined(_WIN32)
+        if (g_stopped)
+            return "Stopped for this session. What is made is kept; Resume (or the next start) carries on.";
+#endif
+        Status s;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            s = g_lastStatus;
+        }
+        const bool counting = s.ok && s.total > 0 && s.state != "done" && s.state != "card_broken";
+        const std::string counts = counting ? grouped(s.done) + " of " + grouped(s.total) + " made" : std::string();
+        if (g_makerAlive)
+        {
+            if (counting && s.state == "paused")
+                return "Waiting for the game to close (" + counts + "). Then the small window makes the rest - you can keep "
+                       "playing now; start the game again afterwards to use them.";
+            if (counting && s.state == "checking")
+                return "Checking the HD textures made so far: " + grouped(s.done) + " of " + grouped(s.total) + ".";
+            if (counting)
+                return std::string("Being made in a small window: ") + counts + "." +
+                       (whilePlaying ? " The game runs a little slower until they are done." : "");
+            return whilePlaying ? "Being made in a small window: preparing the disc's images first."
+                                : "Preparing in a small window. The HD textures themselves are made once you close the game "
+                                  "(the window stays open and works then).";
+        }
+        if (counting && g_watching)
+            return makerClosed() ? "Not finished (" + counts + "): the small window was closed. The next start of the game carries on, "
+                                   "or press Make HD textures."
+                                 : "HD textures: " + counts + " so far.";
         return {};
     }
 

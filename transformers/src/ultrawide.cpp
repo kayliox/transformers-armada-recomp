@@ -201,11 +201,37 @@ namespace ultrawide
         {
             const uint32_t call = tfCallerReturnAddress(ctx) - 8u;
             g_tan(rdram, ctx, runtime); // (a leaf)
-            const float k = wideK() * fovFactor();
+            float k = wideK() * fovFactor();
             const bool widen = call == kTanCall || extra(call);
+            // (TODO 346) ecoQuadtree::Render takes this tan for one thing: the forest's range factor (0x4306F0,
+            // pow(2 tan, the level's zoomFactorPower - 0.5 in Amazon), which divides every 3D tree's reach: the game's
+            // rule "a wider view shows things smaller, so less detail will do", made for its aim zoom). Widened for a
+            // wide window it shortened the reach although Hor+ shows nothing smaller - at 21:9 with Field of view 1.2
+            // by 1 / sqrt(1.34 x 1.2) = 0.79: Forest distance 2x reached 322 units where 16:9 has 409, and trees
+            // a river's width away were flat pictures. Now only a narrower view than the game's counts (it lengthens
+            // the reach, as the aim zoom does); a wider one leaves the reach as at 16:9. TF_FOREST_WIDE_REACH=0: as before.
+            static const bool reachAsBefore = [] { const char *e = std::getenv("TF_FOREST_WIDE_REACH"); return e && *e == '0'; }();
+            if (call == kTanCall && !reachAsBefore)
+                k = std::min(k, 1.0f);
             noteCaller("GetTanHalfFieldOfView", call, 0u, widen);
             if (k != 1.0f && widen)
                 ctx->f[0] *= k;
+            // (TODO 346, a test switch - not a setting) TF_FOREST_ZOOM_REACH=<e>: how much an aim zoom lengthens the 3D
+            // trees' reach. The game's rule gives the zoom's square root in Amazon (zoomFactorPower 0.5: at a 2x zoom
+            // trees turn flat 1.41 times as far away, so on the screen the flat ones come nearer with every step). e
+            // is the power the zoom gets before the level's own: 1 = the game's, 2 = the reach grows with the zoom
+            // (trees turn flat at the same size on the screen at every step). The view without a zoom is taken as the
+            // widest this call has seen - good for a test run from a state, not for a setting (a cutscene's wider view
+            // would count).
+            static const float zoomReach = [] { const char *e = std::getenv("TF_FOREST_ZOOM_REACH"); return e && *e ? std::clamp(static_cast<float>(std::atof(e)), 0.5f, 4.0f) : 1.0f; }();
+            if (call == kTanCall && zoomReach != 1.0f)
+            {
+                static float widest = 0.0f;
+                const float t = ctx->f[0];
+                widest = std::max(widest, t);
+                if (t > 0.0f && t < widest)
+                    ctx->f[0] = widest * std::pow(t / widest, zoomReach);
+            }
         }
 
         bool sunOld()
@@ -378,6 +404,12 @@ namespace ultrawide
     {
         g_windowW.store(width, std::memory_order_relaxed);
         g_windowH.store(height, std::memory_order_relaxed);
+    }
+
+    float windowShape()
+    {
+        const int w = g_windowW.load(std::memory_order_relaxed), h = g_windowH.load(std::memory_order_relaxed);
+        return w > 0 && h > 0 ? static_cast<float>(w) / static_cast<float>(h) : 0.0f;
     }
 
     float shape()

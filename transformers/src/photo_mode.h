@@ -33,6 +33,11 @@ namespace photo_mode
     // The game's crosshair model kept out of the picture (small_crosshair draws its own).
     void setHideCrosshair(bool hide);
     bool crosshair(float point[3]);
+    // (TODO 355) The view's turn as the picture will have it, where something turns the camera after the game's own camera
+    // update (first person's free look, camera_mode: the head's view replaced by the camera control's angles) - w x y z.
+    // The Fixed crosshair's pin goes by it for the next 150 ms: by the head's turn the pinned crosshair left the centre
+    // whenever the head and the view differed (walking while the view turns). Nothing else reads it. The game thread.
+    void noteViewTurn(const float turn[4]);
     // (TODO 307 h) How far above the crosshair's centre its ring's top bracket reaches on a screen `screenHeight` pixels
     // tall (from the scale and distance it was drawn with this moment, and the field of view); false: not known.
     bool crosshairTop(float screenHeight, float &pixels);

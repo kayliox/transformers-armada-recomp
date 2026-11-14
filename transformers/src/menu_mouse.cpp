@@ -36,6 +36,7 @@
 
 #include "decomp.h"
 #include "ps2_runtime.h"
+#include "runtime/ps2_host_display.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_settings.h"
 #include "runtime/ps2_stick_response.h"
@@ -553,8 +554,11 @@ namespace menu_mouse
                 trace(rdram, menu);
         }
         {
-            const uint8_t *wide = getConstMemPtr(rdram, kWidescreenByte);
-            g_shape.store(wide && *wide != 0u ? ultrawide::shape() : 4.0f / 3.0f, std::memory_order_relaxed);
+            // (TODO 341: the shape the picture is shown at - the front end's menus have their own, F1 Display "Menus and
+            // movies": at Original the whole picture is the 2D's 4:3 area. In a level and the HQ it is what it was: the
+            // wide picture's shape, 4:3 without widescreen.)
+            const float shown = ps2_host_display::displayAspect();
+            g_shape.store(shown > 0.5f ? shown : 4.0f / 3.0f, std::memory_order_relaxed);
         }
         if (!active)
         {

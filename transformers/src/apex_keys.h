@@ -28,6 +28,10 @@ namespace apex_keys
     // Any thread.
     void setActive(bool on);
     bool active();
+    // (TODO 344) The mod is switched on (its game frame says so each frame, in a level or not - never a setting's text,
+    // which a build without the mod could carry in its settings file): what F1's pages that depend on it ask. Any thread.
+    void setModOn(bool on);
+    bool modOn();
     // The key's raylib code (-1: none). setKey: a rebinding (the F1 page's), any thread.
     int key(Key which);
     void setKey(Key which, int code);

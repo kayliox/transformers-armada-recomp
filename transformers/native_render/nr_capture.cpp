@@ -4984,7 +4984,9 @@ namespace nr
             const uint32_t packet = call.packet;
             for (int i = 0; i < 16; ++i)
                 g_matrix[i] = fl(rdram, packet + 32u + 4u * static_cast<uint32_t>(i));
-            view_turn::noteMatrixSent(rdram, g_matrix); // (N9: the camera the next draws are made with)
+            // (N9: the camera the next draws are made with. TODO 343: view_turn may adjust g_matrix - the pinned crosshair
+            // put on the camera's axis - so it is passed writable, before any draw uses it)
+            view_turn::noteMatrixSent(rdram, g_matrix);
             if (divert)
                 divertClose(rdram, ctx, open, 1);
         }
@@ -6922,7 +6924,7 @@ namespace nr
                      "FXAA: smooth and cheap. SMAA 1x: keeps textures and fine detail sharper, costs a little more. "
                      "The HUD, menus and text are drawn after it and stay sharp.";
             s.choices = {{"0", "Off"}, {"1", "FXAA"}, {"2", "SMAA 1x"}};
-            s.defaultValue = "1";
+            s.defaultValue = graphics_driver::defaultFor("TF_NATIVE_AA", "1"); // (TODO 295: off on built-in graphics, the Low preset's)
             s.apply = [](const std::string &value) {
                 backend().setAntiAliasing(value == "0" ? 0 : value == "2" ? 2 : 1);
                 return true;
@@ -7119,13 +7121,26 @@ namespace nr
             // (TODO 299) With the Upscaler on FSR 3 / 4: FSR's presets, the render size the window's divided by AMD's ratios
             // (frame::renderRatio) - Native AA 1, Quality 1.5, Balanced 1.7, Performance 2, Ultra Performance 3.
             s.makeChoices = []() -> std::vector<ps2_settings::Choice> {
+                std::vector<ps2_settings::Choice> c;
+                // (TODO 295) While the low-end default's dynamic scale runs: "Auto (now N%)" first - picking a number ends it.
+                if (frame::scaleAuto())
+                    c.push_back({"auto", "Auto (now " + std::to_string(frame::renderScale()) + "%)"});
                 if (taa::sdkPresent() && ps2_settings::choice("TF_NATIVE_UPSCALER") == "fsr")
-                    return {{"100", "Native AA (100%)"},
-                            {"67", "Quality (67%)"},
-                            {"58", "Balanced (58%)"},
-                            {"50", "Performance (50%)"},
-                            {"33", "Ultra Performance (33%)"}};
-                return {{"100", "100%"}, {"85", "85%"}, {"75", "75%"}, {"67", "67%"}, {"50", "50%"}};
+                    c.insert(c.end(), {{"100", "Native AA (100%)"},
+                                       {"67", "Quality (67%)"},
+                                       {"58", "Balanced (58%)"},
+                                       {"50", "Performance (50%)"},
+                                       {"33", "Ultra Performance (33%)"}});
+                else
+                    c.insert(c.end(), {{"100", "100%"}, {"85", "85%"}, {"75", "75%"}, {"67", "67%"}, {"50", "50%"}});
+                return c;
+            };
+            // (TODO 295) The dynamic scale shows as "auto" (never written to settings.ini: only a value the player picks is)
+            s.current = []() -> std::string {
+                if (frame::scaleAuto())
+                    return "auto";
+                const char *v = std::getenv("TF_NATIVE_RENDER_SCALE");
+                return v ? v : "";
             };
             if (taa::sdkPresent())
                 s.help += " With the Upscaler on FSR 3 / 4, its presets: Native AA (FSR's edge smoothing at the window's resolution), "
@@ -7133,6 +7148,8 @@ namespace nr
                           "to the window by FSR).";
             s.defaultValue = graphics_driver::defaultFor("TF_NATIVE_RENDER_SCALE", "100"); // (TODO 295: 67% on built-in graphics)
             s.apply = [](const std::string &value) {
+                if (value == "auto")
+                    return frame::scaleAuto(); // (Auto stays only while it runs: it is not chosen back once a number was)
                 frame::setRenderScale(std::atoi(value.c_str()));
                 return true;
             };

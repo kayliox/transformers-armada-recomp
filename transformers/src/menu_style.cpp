@@ -474,6 +474,8 @@ namespace menu_style
         const ImVec2 sa(selX, selY), sb(selX + selWidth, selY + selH);
         const ControlKind kind = controlKindOf(choices, selWidth, size);
         const ImU32 valueCol = enabled ? IM_COL32(255, 255, 255, 255) : kDim;
+        // (TODO 344) A row that takes no choice: its chosen value is grey too, not the live blue
+        const ImU32 kOff = IM_COL32(70, 80, 96, 255);
         ImGui::BeginDisabled(!enabled || count == 0);
         if (kind == ControlKind::Switch)
         {
@@ -485,7 +487,7 @@ namespace menu_style
             if (ImGui::InvisibleButton("switch", ImVec2(selWidth, selH)))
                 chosen = on ? 1 - onIndex : onIndex;
             const bool hot = ImGui::IsItemHovered();
-            dl->AddRectFilled(ka, kb, on ? kBlue : IM_COL32(30, 37, 49, 255), sh * 0.5f);
+            dl->AddRectFilled(ka, kb, on ? (enabled ? kBlue : kOff) : IM_COL32(30, 37, 49, 255), sh * 0.5f);
             if (!on)
                 dl->AddRect(ka, kb, hot ? kBlue : kLine, sh * 0.5f);
             const float r = sh * 0.5f - 3.0f;
@@ -510,14 +512,14 @@ namespace menu_style
                 const bool hot = ImGui::IsItemHovered();
                 ImGui::PopID();
                 const bool sel = i == current;
-                dl->AddRectFilled(pa, pb, sel ? kBlue : IM_COL32(30, 37, 49, 255), 2.0f);
+                dl->AddRectFilled(pa, pb, sel ? (enabled ? kBlue : kOff) : IM_COL32(30, 37, 49, 255), 2.0f);
                 if (!sel && hot)
                     dl->AddRect(pa, pb, kBlue, 2.0f);
                 const std::string &t = choices[static_cast<size_t>(i)];
                 const float vs = size * 0.86f;
                 const ImVec2 te = textFont->CalcTextSizeA(vs, FLT_MAX, 0.0f, t.c_str());
                 dl->AddText(textFont, vs, ImVec2(pa.x + (segW - te.x) * 0.5f, selY + (selH - te.y) * 0.5f),
-                            sel ? IM_COL32(8, 10, 15, 255) : (enabled ? kDim : IM_COL32(90, 98, 112, 255)), t.c_str());
+                            sel ? (enabled ? IM_COL32(8, 10, 15, 255) : IM_COL32(190, 196, 206, 255)) : (enabled ? kDim : IM_COL32(90, 98, 112, 255)), t.c_str());
             }
         }
         else if (kind == ControlKind::Slider)

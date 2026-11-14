@@ -96,6 +96,7 @@ namespace game_menu_list
         {Page::Other, "TF_UPDATE_CHECK", "Check for Updates", kNone, nullptr},
         // F1 only: shown by F1 by default, deliberately not in the game's menus. (F1's Camera row has no key: it is not checked.)
         {Page::F1Only, "PS2X_PADMAP", "Controller buttons", kNone, nullptr}, // (the HQ's Controls has the game's own Button Layout)
+        {Page::F1Only, "trees", "Trees", kNone, nullptr}, // (TODO 350 b: the game's Graphics pages are full - six and seven rows)
     };
 
     inline constexpr unsigned kEntryCount = sizeof(kEntries) / sizeof(kEntries[0]);

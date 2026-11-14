@@ -183,6 +183,11 @@ Your choices are saved in `settings.ini` in the folder you installed into.
 
 On built-in graphics (Intel, AMD's in the processor) the game starts on the **Low** preset, drawn at a render
 scale of 67% and enlarged with FSR 1, which keeps it sharper than the PS2 (at least 480 lines; the PS2 shows 448).
+Low leaves Smooth edges off (it costs a laptop's graphics chip about a millisecond a picture); turn it on in F1 if
+you prefer softer edges.
+That render scale then follows what the graphics chip manages: where it cannot keep the frame rate, it drops (down to
+50%, a little softer than the PS2 in the heaviest places) and climbs back as soon as there is room. F1 shows it as
+**Render scale: Auto (now N%)**; picking a value there fixes it.
 Only the settings you have not changed start there: anything you pick in F1 stays as you set it. Stronger built-in
 graphics (Iris Xe, recent AMD) can raise the preset.
 

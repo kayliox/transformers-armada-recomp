@@ -459,7 +459,7 @@ namespace view_turn
 
     void noteViewNode(uint32_t node) { g_game.viewNode = node; }
 
-    void noteMatrixSent(const uint8_t *rdram, const float *sent)
+    void noteMatrixSent(const uint8_t *rdram, float *sent)
     {
         Game &g = g_game;
         {
@@ -476,7 +476,9 @@ namespace view_turn
             uint32_t transform = g.transform;
             if (!transform && g.viewNode)
                 transform = readWord(rdram, g.viewNode + 0x14u);
-            if (!turnIt && transform >= 0x00100000u && transform < PS2_RAM_SIZE - 0x40u && photo_mode::crosshair(at))
+            // (TODO 343 / 355: the Fixed crosshair's - with Original the reticle turns with the scene, as before 292 B)
+            if (!turnIt && static_aim::fixed() && transform >= 0x00100000u && transform < PS2_RAM_SIZE - 0x40u &&
+                photo_mode::crosshair(at))
             {
                 float rows[16], m[16];
                 const uint8_t *t = getConstMemPtr(const_cast<uint8_t *>(rdram), transform);
@@ -494,7 +496,43 @@ namespace view_turn
                     }
                     g.reticle = d2 < 0.05 * 0.05;
                     if (g.reticle)
+                    {
                         ++g.reticleDraws;
+                        // (TODO 343) The crosshair dead centre, exactly: with the crosshair pinned (static_aim, mouse and
+                        // keyboard) the model's origin is put on the camera's axis in the matrix it is drawn with - the
+                        // model-to-screen matrix's last row made the camera-to-screen matrix (scratchpad 0x6A0) times the
+                        // point at the model's own depth on the axis (across 0; up 0 with the share 0, the middle) - so it
+                        // shows at the picture's middle whatever the frame's placement was measured against (a frame's
+                        // camera read before or after the crosshair was placed: up to 2 px at 240 fps). Only where the sent
+                        // row checks out as the model's origin through 0x6A0. TF_XHAIR_CENTRE=0: as placed;
+                        // TF_XHAIR_CENTRE_LOG=1: the row before and after, every 30th.
+                        static const bool centre = !(std::getenv("TF_XHAIR_CENTRE") && *std::getenv("TF_XHAIR_CENTRE") == '0');
+                        static const bool tell = std::getenv("TF_XHAIR_CENTRE_LOG") != nullptr;
+                        float share = 0.0f, c[16];
+                        const uint8_t *cs = getConstMemPtr(const_cast<uint8_t *>(rdram), 0x700006A0u);
+                        if (centre && sent && cs && static_aim::pinned(share))
+                        {
+                            std::memcpy(c, cs, sizeof(c));
+                            const float t[4] = {0.0f, share == 0.0f ? 0.0f : m[13], m[14], 1.0f};
+                            const float was[4] = {sent[12], sent[13], sent[14], sent[15]};
+                            float row[4], check[4];
+                            for (int j = 0; j < 4; ++j)
+                            {
+                                row[j] = t[0] * c[j] + t[1] * c[4 + j] + t[2] * c[8 + j] + t[3] * c[12 + j];
+                                check[j] = m[12] * c[j] + m[13] * c[4 + j] + m[14] * c[8 + j] + c[12 + j];
+                            }
+                            bool same = true;
+                            for (int j = 0; j < 4; ++j)
+                                same = same && std::fabs(check[j] - was[j]) <= 1e-3f * (1.0f + std::fabs(was[j]));
+                            if (same)
+                                for (int j = 0; j < 4; ++j)
+                                    sent[12 + j] = row[j];
+                            if (static int told = 0; tell && told++ % 30 == 0)
+                                std::fprintf(stderr, "[crosshair] its matrix row %.3f %.3f %.3f %.3f -> %.3f %.3f %.3f %.3f (%s; camera space %.3f %.3f %.3f)\n",
+                                             was[0], was[1], was[2], was[3], sent[12], sent[13], sent[14], sent[15],
+                                             same ? "put on the axis" : "NOT the origin through 0x6A0: left", m[12], m[13], m[14]);
+                        }
+                    }
                 }
             }
         }

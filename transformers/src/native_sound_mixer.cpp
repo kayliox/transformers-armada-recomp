@@ -162,6 +162,13 @@ namespace native_sound::mixer
             float peak = 0.0f;      // the loudest envelope x volume it reached since
 
             Phase phase = Phase::Off;
+            // (TODO 351 (c)) A voice of a LOOPING tone that the game has playing but that holds no channel - its
+            // channel was taken by a more important voice, or there was none when it was keyed: SIRENS3 keeps such a
+            // voice (IOP 4DA68h, at the end of every frame packet) and starts it again from its beginning as soon as
+            // a channel is free. `waitingListed`: still in the list of playing voices the game is given meanwhile - a
+            // voice whose channel a Play took (SIRENS3's channel goes on naming it while the taker sounds), so the
+            // game's sound node does not give it up after its 20 frames.
+            bool waiting = false, waitingListed = false;
             float level = 0.0f, releaseStep = 0.0f;
             double phaseLeft = 0.0;
             bool softStop = false; // (TODO 290 (10)) this release is the engine's soft stop at a transformation
@@ -304,7 +311,12 @@ namespace native_sound::mixer
             adsr2 = static_cast<uint16_t>(0x5FE0 | (rr & 0x1F));
         }
 
-        // One step of an SPU2 envelope level (iop_spu2.cpp's stepLevel, psx-spx's ADSR).
+        // One step of an SPU2 envelope level (iop_spu2.cpp's stepLevel, psx-spx's ADSR). Above shift 26 the counter's
+        // increment would be 0: it is 1 instead (a step every 8000h samples), as on the hardware - EXCEPT for a rate of
+        // all ones (attack / sustain 7Fh, release 1Fh), which never steps at all: the callers leave it out (TODO 351:
+        // psx-spx "Using a step value of all-ones causes the volume to never step"; DuckStation's envelope the same).
+        // SIRENS3 gives every voice's sustain 5FE0h - a linear decrease at 7Fh, i.e. held until the key-off - and with
+        // the floor of 1 the ambience loops (Amazon's waterfall) faded to nothing over a long session.
         void spu2StepLevel(int32_t &level, uint32_t &counter, int shift, int step, bool exponential, bool decreasing)
         {
             uint32_t counterStep = 0x8000u >> std::max(0, shift - 11);
@@ -354,6 +366,7 @@ namespace native_sound::mixer
         {
             int shift = 0, step = 0;
             bool exponential = false, decreasing = false;
+            bool frozen = false; // (TODO 351: a rate of all ones never steps)
             int32_t target = 0;
             switch (v.phase)
             {
@@ -368,6 +381,7 @@ namespace native_sound::mixer
                 shift = rate >> 2;
                 step = 7 - (rate & 3);
                 exponential = (v.adsr1 & 0x8000u) != 0u;
+                frozen = rate == 0x7F;
                 target = 0x7FFF;
                 break;
             }
@@ -384,6 +398,7 @@ namespace native_sound::mixer
                 step = 7 - (rate & 3);
                 exponential = (v.adsr2 & 0x8000u) != 0u;
                 decreasing = (v.adsr2 & 0x4000u) != 0u;
+                frozen = rate == 0x7F; // (SIRENS3's every sustain: 5FE0h, a linear decrease at 7Fh = held until the key-off)
                 if (decreasing)
                     step = ~step;
                 break;
@@ -404,11 +419,13 @@ namespace native_sound::mixer
                 step = -8;
                 exponential = (v.adsr2 & 0x20u) != 0u;
                 decreasing = true;
+                frozen = shift == 0x1F;
                 break;
             default:
                 return;
             }
-            spu2StepLevel(v.env, v.envCounter, shift, step, exponential, decreasing);
+            if (!frozen)
+                spu2StepLevel(v.env, v.envCounter, shift, step, exponential, decreasing);
             v.level = static_cast<float>(v.env) / 32768.0f;
             if (v.phase == Phase::Sustain)
             {
@@ -494,7 +511,38 @@ namespace native_sound::mixer
             return true;
         }
 
-        int capacity() { return std::max(0, kChannels - g_reserved); }
+        // TF_NATIVE_SOUND_CHANNELS=<n>[,<from>,<to>] (tests, TODO 351 (c)): no more than n channels for the voices - between
+        // those seconds of the mix clock when given - so that they run out (and voices are taken and wait) in a quiet
+        // scene too, and come back after it.
+        double mixClock();
+        int capacity()
+        {
+            struct Limit
+            {
+                int channels = kChannels;
+                double from = 0.0, to = 1e300;
+            };
+            static const Limit limit = [] {
+                Limit l;
+                if (const char *env = std::getenv("TF_NATIVE_SOUND_CHANNELS"); env && *env)
+                {
+                    double from = 0.0, to = 0.0;
+                    int n = 0;
+                    const int got = std::sscanf(env, "%d,%lf,%lf", &n, &from, &to);
+                    if (got >= 1)
+                        l.channels = std::clamp(n, 1, kChannels);
+                    if (got == 3)
+                    {
+                        l.from = from;
+                        l.to = to;
+                    }
+                }
+                return l;
+            }();
+            const int all = std::max(0, kChannels - g_reserved);
+            const double t = mixClock();
+            return t >= limit.from && t < limit.to ? std::min(limit.channels, all) : all;
+        }
 
         // Which of two voices gives way when the channels run out: the LARGER priority number (TODO
         // 106). SIRENS3's steal fallback (IOP 0x4DE74) sorts the playing voices by their priority
@@ -910,6 +958,7 @@ namespace native_sound::mixer
         Reverb g_reverb;
 
         double g_mixedUntil = -1.0;
+        double mixClock() { return g_mixedUntil; } // (capacity's test window, above)
         double g_fraction = 0.0;
 
         // TF_NATIVE_SOUND_SOLO=<prefix>[,<prefix>...] (a measuring aid, 2026-11-11): only the voices whose tone's
@@ -1120,6 +1169,7 @@ namespace native_sound::mixer
                 {
                     v.tone = nullptr;
                     v.phase = Phase::Off;
+                    v.waiting = v.waitingListed = false;
                 }
         }
     }
@@ -1318,10 +1368,33 @@ namespace native_sound::mixer
         }
     }
 
-    void play(int32_t handle)
+    namespace
+    {
+        // TF_NATIVE_SOUND_LOOPS=0 (tests, TODO 351 (c)): as before - a looping voice that loses its channel or gets none
+        // is gone until the game keys it again, an equal priority number steals, a voice in its release can be the
+        // one taken.
+        bool loopsWait()
+        {
+            static const bool on = [] {
+                const char *env = std::getenv("TF_NATIVE_SOUND_LOOPS");
+                return !(env && *env == '0');
+            }();
+            return on;
+        }
+        void keyOn(int32_t handle, bool restart);
+    }
+
+    void play(int32_t handle) { keyOn(handle, false); }
+
+    namespace
+    {
+    // `restart`: a waiting voice tried again at the end of a frame packet (endPacket), not a key-on of the game's.
+    void keyOn(int32_t handle, bool restart)
     {
         Voice &v = g_voices[handle];
-        if (handle >= 0)
+        const bool wasWaiting = v.waiting, wasListed = v.waitingListed;
+        v.waiting = v.waitingListed = false;
+        if (handle >= 0 && !restart)
         {
             pad_speaker::noteToneKeyed(v.toneName); // (TODO 213: an HQ call's beep and its answer)
             // TF_PAD_SPEAKER_LOG=1: each game alert keyed, and every tone with it (to find the alerts' names).
@@ -1337,12 +1410,17 @@ namespace native_sound::mixer
             return;
         }
         // A free channel, else the least important one is taken (if it is less important than this one).
+        // (TODO 351 (c), as SIRENS3 4DC70h / 4E820h: a voice already stopped - in its release - still holds its channel
+        // but is not one that can be taken; and the one taken must have a strictly larger priority number)
+        const bool sirens = loopsWait();
         int active = 0;
         Voice *lowest = nullptr;
         for (auto &[h, o] : g_voices)
             if (h != handle && o.phase != Phase::Off)
             {
                 ++active;
+                if (sirens && o.phase == Phase::Release)
+                    continue;
                 if (!lowest || lessImportant(o, *lowest) || (o.priority == lowest->priority && o.keyedAt < lowest->keyedAt))
                     lowest = &o;
             }
@@ -1351,12 +1429,21 @@ namespace native_sound::mixer
             reqEnd(handle, v, "keyed again");
         if (active >= capacity())
         {
-            if (!lowest || lessImportant(v, *lowest))
+            if (!lowest || lessImportant(v, *lowest) || (sirens && v.priority == lowest->priority))
             {
-                if (reqLog())
-                    std::fprintf(stderr, "[ns req] %.3f kon h %d '%s' prio %d%s vol %04x %04x active %d/%d -> REFUSED (lowest prio %d '%s')\n",
+                // (TODO 351 (c)) No channel: a one-shot does not play; a looping tone waits for one (not in the game's
+                // list of playing voices: its sound node gives it 20 frames or so before it stops it itself).
+                const bool waits = sirens && v.tone->loop && !wasPlaying;
+                if (reqLog() && !(restart && wasWaiting))
+                    std::fprintf(stderr, "[ns req] %.3f kon h %d '%s' prio %d%s vol %04x %04x active %d/%d -> REFUSED (lowest prio %d '%s')%s\n",
                                  g_reqClock, handle, toneOf(v), v.priority, v.updated ? "" : " (no update yet)", v.volumeWords[0],
-                                 v.volumeWords[1], active, capacity(), lowest ? lowest->priority : 0, lowest ? toneOf(*lowest) : "-");
+                                 v.volumeWords[1], active, capacity(), lowest ? lowest->priority : 0, lowest ? toneOf(*lowest) : "-",
+                                 waits ? ", waits for a channel" : "");
+                if (waits)
+                {
+                    v.waiting = true;
+                    v.waitingListed = restart && wasListed; // (as it was)
+                }
                 return; // no channel: the voice does not play
             }
             if (reqLog())
@@ -1367,14 +1454,22 @@ namespace native_sound::mixer
                         stolen = h;
                 std::fprintf(stderr, "[ns req] %.3f kon h %d '%s' prio %d steals h %d '%s' prio %d (active %d/%d)\n", g_reqClock, handle,
                              toneOf(v), v.priority, stolen, toneOf(*lowest), lowest->priority, active, capacity());
-                reqEnd(stolen, *lowest, "STOLEN");
+                reqEnd(stolen, *lowest, sirens && lowest->tone && lowest->tone->loop ? "STOLEN (a loop: waits for a channel)" : "STOLEN");
             }
             lowest->phase = Phase::Off;
+            // (TODO 351 (c)) The one taken, if its tone loops, waits and is started again when a channel is free. Taken
+            // by a key-on of the game's it stays in the list of playing voices meanwhile (as on the PS2, where the
+            // channel goes on naming it); taken by another waiting voice it does not.
+            if (sirens && lowest->tone && lowest->tone->loop)
+            {
+                lowest->waiting = true;
+                lowest->waitingListed = !restart;
+            }
         }
         else if (reqLog())
-            std::fprintf(stderr, "[ns req] %.3f kon h %d '%s' prio %d%s vol %04x %04x pitch %.3f active %d/%d\n", g_reqClock, handle,
+            std::fprintf(stderr, "[ns req] %.3f kon h %d '%s' prio %d%s vol %04x %04x pitch %.3f active %d/%d%s\n", g_reqClock, handle,
                          toneOf(v), v.priority, v.updated ? "" : " (no update yet)", v.volumeWords[0], v.volumeWords[1], v.pitch, active,
-                         capacity());
+                         capacity(), restart ? " (a waiting loop, started again)" : "");
         v.keyedTime = g_reqClock;
         v.peak = 0.0f;
         v.position = 0;
@@ -1410,10 +1505,19 @@ namespace native_sound::mixer
                          v.envelope.attack, v.envelope.decay, v.envelope.sustain, v.envelope.release, v.adsr1, v.adsr2, active);
         }
     }
+    }
 
     void stop(int32_t handle)
     {
         auto it = g_voices.find(handle);
+        // (TODO 351 (c)) Stopped by the game: a voice waiting for a channel is not started again.
+        if (it != g_voices.end() && it->second.waiting)
+        {
+            if (reqLog() && handle >= 0)
+                std::fprintf(stderr, "[ns req] %.3f koff h %d '%s' while it waited for a channel (not started again)\n", g_reqClock, handle,
+                             toneOf(it->second));
+            it->second.waiting = it->second.waitingListed = false;
+        }
         if (it != g_voices.end() && it->second.phase != Phase::Off && it->second.phase != Phase::Release)
         {
             if (reqLog() && handle >= 0)
@@ -1439,6 +1543,30 @@ namespace native_sound::mixer
                     softStop(h, it->second);
         g_engineStops.clear();
         g_transformThisPacket = false;
+        // (TODO 351 (c), SIRENS3 4DA68h) Each voice that waits for a channel: a free one, else one taken by the strict
+        // rule; it starts from its tone's beginning. A tone that no longer loops (changed meanwhile) waits no more.
+        if (loopsWait())
+        {
+            std::vector<int32_t> waiting;
+            for (auto &[h, v] : g_voices)
+                if (v.waiting)
+                {
+                    if (v.tone && v.tone->loop && v.phase == Phase::Off)
+                        waiting.push_back(h);
+                    else
+                        v.waiting = v.waitingListed = false;
+                }
+            // In SIRENS3's order: its list of voices is sorted by priority (4E3C8h, at tag 25h once the numbers
+            // changed - they change every packet) and walked from the most important; a voice registered since is at
+            // its end. Here: the most important first, an equal number in handle order. Without this the lowest
+            // handle always came first, so with few channels free one loop that kept losing and taking a channel
+            // could keep a less lucky one waiting for half a minute (seen with 12 channels in a fight).
+            std::stable_sort(waiting.begin(), waiting.end(),
+                             [](int32_t a, int32_t b) { return lessImportant(g_voices[b], g_voices[a]); });
+            for (int32_t h : waiting)
+                if (auto it = g_voices.find(h); it != g_voices.end() && it->second.waiting)
+                    keyOn(h, true);
+        }
     }
 
     void rewind(int32_t handle) { play(handle); }
@@ -1477,6 +1605,7 @@ namespace native_sound::mixer
             if (v.phase != Phase::Off && h >= 0)
                 ++n;
             v.phase = Phase::Off;
+            v.waiting = v.waitingListed = false;
         }
         if (reqLog())
             std::fprintf(stderr, "[ns req] %.3f SILENCE all voices (%d were playing)\n", g_reqClock, n);
@@ -1742,7 +1871,7 @@ namespace native_sound::mixer
     {
         std::vector<int32_t> out;
         for (const auto &[h, v] : g_voices)
-            if (v.phase != Phase::Off && h >= 0) // (the port's own voices are not the game's)
+            if ((v.phase != Phase::Off || (v.waiting && v.waitingListed)) && h >= 0) // (the port's own voices are not the game's)
                 out.push_back(h);
         return out;
     }
@@ -1993,6 +2122,11 @@ namespace native_sound::mixer
                   << bits(v.releaseStep) << ' ' << v.position << ' ' << v.counter << ' ' << v.keyedAt << ' '
                   << static_cast<uint16_t>(v.history[0]) << ' ' << static_cast<uint16_t>(v.history[1]) << ' '
                   << static_cast<uint16_t>(v.history[2]) << ' ' << static_cast<uint16_t>(v.history[3]) << ' ' << v.envCounter << "\n";
+        // (TODO 351 (c)) A looping voice waiting for a channel: it goes on waiting after the state is loaded (older
+        // builds skip the line; older states have none).
+        for (const auto &[h, v] : g_voices)
+            if (h >= 0 && v.tone && v.waiting && v.phase == Phase::Off)
+                o << "W " << h << ' ' << (v.waitingListed ? 1 : 0) << "\n";
         for (const auto &[h, s] : g_streams)
         {
             o << "S " << h << ' ' << s.pcm << ' ' << s.eeFed << ' ' << s.looping << ' ' << s.playing << ' ' << bits(s.loudness) << ' '
@@ -2093,6 +2227,17 @@ namespace native_sound::mixer
                 v.env = std::clamp(static_cast<int32_t>(std::lround(v.level * 32768.0f)), 0, 0x7FFF);
                 uint32_t envCounter = 0u;
                 v.envCounter = (l >> envCounter) ? envCounter : 0u;
+            }
+            else if (kind == "W") // (after the V lines: a looping voice that waited for a channel)
+            {
+                int32_t h = 0;
+                int listed = 0;
+                l >> h >> listed;
+                auto it = g_voices.find(h);
+                if (!l || it == g_voices.end() || !it->second.tone || !it->second.tone->loop || it->second.phase != Phase::Off)
+                    continue;
+                it->second.waiting = true;
+                it->second.waitingListed = listed != 0;
             }
             else if (kind == "S")
             {

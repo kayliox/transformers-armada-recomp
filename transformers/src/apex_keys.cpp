@@ -41,6 +41,7 @@ namespace apex_keys
         }
         std::atomic<bool> g_toggle{std::getenv("TF_APEX_SPRINT_TOGGLE") && *std::getenv("TF_APEX_SPRINT_TOGGLE") == '1'};
         std::atomic<bool> g_sprint{false}, g_toggledOn{false}, g_slide{false};
+        std::atomic<bool> g_modOn{false}; // (TODO 344: the mod switched on - setModOn)
         bool g_wasDown = false;
     }
 
@@ -69,6 +70,8 @@ namespace apex_keys
         g_toggledOn.store(false, std::memory_order_relaxed);
     }
     bool sprintHeld() { return g_sprint.load(std::memory_order_relaxed); }
+    void setModOn(bool on) { g_modOn.store(on, std::memory_order_relaxed); }
+    bool modOn() { return g_modOn.load(std::memory_order_relaxed); }
     bool slideHeld() { return g_slide.load(std::memory_order_relaxed); }
     void stopSprint() { g_toggledOn.store(false, std::memory_order_relaxed); }
 

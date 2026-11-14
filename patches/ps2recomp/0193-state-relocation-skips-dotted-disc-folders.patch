@@ -1,0 +1,27 @@
+Subject: [PATCH] Runtime: a state's file is not relocated into a '.'-named folder under the disc (TODO 342)
+
+A state's game file is found again by the longest tail of its path that exists under this run's folders (0177, 0179's
+check first). A disc never has a '.'-named folder, but a modded disc built from a Mods folder that held another
+Mods folder carried its .build\disc in it, so <disc>\.build\disc\TFA.ZIP (a modded copy) won over <disc>\TFA.ZIP (the
+archive the game reads): the identity check passed and the state's handle pointed at the stray copy. Under the disc's
+folder, tails through a '.'-named folder are now skipped. Other folders and an install moved as a whole are unchanged.
+
+--- a/ps2xRuntime/src/lib/ps2_iop_host.cpp
++++ b/ps2xRuntime/src/lib/ps2_iop_host.cpp
+@@ -687,6 +687,16 @@ namespace
+                 continue;
+             for (size_t keep = parts.size() > 1 ? parts.size() - 1 : 0; keep >= 1; --keep)
+             {
++                // (TODO 342) Under the disc's folder, a tail through a '.'-named folder is not a disc file (no disc
++                // name starts with '.'): a stray copy such as <disc>\.build\disc\TFA.ZIP must not win over <disc>\TFA.ZIP.
++                if (root == io.cdRoot)
++                {
++                    bool dotted = false;
++                    for (size_t i = parts.size() - keep; i + 1 < parts.size(); ++i)
++                        dotted = dotted || (!parts[i].empty() && parts[i][0] == '.');
++                    if (dotted)
++                        continue;
++                }
+                 std::filesystem::path candidate = root;
+                 for (size_t i = parts.size() - keep; i < parts.size(); ++i)
+                     candidate /= parts[i];

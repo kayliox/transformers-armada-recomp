@@ -149,7 +149,9 @@ namespace nr::frame
         {
             const char *e = std::getenv("TF_NATIVE_RENDER_SCALE");
             int expected = -1;
-            g_renderScale.compare_exchange_strong(expected, e && *e ? std::clamp(std::atoi(e), 25, 100) : 100);
+            // ("auto", the dynamic scale's - TODO 295: read as unset, the card's own default; graphics_driver::applyLowEndDefaults
+            // has already put the low-end default (67%) in its place there, and unset it on other cards)
+            g_renderScale.compare_exchange_strong(expected, e && *e && *e != 'a' ? std::clamp(std::atoi(e), 25, 100) : 100);
             v = g_renderScale.load(std::memory_order_relaxed);
         }
         return v;
@@ -159,8 +161,13 @@ namespace nr::frame
     // window is never softer than the console's. Only while that scale is the default: the player's own choice of a render
     // scale (setRenderScale, from the setting) takes it as it is.
     inline std::atomic<int> g_minLines{-1};
+    // (TODO 295, the user's rule 2026-11-13: a steady 60 first) The dynamic scale stepped below its start: the floor waived
+    // while the GPU cannot hold the cap - down to 360 lines at 50% of a 720p window. Never for a scale the player sets.
+    inline std::atomic<bool> g_floorWaived{false};
     inline int minLines()
     {
+        if (g_floorWaived.load(std::memory_order_relaxed))
+            return 0;
         int v = g_minLines.load(std::memory_order_relaxed);
         if (v < 0)
         {
@@ -171,10 +178,37 @@ namespace nr::frame
         }
         return v;
     }
+    // (TODO 295) Whether the render scale is the dynamic one's (dynamic_scale.cpp: on low-end graphics while the scale is the
+    // built-in default - TF_DYNAMIC_SCALE=1, set with it by graphics_driver::applyLowEndDefaults). A scale the player sets
+    // (setRenderScale) ends it.
+    inline std::atomic<int> g_scaleAuto{-1};
+    inline bool scaleAuto()
+    {
+        int v = g_scaleAuto.load(std::memory_order_relaxed);
+        if (v < 0)
+        {
+            const char *e = std::getenv("TF_DYNAMIC_SCALE");
+            int expected = -1;
+            g_scaleAuto.compare_exchange_strong(expected, e && *e == '1' ? 1 : 0);
+            v = g_scaleAuto.load(std::memory_order_relaxed);
+        }
+        return v == 1;
+    }
+    // (TODO 295) The dynamic scale's own change: the scale, and whether the 480-line floor is waived (below its start
+    // level: the GPU cannot hold the cap there) - the dynamic scale stays.
+    inline void setRenderScaleAuto(int percent, bool belowFloor)
+    {
+        if (!scaleAuto())
+            return;
+        g_floorWaived.store(belowFloor, std::memory_order_relaxed);
+        g_renderScale.store(std::clamp(percent, 25, 100), std::memory_order_relaxed);
+    }
     inline void setRenderScale(int percent)
     {
         g_renderScale.store(std::clamp(percent, 25, 100), std::memory_order_relaxed);
         g_minLines.store(0, std::memory_order_relaxed);
+        g_scaleAuto.store(0, std::memory_order_relaxed); // (the player's choice: no dynamic scale from now on)
+        g_floorWaived.store(false, std::memory_order_relaxed);
     }
     // (TODO 299) The render scale as FSR 3 / 4's presets mean it: Native AA 1, Quality 1 / 1.5, Balanced 1 / 1.7, Performance
     // 1 / 2, Ultra Performance 1 / 3 - the settings' 100, 67, 58, 50 and 33 - the share exactly (AMD's ratios); any other percent

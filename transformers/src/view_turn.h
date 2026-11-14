@@ -39,8 +39,10 @@ namespace view_turn
     // (+0x14) stands in where the sound listener's camera is not seen (Antarctica).
     void noteViewNode(uint32_t node);
     // A model-to-screen matrix sent (0x221DB0): the camera matrices it was made with (scratchpad 0x6A0 camera to screen,
-    // 0x6E0 camera to the clipping space, 0xEC0 world to camera). The index of them for the draws made now.
-    void noteMatrixSent(const uint8_t *rdram, const float *sent);
+    // 0x6E0 camera to the clipping space, 0xEC0 world to camera). The index of them for the draws made now. (TODO 343) The
+    // matrix is the caller's copy the next draws are made with, and may be adjusted: the pinned crosshair's put on the
+    // camera's axis.
+    void noteMatrixSent(const uint8_t *rdram, float *sent);
     uint8_t cameraIndex();
 
     struct FrameCamera;

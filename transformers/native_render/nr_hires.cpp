@@ -15,6 +15,7 @@
 #include "nr_backend.h"
 #include "nr_policy.h"
 #include "nr_prompt_style.h"
+#include "key_text.h"
 
 #include "raylib.h"
 
@@ -1240,7 +1241,8 @@ namespace nr
         g_queueCv.notify_one();
     }
 
-    bool keyPromptsShown() { return ps2_host_input::keyboardPromptsShown(); }
+    // (TODO 348 (b): in step with key_text's words for the sticks - the symbols switch when they do)
+    bool keyPromptsShown() { return key_text::symbolsAsKeys(ps2_host_input::keyboardPromptsShown()); }
     bool xboxPromptsShown()
     {
         return useXboxPrompts(g_padPrompts.load(std::memory_order_relaxed),

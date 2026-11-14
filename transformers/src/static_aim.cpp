@@ -24,8 +24,10 @@
 // along the aim: the crosshair already keeps its place), a turret (state 0x13, the muzzles'), the jet bike (its own
 // aim, port_ext.h), photo mode, and a frame whose eye is not known or lies far from the pivot (a camera cut).
 //
-// TF_STATIC_AIM: 1 = mouse and keyboard play (the default; a pad's input hands it back to the game's aim - TODO 322, before:
-// while the mouse turned the view), 2 = always, 0 = the game's. TF_AIM_LOG=1: the offset and the line, twice a second.
+// (TODO 355) On while the Crosshair row says Fixed (setFixed; the row is the mods build's - without it, and in the public
+// build, nothing here acts: the game's own aim). With the mouse and with a pad alike. TF_AIM_LOG=1: the offset and the line,
+// twice a second. (TF_STATIC_AIM, the old "Still crosshair" row's variable - with the mouse / always / off - is no longer
+// read: one left in a settings file must not fight the row.)
 // (TODO 322) While it holds, the crosshair is pinned to one screen point (pinned(): the line's fixed height in third person,
 // the centre in first person and the aiming view) - photo_mode places the game's model on the camera's ray through it each
 // frame and small_crosshair draws there.
@@ -45,7 +47,6 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_host_input.h"
 #include "runtime/ps2_memory.h"
-#include "runtime/ps2_settings.h"
 
 #include <algorithm>
 #include <atomic>
@@ -69,7 +70,6 @@ namespace static_aim
         constexpr uint32_t kState = 0xF8u;  // the actor's state (9 aiming, 0x13 a turret)
 
         PS2Runtime::RecompiledFunction g_crosshair = nullptr, g_collision = nullptr, g_aimDirection = nullptr, g_pivot = nullptr;
-        std::atomic<int> g_mode{1}; // 0 the game's, 1 with the mouse, 2 always
 
         // (TODO 322) The crosshair pinned to one screen point this frame: its share of half the view's height above the
         // centre (0 in first person and the aiming view), and when that was decided (stale after a frame or two: the car,
@@ -85,21 +85,21 @@ namespace static_aim
         {
             static const float share = [] {
                 const char *e = std::getenv("TF_STATIC_AIM_SHARE");
-                const float v = e && *e ? std::strtof(e, nullptr) : 0.18f;
-                return std::isfinite(v) && std::fabs(v) < 0.6f ? v : 0.18f;
+                const float v = e && *e ? std::strtof(e, nullptr) : 0.0f; // (TODO 343: the middle; 0.18 = where the game's own showed)
+                return std::isfinite(v) && std::fabs(v) < 0.6f ? v : 0.0f;
             }();
             return share;
         }
 
-        // (TODO 322) Mouse and keyboard play: the still crosshair holds from the start, handed back to the game's aim only when
-        // a pad is used (a button, a trigger, a stick past half way - ps2_host_input::lastDevice). Before, it followed the mouse
-        // turning the view (mouseTurnsView), and an aim-stick value it took for the pad's handed it back mid-turn: the
-        // crosshair jumped between the two places (~2% of the height).
-        bool mouseAndKeyboard()
-        {
-            const int mode = g_mode.load(std::memory_order_relaxed);
-            return mode == 2 || (mode == 1 && ps2_host_input::lastDevice() == ps2_host_input::Device::Keyboard);
-        }
+        // (TODO 322) The still crosshair held from the start with the mouse and handed the aim back to the game when a pad
+        // was used; before that it followed the mouse turning the view, and an aim-stick value it took for the pad's handed
+        // it back mid-turn: the crosshair jumped between the two places (~2% of the height).
+        // (TODO 343, the user's decision) It became the Apex mod's alone: without the mod the original game's crosshair.
+        // (TODO 355, the user's test) Now a choice of its own - the Crosshair row, Original / Fixed (setFixed: the row's
+        // word each game frame; the Apex mod only picks what the row starts at). Fixed holds for the mouse and for a pad:
+        // the crosshair is still whatever turns the view. Original: nothing here acts.
+        std::atomic<bool> g_fixed{false};
+        bool stillOn() { return g_fixed.load(std::memory_order_relaxed); }
 
         struct V3
         {
@@ -284,7 +284,7 @@ namespace static_aim
 
         bool wanted(const uint8_t *rdram, uint32_t context)
         {
-            if (!mouseAndKeyboard() || photo_mode::active() || context == 0u)
+            if (!stillOn() || photo_mode::active() || context == 0u)
                 return false;
             // (TODO 331) A cutscene script plays - a level's opening, an HQ call, a Mini-Con or Data-Con discovery: the view is
             // its camera's, and a line along that camera's ray pulled the aim point (and the torso that turns to it) round with
@@ -390,7 +390,7 @@ namespace static_aim
         {
             bool on = false;
             float share = 0.0f;
-            if (mouseAndKeyboard() && !photo_mode::active() && context != 0u && !camera_mode::inVehicle() &&
+            if (stillOn() && !photo_mode::active() && context != 0u && !camera_mode::inVehicle() &&
                 !tf::port::cutscenePlaying(rdram)) // (TODO 331: a cutscene's camera is not the player's)
             {
                 const uint32_t actor = word(rdram, context);
@@ -492,8 +492,6 @@ namespace static_aim
 
     void install(PS2Runtime &runtime)
     {
-        if (const char *v = std::getenv("TF_STATIC_AIM"); v && *v)
-            g_mode.store(std::atoi(v));
         g_crosshair = runtime.lookupFunction(kCalculateCrosshair);
         g_collision = runtime.lookupFunction(kCollisionPoint);
         g_aimDirection = runtime.lookupFunction(kAimDirection);
@@ -509,21 +507,6 @@ namespace static_aim
         runtime.registerFunction(kPivotPoint, pivotPoint);
     }
 
-    void addSettings()
-    {
-        ps2_settings::Setting s;
-        s.key = "TF_STATIC_AIM";
-        s.section = "Mouse";
-        s.label = "Still crosshair";
-        s.help = "The crosshair keeps one place on the screen, near or far, turning or not, and shots go where it points. With the "
-                 "mouse: while you play with mouse and keyboard (a controller's input gives the game's own aim back). Off: the game's aim.";
-        s.choices = {{"1", "With the mouse"}, {"2", "Always"}, {"0", "Off"}};
-        s.defaultValue = "1";
-        s.apply = [](const std::string &value)
-        {
-            g_mode.store(std::atoi(value.c_str()));
-            return true;
-        };
-        ps2_settings::add(s);
-    }
+    void setFixed(bool on) { g_fixed.store(on, std::memory_order_relaxed); }
+    bool fixed() { return g_fixed.load(std::memory_order_relaxed); }
 }

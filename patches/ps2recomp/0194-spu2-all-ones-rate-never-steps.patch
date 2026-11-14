@@ -1,0 +1,75 @@
+Subject: [PATCH] IOP SPU2: an envelope or volume-slide rate of all ones never steps (TODO 351)
+
+stepLevel floors the counter's increment at 1, so above shift 26 a level steps every 8000h samples as on the
+hardware. A rate of all ones (attack / sustain 7Fh, release 1Fh, a volume slide's 7Fh) took that floor too, but on
+the hardware it never steps (psx-spx: "Using a step value of all-ones causes the volume to never step"; PCSX2's
+volume slide and DuckStation's envelope the same). SIRENS3 gives every voice's sustain 5FE0h - a linear decrease at
+7Fh, held until the key-off - so with the floor every looping sound faded out over tens of minutes and was then
+ended (ENVX 0): Amazon's waterfall went silent in a long session. The callers now leave such a rate out; every
+other rate steps exactly as before.
+
+--- a/ps2xIOP/src/emulator/core/iop_spu2.cpp
++++ b/ps2xIOP/src/emulator/core/iop_spu2.cpp
+@@ -111,7 +111,12 @@ namespace ps2x::iop::detail
+         }
+ 
+         // The rate machine shared by the envelope and the volume sweeps: every so many
+-        // samples the level moves by a step, both given by a 5-bit shift.
++        // samples the level moves by a step, both given by a 5-bit shift. Above shift 26 the
++        // increment would be 0: it is 1 (a step every 8000h samples), as on the hardware, except
++        // for a rate of all ones, which never steps at all - the callers leave that out (psx-spx:
++        // "Using a step value of all-ones causes the volume to never step"; PCSX2's volume slide and
++        // DuckStation's envelope the same). Every SIRENS3 sustain is 5FE0h (linear decrease, 7Fh):
++        // held until the key-off, not faded out over a long session.
+         void stepLevel(int32_t &level, uint32_t &counter, int shift, int step, bool exponential, bool decreasing)
+         {
+             uint32_t counterStep = 0x8000u >> std::max(0, shift - 11);
+@@ -295,6 +300,8 @@ namespace ps2x::iop::detail
+     {
+         if ((slide.reg & 0x8000u) == 0u)
+             return;
++        if ((slide.reg & 0x7Fu) == 0x7Fu)
++            return; // (a rate of all ones never steps: see stepLevel)
+         const bool decreasing = (slide.reg & 0x2000u) != 0u;
+         int step = 7 - static_cast<int>(slide.reg & 3u);
+         if (decreasing)
+@@ -308,6 +315,7 @@ namespace ps2x::iop::detail
+         int step = 0;
+         bool exponential = false;
+         bool decreasing = false;
++        bool frozen = false; // (a rate of all ones never steps: see stepLevel)
+         int32_t target = 0;
+         switch (voice.phase)
+         {
+@@ -317,6 +325,7 @@ namespace ps2x::iop::detail
+             shift = rate >> 2;
+             step = 7 - (rate & 3);
+             exponential = (voice.adsr1 & 0x8000u) != 0u;
++            frozen = rate == 0x7F;
+             target = 0x7FFF;
+             break;
+         }
+@@ -336,6 +345,7 @@ namespace ps2x::iop::detail
+             decreasing = (voice.adsr2 & 0x4000u) != 0u;
+             if (decreasing)
+                 step = ~step;
++            frozen = rate == 0x7F;
+             break;
+         }
+         case Release:
+@@ -343,12 +353,14 @@ namespace ps2x::iop::detail
+             step = -8;
+             exponential = (voice.adsr2 & 0x20u) != 0u;
+             decreasing = true;
++            frozen = shift == 0x1F;
+             break;
+         default:
+             return;
+         }
+ 
+-        stepLevel(voice.envelope, voice.envelopeCounter, shift, step, exponential, decreasing);
++        if (!frozen)
++            stepLevel(voice.envelope, voice.envelopeCounter, shift, step, exponential, decreasing);
+ 
+         if (voice.phase == Sustain)
+         {

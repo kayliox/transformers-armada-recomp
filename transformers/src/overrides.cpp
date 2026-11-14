@@ -39,6 +39,7 @@
 #include "small_crosshair.h"
 #include "static_aim.h"
 #include "crisp_text.h"
+#include "crosshair_row.h"
 #include "sound_nodes.h"
 #include "sound_trace.h"
 #include "sirens_trace.h"
@@ -51,6 +52,7 @@
 #include "mod_menu.h"
 #include "frustum_native.h"
 #include "nr_pace.h" // (TODO 336: the frame-rate cap holds for the pictures everywhere)
+#include "dynamic_scale.h"
 #include "nr_forest.h"
 #include "playrec.h"
 #include "decomp.h"
@@ -401,17 +403,164 @@ namespace
     // aspect drawn with: 1 / (640 / width x 0.93), times 3/4 in widescreen. The window shows
     // the picture in the shape the game draws for: 16:9 when the mode's pixel aspect is the
     // widescreen one, else 4:3; while a movie plays, the shape that shows the movie's band at
-    // its own shape (g_movieAspect, TODO 341 (4)) - the game shows its movies unchanged in either mode.
+    // the shape asked for (movieFrameAspect, TODO 341 (4)) - the game shows its movies unchanged in either mode.
     constexpr uint32_t kDisplayMode = 0x0070F480u; // width, height (u32), ..., pixel aspect (float at +0x10)
 
-    // (TODO 341 (4)) While a movie plays: the whole frame's shape that shows its band of rows at the movie's own shape
-    // (hd_movies::movieShape: 640 / 448 - the band 16:9, the Atari logo's 5:3), or the 4:3 TV's (TF_MOVIE_SHAPE=ps2, and
-    // with TF_MOVIE_BAND=0 the whole 4:3 frame) - set in createFmvStream.
-    float g_movieAspect = 4.0f / 3.0f;
+    // (TODO 341 (4)) While a movie plays: its band of rows (of the frame's 448: 360, the Atari logo's 384; 0 with
+    // TF_MOVIE_BAND=0 - the whole 4:3 frame) and the shape it was made at (hd_movies::movieShape: 16:9, the Atari logo's
+    // 5:3; the PS2's with TF_MOVIE_SHAPE=ps2) - set in createFmvStream. The whole frame's shape that shows the band at the
+    // shape "Menus and movies" asks for is worked out each frame (movieFrameAspect): the window may change under a movie.
+    float g_movieBandRows = 0.0f, g_movieOwnShape = 4.0f / 3.0f;
+    bool g_movieBars = true; // (12 black rows of its own above and below its picture: every movie but the Atari logo)
+    // Which of the game's movie renderers draws the playing movie: by the stream's maker (createFmvStream), corrected by
+    // the renderers' own hooks below should another one draw it.
+    //   1 taItemIntroFMV::Render (0x34D210: the start movies, the Extras' movie viewer),
+    //   2 taItemFullScreenFMV::Render (0x34DAF0: not met in play so far - taken as 1 without widescreen),
+    //   3 taFMVSystem::Render (0x318DF0: the cut-scene system's films, in and between the levels).
+    // They place the 384-row movie in the 448-row frame differently (movieBand). 0.7.2 and before took every movie for
+    // letterboxed with its bars (rows 32..416 of the frame), which only the intro renderer does, and only with the game's
+    // widescreen option off: with it on (the default) the start movies lost 7% at the top and at the bottom and came out
+    // a seventh too tall, and the levels' films lost 10% at each in either mode (TODO 341, wayneng's No. 4).
+    int g_movieRenderer = 0;
+
+    // (TODO 341, the follow-up) Where the game is, for the pictures made for a 4:3 TV: the front end (the taUIIntro
+    // executor: the start screens, the title, the main menu and its pages, the first loading screen), the HQ or a level.
+    // From the executors as the main loop starts them (executorLoop), the HQ's end (a level loads) and a loaded state
+    // (from memory: adoptLoadedState). Unknown until the first of them: then from memory, as a loaded state.
+    enum class Place { Unknown, FrontEnd, Hq, Level };
+    Place g_place = Place::Unknown;
+    bool hqInMemory(const uint8_t *rdram);
+
+    Place placeInMemory(const uint8_t *rdram)
+    {
+        // (the front end's own object, [0x6CFA6C] - start_screens.cpp's kIntroState - is there, by its vtable, exactly
+        // while the taUIIntro executor runs: set from the boot's first frames, cleared as the HQ is made. Measured over a
+        // boot into a level, TF_SHAPE_TRACE. The taGame's pointer stays set after a level, in the HQ too.)
+        uint32_t game = 0u, intro = 0u, introVtable = 0u;
+        std::memcpy(&game, rdram + 0x006CF2B8u, sizeof(game)); // (kGame, below)
+        std::memcpy(&intro, rdram + 0x006CFA6Cu, sizeof(intro));
+        if (const uint8_t *p = intro ? getConstMemPtr(rdram, intro) : nullptr)
+            std::memcpy(&introVtable, p, sizeof(introVtable));
+        if (introVtable == 0x006C2D10u)
+            return Place::FrontEnd;
+        return game != 0u ? Place::Level : hqInMemory(rdram) ? Place::Hq : Place::FrontEnd;
+    }
+
+    void setPlace(Place place, const char *why, PS2Runtime *runtime)
+    {
+        static const bool trace = std::getenv("TF_SHAPE_TRACE") != nullptr;
+        if (trace && place != g_place)
+        {
+            static const char *const kNames[] = {"unknown", "the front end", "the HQ", "a level"};
+            std::fprintf(stderr, "[tf] place: %s (%s, vblank %llu)\n", kNames[static_cast<int>(place)], why,
+                         runtime ? static_cast<unsigned long long>(runtime->eeScheduler().currentVSyncTick()) : 0ull);
+        }
+        g_place = place;
+    }
+
+    bool inFrontEnd(const uint8_t *rdram)
+    {
+        return (g_place == Place::Unknown ? placeInMemory(rdram) : g_place) == Place::FrontEnd;
+    }
+
+    // The shape a movie's band of rows is shown at: its own (Original), 16:9, or the window's (Stretched; never
+    // narrower than 16:9 - on a 4:3 screen it would be squeezed tall). The same whatever the game's widescreen option
+    // says. TF_MOVIE_SHAPE=ps2 (a test's): the PS2's own, whatever the row says.
+    float movieBandShape()
+    {
+        if (hd_movies::movieShapeAsPs2())
+            return g_movieOwnShape;
+        switch (start_screens::screenShape())
+        {
+        case start_screens::ScreenShape::Wide:
+            return 16.0f / 9.0f;
+        case start_screens::ScreenShape::Stretched:
+            return std::max(16.0f / 9.0f, ultrawide::windowShape());
+        default:
+            return g_movieOwnShape;
+        }
+    }
+
+    // The movie's picture in the frame, top and bottom as shares of its height: where the renderer in use puts the
+    // 384 rows (the whole frame, or rows 32..416) and the 12-row bars inside them. (TF_MOVIE_LAYOUT=<top>,<bottom>: a
+    // test's own, shares of the frame.)
+    void movieBand(const uint8_t *rdram, float &top, float &bottom)
+    {
+        static const char *forced = std::getenv("TF_MOVIE_LAYOUT");
+        if (forced && std::sscanf(forced, "%f,%f", &top, &bottom) == 2)
+            return;
+        const bool wide = rdram[0x006CF004u] != 0u; // (kWidescreenFlag, below: the renderers read this byte)
+        const float bar = g_movieBars ? 12.0f : 0.0f; // (rows of the movie that are not picture, each side)
+        bool whole = false; // (the movie over the whole frame, or its 384 rows in the frame's middle)
+        float cut = bar;    // (the rows of the movie's own bars inside what is drawn, each side)
+        switch (g_movieRenderer)
+        {
+        case 3:
+        {
+            // taFMVSystem::Render (measured with N1_1 at Amazon's start, widescreen on and off: the picture alone over
+            // all 448 rows in both). Its sprite is the render surface's size, and for a 384-row movie it leaves the bars
+            // out by its texture coordinates (24 / 1024 each side) - in either TV mode. Its play mode 3 (0x6CF5D4) puts
+            // the decoded picture into the surface as it is, in the middle: letterboxed with its bars (read from its
+            // code, 0x318E80; no film was seen to use it).
+            uint32_t mode = 0u;
+            std::memcpy(&mode, rdram + 0x006CF5D4u, sizeof(mode));
+            if (mode != 3u)
+                whole = true, cut = 0.0f;
+            break;
+        }
+        case 2:
+            break; // (taItemFullScreenFMV::Render places it by its item's own rectangle: taken as letterboxed)
+        default:
+            // taItemIntroFMV::Render (measured with the Atari logo, widescreen off: rows 32..416; on, at 16:9 and 21:9: rows
+            // 0..448, the movie's own bars inside): letterboxed only without the widescreen byte.
+            whole = wide;
+            break;
+        }
+        if (whole)
+            top = cut / 384.0f, bottom = 1.0f - cut / 384.0f;
+        else
+            top = (32.0f + cut) / 448.0f, bottom = (416.0f - cut) / 448.0f;
+    }
+
+    float movieFrameAspect(const uint8_t *rdram)
+    {
+        if (g_movieBandRows <= 0.0f)
+            return 4.0f / 3.0f; // (TF_MOVIE_BAND=0: the whole frame, as a 4:3 TV shows it)
+        float top = 0.0f, bottom = 1.0f;
+        movieBand(rdram, top, bottom);
+        ps2_host_display::setPictureBand(top, bottom);
+        const float band = movieBandShape();
+        hd_movies::setShownShape(band); // (an HD copy is drawn over the same rectangle)
+        if (static const bool trace = std::getenv("TF_SHAPE_TRACE") != nullptr; trace)
+        {
+            static int lastRenderer = -1;
+            static float lastTop = -1.0f, lastBand = 0.0f;
+            if (lastRenderer != g_movieRenderer || lastTop != top || lastBand != band)
+            {
+                lastRenderer = g_movieRenderer, lastTop = top, lastBand = band;
+                uint32_t mode = 0u;
+                std::memcpy(&mode, rdram + 0x006CF5D4u, sizeof(mode));
+                std::fprintf(stderr, "[tf] movie layout: renderer %d (cut-scene play mode %u), widescreen %d, picture rows %.4f..%.4f of the frame, shown %.3f:1\n",
+                             g_movieRenderer, mode, rdram[0x006CF004u] != 0u ? 1 : 0, top, bottom, band);
+            }
+        }
+        return band * (bottom - top);
+    }
+
+    // The game's three movie renderers: which one draws the playing movie (g_movieRenderer). Nothing of theirs changes.
+    constexpr uint32_t kIntroFmvRender = TF_GA(0x0034D210u), kFullScreenFmvRender = TF_GA(0x0034DAF0u), kCinemaFmvRender = 0x00318DF0u;
+    PS2Runtime::RecompiledFunction g_movieRender[3] = {nullptr, nullptr, nullptr};
+    template <int I> void movieRender(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        // (the cut-scene system's renderer runs every frame of a level, with nothing playing: it counts only with a movie)
+        if (g_liveFmvStreams != 0 && (I != 2 || rdram[0x006CF5C0u] != 0u))
+            g_movieRenderer = I + 1;
+        g_movieRender[I](rdram, ctx, runtime);
+    }
 
     void updateDisplayAspect(const uint8_t *rdram)
     {
-        float aspect = g_liveFmvStreams != 0 ? g_movieAspect : 4.0f / 3.0f;
+        float aspect = g_liveFmvStreams != 0 ? movieFrameAspect(rdram) : 4.0f / 3.0f;
         if (g_liveFmvStreams == 0)
         {
             uint32_t width = 0u;
@@ -450,19 +599,49 @@ namespace
             aspect = settled;
 #endif
         }
-        // (TODO 341 (1)) The copyright screen at the shape it was drawn for: a picture of 2D alone, drawn outside the display
-        // list (never narrowed as the HUD is - the GS's whole picture), so the whole picture is shown narrower, a 4:3 TV's
-        // shape times the display mode's own pixel shape (the game's 3D takes the same, 1 / (640 / width x 0.93): 0.86 at its
-        // 512 width), black at the sides - in either TV mode. TF_LEGAL_SHAPE=0: as before.
-        if (g_liveFmvStreams == 0 && start_screens::legalShapeOn() && start_screens::copyrightShown())
+        // (TODO 341, the follow-up) The front end's pictures - the start screens, the title, the main menu and its pages,
+        // the loading screen after them - were made for a 4:3 TV: full-screen 2D drawn outside the display list (never
+        // narrowed as the HUD is - the GS's whole picture) with the list's text over it. "Menus and movies" (F1 Display):
+        //   Original (the default) - the whole picture at 4:3, black at the sides: the backgrounds, the logos and the text
+        //     at the shape they were drawn for, the menus' rows, the pad's highlight and the mouse's areas with them (they
+        //     are that picture: menu_mouse.cpp goes by the shape shown);
+        //   16:9 - the game's widescreen picture, no wider than 16:9 (black at the sides of a wider screen);
+        //   Stretched - as wide as the level's picture (the game's widescreen picture across the screen, as before 0.7.2).
+        // (TODO 341 (1)) In Original the copyright screen is narrower still, the shape it was drawn for: a 4:3 TV's times
+        // the display mode's own pixel shape (the game's 3D takes the same, 1 / (640 / width x 0.93): 0.86 at its 512
+        // width) - in either TV mode. TF_LEGAL_SHAPE=0: as the other start screens.
+        if (static const bool trace = std::getenv("TF_SHAPE_TRACE") != nullptr; trace)
         {
+            // (TF_SHAPE_TRACE=1: the place and what memory says of it, at each change)
+            uint32_t game = 0u, intro = 0u, introVtable = 0u;
+            std::memcpy(&game, rdram + 0x006CF2B8u, sizeof(game));
+            std::memcpy(&intro, rdram + 0x006CFA6Cu, sizeof(intro));
+            if (const uint8_t *p = intro ? getConstMemPtr(rdram, intro) : nullptr)
+                std::memcpy(&introVtable, p, sizeof(introVtable));
+            const uint32_t now = static_cast<uint32_t>(g_place) | (game != 0u ? 8u : 0u) | (hqInMemory(rdram) ? 16u : 0u) |
+                                 (intro != 0u ? 32u : 0u) | (g_liveFmvStreams != 0 ? 64u : 0u);
+            static uint32_t last = ~0u;
+            static uint32_t lastVtable = 0u;
+            if (now != last || introVtable != lastVtable)
+            {
+                last = now, lastVtable = introVtable;
+                std::fprintf(stderr, "[tf] shape trace: place %d, game %08x, HQ in memory %d, intro %08x (vtable %08x), movies %d, executor %08x\n",
+                             static_cast<int>(g_place), game, hqInMemory(rdram) ? 1 : 0, intro, introVtable, g_liveFmvStreams, g_executorVtable);
+            }
+        }
+        if (g_liveFmvStreams == 0 && inFrontEnd(rdram))
+        {
+            const start_screens::ScreenShape shape = start_screens::screenShape();
             uint32_t width = 0u;
             std::memcpy(&width, rdram + kDisplayMode, sizeof(width));
-            if (width >= 256u && width < 640u)
+            if (shape == start_screens::ScreenShape::Original && start_screens::legalShapeOn() && start_screens::copyrightShown() &&
+                width >= 256u && width < 640u)
                 aspect = (4.0f / 3.0f) / ((640.0f / static_cast<float>(width)) * 0.93f);
+            else if (shape == start_screens::ScreenShape::Original)
+                aspect = std::min(aspect, 4.0f / 3.0f);
+            else if (shape == start_screens::ScreenShape::Wide)
+                aspect = std::min(aspect, 16.0f / 9.0f);
         }
-        else if (g_liveFmvStreams == 0 && aspect > 1.4f && start_screens::startScreen43())
-            aspect = 4.0f / 3.0f; // (TODO 341 (2): the title and the card notices at the 4:3 TV's shape)
         static float shown = 0.0f;
         if (aspect != shown)
         {
@@ -765,15 +944,22 @@ namespace
             // 1.66:1, full height on 16:9 and 21:9). The Atari logo has no bars: its band is the 384 rows. With an HD copy
             // (movies_hd) its own overlay draws instead. TF_MOVIE_BAND=0: the whole 4:3 frame, as before.
             static const bool band = !(std::getenv("TF_MOVIE_BAND") && *std::getenv("TF_MOVIE_BAND") == '0');
-            g_movieAspect = 4.0f / 3.0f;
+            g_movieBandRows = 0.0f;
+            // (the cut-scene system's films are made from its player, func_00319520: its renderer; the others - the start
+            // movies, the Extras' viewer - the intro item's. The renderers' own hooks correct it should another draw it.)
+            g_movieRenderer = g_fmvCaller == kCinemaMovieReturn ? 3 : 1;
             if (band)
             {
                 const std::string key = hd_movies::movieKey(movie);
-                const bool bars = key != "NATARI";
-                ps2_host_display::setPictureBand((bars ? 44.0f : 32.0f) / 448.0f, (bars ? 404.0f : 416.0f) / 448.0f);
-                // (TODO 341 (4)) the band at the movie's own shape (16:9; TF_MOVIE_SHAPE=ps2: the PS2's 1.66:1)
-                g_movieAspect = hd_movies::movieShape(key) * (bars ? 360.0f : 384.0f) / 448.0f;
+                // (TODO 341 (4)) the band and the shape it was made at (16:9; TF_MOVIE_SHAPE=ps2: the PS2's 1.66:1) - shown
+                // at the shape "Menus and movies" asks for, where the renderer in use draws it (movieFrameAspect, each frame)
+                g_movieBars = key != "NATARI";
+                g_movieBandRows = g_movieBars ? 360.0f : 384.0f;
+                g_movieOwnShape = hd_movies::movieShape(key);
             }
+            if (static const bool trace = std::getenv("TF_SHAPE_TRACE") != nullptr; trace)
+                std::fprintf(stderr, "[tf] movie %s: made from %08x (vblank %llu)\n", hd_movies::movieKey(movie).c_str(), g_fmvCaller,
+                             static_cast<unsigned long long>(runtime->eeScheduler().currentVSyncTick()));
             updateDisplayAspect(rdram);
             applyVBlankPeriod(runtime);
         }
@@ -1602,6 +1788,7 @@ namespace
             }
             hq_rate::frame(rdram, *runtime, g_executorVtable == 0x006B7360u, g_levelRate); // the HQ at the PC rate (hq_rate.h)
             guest_code::frame(rdram, *runtime);    // the added code's data and self-test (guest_code.h)
+            crosshair_row::gameFrame();            // the Crosshair row's word to static_aim (crosshair_row.h, TODO 355)
             if (!ext::all().empty()) // the extensions' frame work (port_ext.h: the HQ selection, the jet bike, the mod host)
             {
                 ext::FrameFacts facts;
@@ -2506,6 +2693,7 @@ namespace
                      static_cast<unsigned long long>(runtime->eeScheduler().currentVSyncTick()));
         g_hqMoments.store(false); // (the levels' own setting from here)
         g_executorVtable = 0u;    // (the HQ is over: the next level's load is muted again, fast_load)
+        setPlace(Place::Level, "the HQ ends: a level loads", runtime); // (TODO 341)
         key_text::levelChanged(); // (TODO 309: the HQ's strings are freed with it - never written to after this)
         if (g_inHq)
             switchFrameRate(rdram, ctx, runtime, 0);
@@ -2525,6 +2713,9 @@ namespace
         if (const uint8_t *p = getConstMemPtr(rdram, getRegU32(ctx, 4)))
             std::memcpy(&vptr, p, sizeof(vptr));
         g_executorVtable = vptr;
+        // (TODO 341: the place by its executor - the front end's pictures have their own shape, updateDisplayAspect)
+        if (vptr == 0x006C2D10u || vptr == kPreGameVtable || vptr == 0x006B4C40u)
+            setPlace(vptr == 0x006C2D10u ? Place::FrontEnd : vptr == kPreGameVtable ? Place::Hq : Place::Level, "its executor starts", runtime);
         // (TODO 157: an HQ left for the title - the pause menu's quit to the main menu - ends without its end (0x334650,
         // preGameEnd): g_inHq stayed set, and the next HQ - a new game's - was never given its rate: it ran at the
         // console's 30 (the user's playtest of 2026-11-04 15:35: the HQ at 240, the quit, a new game, its HQ at 30 and
@@ -4703,6 +4894,10 @@ namespace
         // kept: the step is judged again next frame on the frames since.)
         if (index > g_rateIndex && forestCanGiveWay())
             return;
+        // (TODO 295) Behind for the drawing on low-end graphics, the dynamic render scale above its floor: it steps down
+        // first (the GPU's frame time) - the rate falls only once the scale is at its floor (the user's frame-cap rule).
+        if (index > g_rateIndex && nativeDraw && dynamic_scale::canGiveWay() && drawnP90(1500.0) > 0.90 * periodMs(g_levelRate))
+            return;
 
         const int from = g_levelRate, to = g_rates[index];
         int barredSeconds = 0;
@@ -4870,6 +5065,7 @@ namespace
     {
         nr::resetFrameTexturePolicy(); // also clears interframe microcode receipts/prefix and advances their epoch
         g_statesSeen = runtime->eeScheduler().loadedStateCount();
+        setPlace(placeInMemory(rdram), "a state loaded: from memory", runtime); // (TODO 341: the executor seen last is the session's before it)
         tuning::thawLoadedState(rdram); // (TODO 269: before the level's rate is read from its period below)
         // (TODO 150) The port's carry-overs from frame to frame, which the state does not hold, as in a game just started
         // with it: the cars' 30ths and held time and the bodies moved on for the frames between their steps (a body the
@@ -5098,6 +5294,7 @@ namespace
         g_inHq = false;
         g_hqMoments.store(false);
         g_executorVtable = 0u; // (fast_load: not the HQ)
+        setPlace(Place::Level, "a level begun from the HQ", runtime); // (TODO 341)
         if (from != 0)
             g_carsPhase = g_carsPhase * to / from;
         switchFrameRate(rdram, ctx, runtime, to);
@@ -5484,6 +5681,10 @@ namespace
     std::atomic<float> g_forestSprites{1.0f};
     uint32_t g_forestSpriteState = 0u; // (added data: the level's sprite0, sprite1, then the two written)
     constexpr uint32_t kEcoFar0 = 0x0061DFDCu, kEcoSprite0 = 0x0061DFE0u, kEcoSprite1 = 0x0061DFE4u;
+    // (TODO 346) instanceFar1 of the level's record, and the padding word the drawing reads it from (0x6CB0F0: the first
+    // word of the four before .sdata's data, zero in the ELF, no code reads -0x8000($gp); 0x6CB0F4-FC are TODO 275's).
+    constexpr uint32_t kEcoFar1 = 0x0061DFD8u, kEcoFar1Word = 0x006CB0F0u;
+    constexpr float kEdgeShare = 0.65f; // ("3D to the edge": how far towards the edge the hand-over moves)
 
     // (TODO 194, 2026-11-08) "Trees: full 3D at any distance" (TF_FOREST_FULL_DETAIL=1, F1 > Graphics; off = as before,
     // the default until the user confirms). Measured walking Amazon at draw distance 4 (TF_FOREST_DIAG): the quadtree
@@ -5663,6 +5864,33 @@ namespace
     void setEcoSprites(uint8_t *rdram)
     {
         g_forestFullNow = g_forestFull.load(std::memory_order_relaxed) && !g_forestOld && dmaBuffersGrown(rdram);
+        // (TODO 346) The hand-over from a 3D tree to its flat picture. On the console the picture comes in between sprite0
+        // and sprite1 of the tree's reach (0.6 / 0.8 in Amazon) and the 3D tree then fades out between instanceFar1 and
+        // instanceFar0 (0.8 / 1): the picture is there before the tree goes. "3D to the edge" moved only the two sprite
+        // shares to the edge and left the fade, so in the outer fifth of the reach a tree faded out with no picture behind
+        // it - half see-through, then gone, then the picture popping in at the edge (the user's 346: a ring that moves
+        // with every aim zoom step). Now all three move the same share of the way (kEdgeShare of it at "3D to the
+        // edge": 0.86 / 0.93 / 0.93 in Amazon - the console's hand-over, in the outer seventh of the reach). The level's
+        // record keeps its instanceFar1: the drawing reads this word instead (config/overrides.toml).
+        // Tests: TF_FOREST_EDGE=<share> (kEdgeShare), TF_FOREST_FAR1=<share of the reach> (the word outright),
+        // TF_FOREST_ZOOM_POWER=<p> (the level's zoomFactorPower written every frame, not kept: how much an aim zoom
+        // lengthens the reach - 0.5 in Amazon, the zoom's square root).
+        static const float edgeShare = [] { const char *e = std::getenv("TF_FOREST_EDGE"); return e && *e ? std::clamp(static_cast<float>(std::atof(e)), 0.0f, 1.0f) : kEdgeShare; }();
+        // ("Every tree 3D" keeps its own: no pictures at all, the fade where the level has it - its reach is the whole level)
+        const float towardsEdge = g_forestOld ? 0.0f : std::clamp(g_forestSprites.load(std::memory_order_relaxed), 0.0f, 1.0f) * edgeShare;
+        {
+            static const float far1Test = [] { const char *e = std::getenv("TF_FOREST_FAR1"); return e && *e ? static_cast<float>(std::atof(e)) : -1.0f; }();
+            static const float powerTest = [] { const char *e = std::getenv("TF_FOREST_ZOOM_POWER"); return e && *e ? static_cast<float>(std::atof(e)) : -1.0f; }();
+            float far1 = 0.8f, edge = 1.0f;
+            std::memcpy(&far1, rdram + kEcoFar1, sizeof(far1));
+            std::memcpy(&edge, rdram + kEcoFar0, sizeof(edge));
+            float use = far1 > 0.0f && far1 <= edge && !g_forestFullNow ? far1 + towardsEdge * (edge - far1) : far1;
+            if (far1Test >= 0.0f)
+                use = far1Test * edge;
+            std::memcpy(rdram + kEcoFar1Word, &use, sizeof(use));
+            if (powerTest >= 0.0f)
+                std::memcpy(rdram + 0x0061DFECu, &powerTest, sizeof(powerTest));
+        }
         if (g_forestSpriteState == 0u)
             return;
         float rec[2], st[4], far0 = 1.0f;
@@ -5674,7 +5902,7 @@ namespace
             st[0] = rec[0];
             st[1] = rec[1];
         }
-        const float k = g_forestFullNow ? 1.0f : g_forestSprites.load(std::memory_order_relaxed);
+        const float k = g_forestFullNow ? 1.0f : towardsEdge; // (TODO 346: the same share of the way as the fade's start above)
         if (k <= 0.0f || g_forestOld || !(st[0] > 0.0f && st[0] <= far0 && st[1] <= far0))
         {
             if (rec[0] != st[0] || rec[1] != st[1]) // (the setting taken off: the level's own back)
@@ -5701,14 +5929,35 @@ namespace
             scale *= factor;
         std::memcpy(rdram + kEcoScaleWord, &scale, sizeof(scale));
         // (TODO 194: the leaves' budget - every frame and after a state loads; off, the game's 800 back if ours is there)
+        // (TODO 346, the second hole) The game's 800 placements a frame are sized for the console's reach. A longer
+        // reach (Forest distance over 1x - the default Near 3D is 2x) has about factor^2 times the 3D trees, and the
+        // leaves and fronds are given out nearest first: with the game's 800 the farther 3D trees were drawn as bare
+        // models (trunks, no crown) every frame - measured at the user's Amazon spot 287 trees 3D, 88 with leaves. So
+        // with a longer reach every 3D tree gets its leaves, as with Full 3D, under the same DMA-fill guard (only with
+        // our DMA buffers; a state made with the game's keeps 800). 800 x the reach's area (factor^2) was tried first
+        // and is not enough where the forest is thickest: Deep Amazon fills even the game's 800 at the console's reach,
+        // and filled 3,200 at 2x. TF_FOREST_LEAVES=game: the game's 800 (as before); =area: 800 x factor^2.
+        static const int leavesRule = []
+        {
+            const char *e = std::getenv("TF_FOREST_LEAVES");
+            return !e ? 0 : std::string(e) == "game" ? 1 : std::string(e) == "area" ? 2 : 0;
+        }();
         uint32_t budget = 0u;
         std::memcpy(&budget, rdram + kEcoSecondaryBudget, sizeof(budget));
-        const uint32_t wanted = g_forestFullNow                                        ? std::min(g_forestFullBudget, g_leafGuard)
+        uint32_t ours = 0u;
+        if (g_forestFullNow)
+            ours = std::min(g_forestFullBudget, g_leafGuard);
+        else if (factor > 1.0f && !g_forestOld && leavesRule != 1 && dmaBuffersGrown(rdram))
+        {
+            const float area = leavesRule == 2 ? factor * factor * static_cast<float>(kEcoSecondaryBudgetGame) : static_cast<float>(kEcoSecondaryBudgetFull);
+            ours = std::max(kEcoSecondaryBudgetGame, std::min(static_cast<uint32_t>(std::min(area, static_cast<float>(kEcoSecondaryBudgetFull))), g_leafGuard));
+        }
+        const uint32_t wanted = ours != 0u                                  ? ours
                                 : budget == g_budgetWritten && budget != 0u ? kEcoSecondaryBudgetGame
                                                                             : budget;
         if (wanted != budget)
             std::memcpy(rdram + kEcoSecondaryBudget, &wanted, sizeof(wanted));
-        g_budgetWritten = g_forestFullNow ? wanted : 0u;
+        g_budgetWritten = ours;
         // (The drawing's arrays: every frame and after a state loads - a state made before this build holds a
         // pointer of the game's list there.)
         if (g_forestRecords != 0u && g_forestList != 0u)
@@ -5845,6 +6094,59 @@ namespace
         const uint32_t owner = ecoLoadWord(rdram, 0x006CF904u);
         if (owner >= 0x00100000u && owner < PS2_RAM_SIZE - 0x90u)
             g_fdFrame.secUsed = std::max(g_fdFrame.secUsed, ecoLoadWord(rdram, owner + 0x8Cu));
+    }
+
+    // (TODO 346, TF_FOREST_DIAG) The instances as they stand, with each 2 s line: how many 3D trees at which distance
+    // from the camera (all / asked for by the drawing in the last frame - flag 4 / in a fade - the count byte +0x115),
+    // the flag and fade bytes met, and what the drawing works with: the level's alpha distances (0x61DFD0:
+    // instanceNear0/1, instanceFar1/0, sprite0/1, scale, zoomFactorPower), the eco scale word, the range factor from
+    // the camera's field of view (0x6CF8E8: every reach is divided by it - an aim zoom lowers it, a wider field of
+    // view raises it), the near / far words of "Trees close to you" and the camera's place.
+    void forestDiagSnapshot(uint8_t *rdram)
+    {
+        static const float kEdges[] = {25.0f, 50.0f, 100.0f, 150.0f, 200.0f, 300.0f, 400.0f, 600.0f, 800.0f, 1200.0f, 1600.0f, 2400.0f, 3200.0f};
+        constexpr int kBins = static_cast<int>(sizeof(kEdges) / sizeof(kEdges[0])) + 1;
+        uint32_t all[kBins] = {}, asked[kBins] = {}, fading[kBins] = {}, total = 0u;
+        std::unordered_map<uint32_t, uint32_t> states;
+        ecoForEachNode(rdram, [&](uint32_t node) {
+            const float d = ecoDistance(rdram, node + kEcoNodePosition);
+            int b = 0;
+            while (b < kBins - 1 && d >= kEdges[b])
+                ++b;
+            const uint8_t flags = rdram[node + kEcoNodeFlags], fade = rdram[node + kEcoNodeFlags + 1u];
+            ++all[b];
+            ++total;
+            asked[b] += (flags & kEcoNodeAsked) != 0u;
+            fading[b] += fade != 0u;
+            ++states[(static_cast<uint32_t>(fade) << 8) | flags];
+        });
+        std::string bins, met;
+        char t[96];
+        for (int b = 0; b < kBins; ++b)
+            if (all[b])
+            {
+                if (b < kBins - 1)
+                    std::snprintf(t, sizeof(t), " <%.0f %u/%u/%u", static_cast<double>(kEdges[b]), all[b], asked[b], fading[b]);
+                else
+                    std::snprintf(t, sizeof(t), " beyond %u/%u/%u", all[b], asked[b], fading[b]);
+                bins += t;
+            }
+        for (const auto &s : states)
+        {
+            std::snprintf(t, sizeof(t), " %02x.%u x%u", s.first & 0xFFu, s.first >> 8, s.second);
+            met += t;
+        }
+        float rec[8] = {}, cam[3] = {}, near = 0.0f, far = 0.0f;
+        std::memcpy(rec, rdram + 0x0061DFD0u, sizeof(rec));
+        std::memcpy(rec + 2, rdram + kEcoFar1Word, sizeof(float)); // (TODO 346: the fade's start the drawing reads)
+        std::memcpy(cam, rdram + kEcoCameraPosition, sizeof(cam));
+        std::memcpy(&near, rdram + kTreeNear, sizeof(near));
+        std::memcpy(&far, rdram + kTreeFar, sizeof(far));
+        std::fprintf(stderr,
+                     "[forest] diag2: %u instances by distance (all/asked/fading):%s; flags.fade:%s; alpha distances near %g %g far %g %g "
+                     "sprite %g %g scale %g zoom power %g; scale word %g, range factor %g, near word %g, far word %g; camera %.0f %.0f %.0f\n",
+                     total, bins.c_str(), met.c_str(), rec[0], rec[1], rec[2], rec[3], rec[4], rec[5], rec[6], rec[7],
+                     ecoLoadFloat(rdram, kEcoScaleWord), ecoLoadFloat(rdram, 0x006CF8E8u), near, far, cam[0], cam[1], cam[2]);
     }
 
     // (TF_FOREST_DIAG) Once a frame, at DeleteAllInstances: the frame's counts into the window. The drawing's (the
@@ -6204,6 +6506,7 @@ namespace
                              w.secCalls / n, w.secDistMax, w.secUsedMax, w.secCap, static_cast<unsigned long long>(w.secCapFrames),
                              static_cast<unsigned long long>(w.lodCalls), static_cast<unsigned long long>(w.levelCalls),
                              g_dmaFillMax / 10.0, g_dmaBytesMax / 1048576.0);
+                forestDiagSnapshot(rdram);
                 g_fdWindow = ForestDiagWindow{};
                 g_dmaFillMax = g_dmaBytesMax = 0u;
             }
@@ -8131,7 +8434,7 @@ namespace
         language::addSettings();    // Gameplay: the PAL release's language (language.h)
         mod_menu::addSettings();    // Controls: driving with W / S (mod_menu.h)
         small_crosshair::addSettings(); // Display: the small crosshair (small_crosshair.h)
-        static_aim::addSettings();      // Controls > Mouse: the still crosshair (static_aim.h, TODO 292 B)
+        crosshair_row::addSettings(); // Gameplay: the crosshair Original / Fixed (crosshair_row.h, TODO 355)
         crisp_text::addSettings();  // Display: sharp text and PS5 button symbols (crisp_text.h, TODO 119)
         playrec::addSettings();     // Gameplay: play recording, F2 (playrec.h, N12 b)
         using ps2_settings::Choice;
@@ -8393,7 +8696,7 @@ namespace
             s.order = 40;
             s.help = "How far the detail reaches: 1x is the console's, everywhere. Above it the scenery's detail goes to 4x "
                      "(it costs almost nothing), the forest's trees to this factor but at most 2x (they are the cost: game time and graphics "
-                     "card), drawn 3D to the edge, and the grass and the ground's close-up texture reach this factor too "
+                     "card; the Trees row sets them apart), drawn 3D to the edge, and the grass and the ground's close-up texture reach this factor too "
                      "(the ground at most 4x). Enemies, your Autobot and the pickups are drawn whole at any distance (Enemy "
                      "detail). The settings below set each one apart (Auto: from this).";
             for (const char *value : {"1", "1.5", "2", "3", "4"})
@@ -8463,9 +8766,10 @@ namespace
                 s.order = 42;
                 s.help = "How far the forest's 3D trees reach: 1x is the console's. This is what more draw distance costs "
                          "(game time above all); when the PC falls behind, the far trees go first. Auto: from Draw distance, 2x "
-                         "at most. 3x and 4x: very heavy, can drop the frame rate a lot, even on strong graphics cards.";
+                         "at most. 3x and up: very heavy, can drop the frame rate a lot, even on strong graphics cards. The "
+                         "Trees row sets this, Far trees and Every tree 3D in one choice.";
                 s.choices.push_back(autoChoice());
-                for (const char *value : {"1", "1.5", "2", "3", "4"})
+                for (const char *value : {"1", "1.5", "2", "3", "4", "8"}) // (TODO 350: 8x - the Trees row's Very far 3D)
                     s.choices.push_back(Choice{value, std::string(value) + times});
                 s.defaultValue = "";
                 s.apply = [](const std::string &value)
@@ -8481,8 +8785,9 @@ namespace
                 s.section = "Graphics";
                 s.label = "Far trees";
                 s.order = 43;
-                s.help = "The farthest trees: 3D models to the edge of the forest (the same look, cheaper), or turned into flat "
-                         "pictures as on the console.";
+                s.help = "The farthest of the 3D trees (the outer part of Forest distance): 3D models to its edge (the same "
+                         "look, cheaper), or turned into flat pictures as on the console. Beyond Forest distance every tree is "
+                         "the game's own flat tree either way.";
                 s.choices.push_back(autoChoice());
                 s.choices.push_back(Choice{"1", "3D to the edge"});
                 s.choices.push_back(Choice{"0", "Flat (the console's)"});
@@ -8498,7 +8803,7 @@ namespace
                 Setting s;
                 s.key = "TF_FOREST_FULL_DETAIL";
                 s.section = "Graphics";
-                s.label = "Trees";
+                s.label = "Every tree 3D"; // (TODO 350 b: "Trees" is the one row that sets the forest's three)
                 s.order = 43;
                 s.help = "Full 3D at any distance: every tree in view is its 3D model with all its leaves, however far - no "
                          "flat far-away pictures and no trees changing as you walk. It costs game time and graphics card time "
@@ -9053,6 +9358,7 @@ namespace
         if (language::redirectForText(rdram, ctx, runtime)) // (the PAL release's text in another language: language.h)
             return;
         testStall(runtime);
+        key_text::switchTest(runtime->eeScheduler().currentVSyncTick()); // (TF_KEY_TEXT_SWITCH_TEST, tests)
         key_text::frame(rdram); // (the sticks' words for the keyboard: key_text.h)
         ps2_host_display::trace("frame kick", runtime->memory().gs().dispfb2);
         if (g_frameLog)
@@ -9064,6 +9370,7 @@ namespace
             reportPeekedWords(rdram, testTick(runtime));
         if (g_censusAddress != 0u)
             reportCensus();
+        dynamic_scale::tick(g_rateSetting >= kUnlimitedRate ? 0 : g_rateSetting); // (TODO 295: low-end graphics' render scale, dynamic_scale.h)
         if (g_printFps)
             printFrameRate(runtime);
         if (playrec::armed())
@@ -9871,6 +10178,14 @@ namespace
 #endif
         g_createFmvStream = runtime.lookupFunction(kCreateFmvStream);
         g_fmvStreamDtor = runtime.lookupFunction(kFmvStreamDtor);
+        {
+            // (TODO 341: which renderer draws a movie - movieBand)
+            constexpr uint32_t kRenders[3] = {kIntroFmvRender, kFullScreenFmvRender, kCinemaFmvRender};
+            const PS2Runtime::RecompiledFunction hooks[3] = {movieRender<0>, movieRender<1>, movieRender<2>};
+            for (int i = 0; i < 3; ++i)
+                if ((g_movieRender[i] = runtime.lookupFunction(kRenders[i])) != nullptr)
+                    runtime.registerFunction(kRenders[i], hooks[i]);
+        }
         if (g_createFmvStream && g_fmvStreamDtor)
         {
             runtime.registerFunction(kCreateFmvStream, createFmvStream);

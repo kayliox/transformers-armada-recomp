@@ -66,10 +66,10 @@ namespace start_screens
         // and the tick of the last game frame (frame()).
         std::atomic<uint64_t> g_copyrightTick{0}, g_copyrightSince{0}, g_frameTick{0};
         std::atomic<int> g_legalShape{1};
-        // (TODO 341 (2)) The same for the title ("press Start") and the card check's notices: their screens' updates, while
-        // they run; and the option to show them at 4:3 in a wide picture (TF_START_SHAPE).
-        std::atomic<uint64_t> g_titleTick{0}, g_titleSince{0}, g_cardTick{0}, g_cardSince{0};
-        std::atomic<int> g_startShape{1};
+        // (TODO 341, the follow-up) The one choice for every picture made for a 4:3 TV - the start screens, the main menu and
+        // its pages, the loading screens, the movies: TF_SCREEN_SHAPE (F1 Display, "Menus and movies"). The title's and the
+        // card notices' own stamps (TF_START_SHAPE, 0.7.2) went: overrides.cpp knows the front end by its executor.
+        std::atomic<int> g_screenShape{static_cast<int>(ScreenShape::Original)};
 
         void stampSeen(std::atomic<uint64_t> &at, std::atomic<uint64_t> &since, uint64_t now)
         {
@@ -80,8 +80,10 @@ namespace start_screens
 
         bool seenNow(const std::atomic<uint64_t> &at, const std::atomic<uint64_t> &since)
         {
+            // (now >= t: a save state loaded since - its tick is its own, lower or higher - is not the screen still up; frame()
+            // clears the stamps when the tick goes back, this covers the frames before it runs)
             const uint64_t t = at.load(std::memory_order_relaxed), now = g_frameTick.load(std::memory_order_relaxed);
-            return t != 0 && now <= t + 6u && t >= since.load(std::memory_order_relaxed) + 18u;
+            return t != 0 && now >= t && now <= t + 6u && t >= since.load(std::memory_order_relaxed) + 18u;
         }
 
 
@@ -270,7 +272,6 @@ namespace start_screens
         void titleUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t self = getRegU32(ctx, 4);
-            stampSeen(g_titleTick, g_titleSince, tick(runtime)); // (TODO 341 (2))
             if (!g_titleSeen)
             {
                 g_titleSeen = true;
@@ -323,7 +324,6 @@ namespace start_screens
         void cardCheckProcessInput(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t self = getRegU32(ctx, 4);
-            stampSeen(g_cardTick, g_cardSince, tick(runtime)); // (TODO 341 (2))
             static uint32_t lastState = ~0u;
             const uint32_t state = read32(rdram, self + kCardCheckState);
             if (state != lastState)
@@ -453,51 +453,51 @@ namespace start_screens
 
     bool legalShapeOn() { return g_legalShape.load(std::memory_order_relaxed) != 0; }
 
-    bool startScreen43()
-    {
-        return g_startShape.load(std::memory_order_relaxed) != 0 && (seenNow(g_titleTick, g_titleSince) || seenNow(g_cardTick, g_cardSince));
-    }
+    ScreenShape screenShape() { return static_cast<ScreenShape>(g_screenShape.load(std::memory_order_relaxed)); }
 
     void addSettings()
     {
         {
-            // (TODO 341 (1)) The copyright screen's logos at their own shape.
+            // (TODO 341, the follow-up; the user's decision 2026-11-14) One row for every picture made for a 4:3 TV. It takes
+            // the place of 0.7.2's two rows: "Copyright screen logos" (TF_LEGAL_SHAPE, still read: 0 = the copyright screen
+            // as the rest of the start, a test's) and "Start screens on a wide screen" (TF_START_SHAPE: a player who had
+            // chosen Stretched there keeps it - the new row is set to Stretched once, and written).
+            const auto shapeOf = [](const std::string &value)
+            {
+                if (value == "16:9")
+                    return ScreenShape::Wide;
+                if (value == "stretched")
+                    return ScreenShape::Stretched;
+                return ScreenShape::Original; // ("original", empty, anything unknown)
+            };
             ps2_settings::Setting s;
-            s.key = "TF_LEGAL_SHAPE";
+            s.key = "TF_SCREEN_SHAPE";
             s.section = "Display";
-            s.label = "Copyright screen logos";
+            s.label = "Menus and movies";
             s.order = 60;
-            s.help = "The Transformers and Hasbro logos on the copyright screen at start: at their own shape, or stretched a "
-                     "little wide as on the PS2 (its picture is drawn 512 pixels wide across the TV).";
-            s.choices = {{"1", "Their own shape"}, {"0", "As on the PS2"}};
-            s.defaultValue = "1";
-            s.apply = [](const std::string &value)
+            s.help = "The shape of the start screens, the main menu, the loading screens and the movies. They were made for a "
+                     "4:3 TV. Original (4:3): shown at their own shape, black at the sides. 16:9: widened to 16:9. Stretched: "
+                     "widened to fill the screen. Levels and the headquarters are not changed by this.";
+            s.choices = {{"original", "Original (4:3)"}, {"16:9", "16:9"}, {"stretched", "Stretched"}};
+            s.defaultValue = "original";
+            s.apply = [shapeOf](const std::string &value)
             {
-                g_legalShape.store(value == "0" ? 0 : 1, std::memory_order_relaxed);
+                g_screenShape.store(static_cast<int>(shapeOf(value)), std::memory_order_relaxed);
                 return true;
             };
             ps2_settings::add(s);
-            g_legalShape.store(ps2_settings::value("TF_LEGAL_SHAPE") == "0" ? 0 : 1, std::memory_order_relaxed);
-        }
-        {
-            // (TODO 341 (2)) The title and the card check's notices at 4:3 in a wide picture.
-            ps2_settings::Setting s;
-            s.key = "TF_START_SHAPE";
-            s.section = "Display";
-            s.label = "Start screens on a wide screen";
-            s.order = 61;
-            s.help = "The title (\"Press Start\") and the memory card notices at start are pictures made for a 4:3 TV. "
-                     "4:3: shown at that shape, black at the sides. Stretched: widened to the screen, as the PS2 does in its "
-                     "widescreen mode.";
-            s.choices = {{"1", "4:3"}, {"0", "Stretched"}};
-            s.defaultValue = "1";
-            s.apply = [](const std::string &value)
+            const char *chosen = std::getenv("TF_SCREEN_SHAPE");
+            const char *old = std::getenv("TF_START_SHAPE");
+            if (!(chosen && *chosen) && old && *old == '0')
             {
-                g_startShape.store(value == "0" ? 0 : 1, std::memory_order_relaxed);
-                return true;
-            };
-            ps2_settings::add(s);
-            g_startShape.store(ps2_settings::value("TF_START_SHAPE") == "0" ? 0 : 1, std::memory_order_relaxed);
+                ps2_settings::noteChanged("TF_SCREEN_SHAPE", "stretched");
+                g_screenShape.store(static_cast<int>(ScreenShape::Stretched), std::memory_order_relaxed);
+                std::fprintf(stderr, "[tf] menus and movies: Stretched, as \"Start screens on a wide screen\" was set (TF_START_SHAPE=0)\n");
+            }
+            else
+                g_screenShape.store(static_cast<int>(shapeOf(ps2_settings::value("TF_SCREEN_SHAPE"))), std::memory_order_relaxed);
+            const char *legal = std::getenv("TF_LEGAL_SHAPE");
+            g_legalShape.store(legal && *legal == '0' ? 0 : 1, std::memory_order_relaxed);
         }
         ps2_settings::Setting s;
         s.key = "TF_START_SCREENS";
@@ -529,7 +529,18 @@ namespace start_screens
 
     void frame(PS2Runtime &runtime, bool inGame)
     {
-        g_frameTick.store(tick(&runtime), std::memory_order_relaxed); // (TODO 341 (1): copyrightShown's clock)
+        // (TODO 341 (1): copyrightShown's clock. A tick going back is a save state loaded - its tick is its own: the stamps
+        // of the session before it are not its screens. Before, a state with a lower tick than the stamp's kept "the
+        // screen is up" true until its tick had passed it: its level or HQ at the start screen's shape meanwhile.)
+        {
+            const uint64_t now = tick(&runtime);
+            if (now < g_frameTick.load(std::memory_order_relaxed))
+            {
+                g_copyrightTick.store(0, std::memory_order_relaxed);
+                g_copyrightSince.store(0, std::memory_order_relaxed);
+            }
+            g_frameTick.store(now, std::memory_order_relaxed);
+        }
         if (!g_turbo.load(std::memory_order_relaxed))
             return;
         const int mode = g_mode.load(std::memory_order_relaxed);

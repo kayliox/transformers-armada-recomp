@@ -31,6 +31,10 @@ namespace graphics_driver
             uint64_t dedicatedMB = 0;             // (its own video memory; built-in graphics: a token 128 MB or so)
             uint32_t version[4] = {0, 0, 0, 0}; // (the user-mode driver's: 27.20.100.9565)
             bool known = false;                  // (the version could be read)
+            // (TODO 356) No real graphics card was found: only Microsoft's own display adapters (the Basic Render
+            // Driver, the Remote Desktop one - vendor 1414h or DXGI's software flag, 0 MB). Not a judgement of the
+            // PC's graphics: such a session is never "low end".
+            bool softwareOnly = false;
             std::string warning;
         };
 
@@ -42,8 +46,34 @@ namespace graphics_driver
                 IDXGIFactory1 *factory = nullptr;
                 if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void **>(&factory))))
                 {
+                    // (TODO 356) The first adapter that is a real card: the first one listed as a rule; over Remote
+                    // Desktop, or with no driver installed, Microsoft's own adapter comes first and is passed over.
                     IDXGIAdapter1 *adapter = nullptr;
-                    if (SUCCEEDED(factory->EnumAdapters1(0, &adapter)))
+                    // TF_SOFTWARE_ADAPTER_TEST=1 (tests, TODO 356): a faked adapter list - every real card counts as
+                    // Microsoft's own, so the list holds none, as over Remote Desktop or with no graphics driver.
+                    const char *fake = std::getenv("TF_SOFTWARE_ADAPTER_TEST");
+                    const bool noRealCard = fake && *fake == '1';
+                    bool passedOver = false;
+                    for (UINT n = 0; n < 8u; ++n)
+                    {
+                        IDXGIAdapter1 *candidate = nullptr;
+                        if (FAILED(factory->EnumAdapters1(n, &candidate)))
+                            break;
+                        DXGI_ADAPTER_DESC1 d{};
+                        const bool software = SUCCEEDED(candidate->GetDesc1(&d)) &&
+                                              ((d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0u || d.VendorId == 0x1414u || noRealCard);
+                        if (!software)
+                        {
+                            adapter = candidate;
+                            break;
+                        }
+                        passedOver = true;
+                        candidate->Release();
+                    }
+                    out.softwareOnly = passedOver && !adapter;
+                    if (out.softwareOnly)
+                        factory->EnumAdapters1(0, &adapter); // (named in the log all the same)
+                    if (adapter)
                     {
                         DXGI_ADAPTER_DESC1 desc{};
                         if (SUCCEEDED(adapter->GetDesc1(&desc)))
@@ -70,6 +100,8 @@ namespace graphics_driver
                     factory->Release();
                 }
 #endif
+                // (TF_SOFTWARE_ADAPTER_TEST=1 leaves the first adapter's maker and memory as they are: the test PC still
+                // draws on its real card, and what depends on the maker - Intel's picture hand-over - must stay right)
                 // Intel's driver numbers: 26.x / 27.x (2019-2021), 30.0.100 / 30.0.101 (2021-2022), 31.0.101 (2023 on).
                 // TF_DRIVER_WARN_TEST=1: the warning as if the driver were that old (tests of the menu).
                 const bool test = std::getenv("TF_DRIVER_WARN_TEST") && *std::getenv("TF_DRIVER_WARN_TEST") == '1';
@@ -92,6 +124,7 @@ namespace graphics_driver
     }
 
     uint32_t vendor() { return info().vendor; }
+    bool softwareOnly() { return info().softwareOnly; }
 
     bool lowEnd()
     {
@@ -101,7 +134,9 @@ namespace graphics_driver
             const Info &i = info();
             // (Unknown card - no DXGI, another system: not low end, nothing changes.) 3.5 GB: a 4 GB card reports a little
             // under 4096 MB; built-in graphics report their token share (Iris Xe 128 MB, an AMD APU 512 MB - 2 GB).
-            return i.vendor != 0u && i.dedicatedMB < 3584u;
+            // (TODO 356) Not Microsoft's basic or remote display adapter with no real card behind it: that says nothing
+            // of the PC (a game started once over Remote Desktop had its settings reset for good).
+            return i.vendor != 0u && !i.softwareOnly && i.dedicatedMB < 3584u;
         }();
         return low;
     }
@@ -110,16 +145,22 @@ namespace graphics_driver
     {
         // (TODO 295, the user's laptop target: a steady 60, sharper than the PS2) The Low preset's values that differ from
         // the defaults (mod_menu.cpp's presets: Medium is the default) - draw distance 1x (the console's), enemy detail 1,
-        // no MSAA - and the picture drawn at 67% and enlarged by FSR 1 (the ThinkPad's UHD 620 at 720p: 29 -> 40 fps). Edge
-        // smoothing (FXAA) and texture quality (already Low from the card's memory) stay. While that render scale is the
-        // default the picture keeps at least 480 lines (TF_NATIVE_MIN_LINES; the PS2 shows 448), so it is never softer.
+        // no MSAA, no edge smoothing (FXAA: 1.2 ms of the UHD 620's frame - the user's choice, 2026-11-13; FSR 1's sharpening
+        // stays) - and the picture drawn at 67% and enlarged by FSR 1 (the ThinkPad's UHD 620 at 720p: 29 -> 40 fps). Texture
+        // quality (already Low from the card's memory) stays. While that render scale is the default the picture keeps at
+        // least 480 lines (TF_NATIVE_MIN_LINES; the PS2 shows 448), so it is never softer.
         struct LowEndDefault
         {
             const char *key;
             const char *value;
         };
+        // (TODO 295, the ThinkPad's UHD 620: 67% hit a GPU wall in Deep Amazon - 18.8-22 ms a frame, a locked 60 at 50%) true: the
+        // scale starts at 67% and the dynamic render scale (dynamic_scale.h) holds the rate between 67 and 50%; false (the
+        // fallback): a fixed 54%.
+        constexpr bool kLowEndDynamic = true;
         constexpr LowEndDefault kLowEndDefaults[] = {{"TF_DRAW_DISTANCE", "1"}, {"TF_ENEMY_DETAIL", "1"}, {"PS2X_GPU_MSAA", "0"},
-                                                   {"TF_NATIVE_RENDER_SCALE", "67"}, {"TF_NATIVE_UPSCALER", "fsr1"}};
+                                                   {"TF_NATIVE_AA", "0"}, {"TF_NATIVE_RENDER_SCALE", kLowEndDynamic ? "67" : "54"},
+                                                   {"TF_NATIVE_UPSCALER", "fsr1"}};
     }
 
     const char *defaultFor(const char *key, const char *normal)
@@ -134,13 +175,28 @@ namespace graphics_driver
     void applyLowEndDefaults()
     {
         if (!lowEnd())
+        {
+            // (TODO 295) "auto" (the Render scale row's Auto, in a settings.ini copied from a low-end PC): unset here - this
+            // card's own default, 100%
+            if (const char *s = std::getenv("TF_NATIVE_RENDER_SCALE"); s && std::strcmp(s, "auto") == 0)
+            {
+#if defined(_WIN32)
+                _putenv_s("TF_NATIVE_RENDER_SCALE", "");
+#else
+                unsetenv("TF_NATIVE_RENDER_SCALE");
+#endif
+            }
             return;
+        }
         std::string applied;
         for (const LowEndDefault &d : kLowEndDefaults)
         {
             const char *set = std::getenv(d.key);
-            if (set && *set)
-                continue; // (settings.ini or the environment: the player's)
+            // (settings.ini or the environment: the player's - but "auto", the F1 row's Render scale Auto kept in the file, is
+            // the low-end default's dynamic scale again, TODO 295)
+            const bool autoScale = set && std::strcmp(d.key, "TF_NATIVE_RENDER_SCALE") == 0 && std::strcmp(set, "auto") == 0;
+            if (set && *set && !autoScale)
+                continue;
 #if defined(_WIN32)
             _putenv_s(d.key, d.value);
 #else
@@ -156,6 +212,15 @@ namespace graphics_driver
 #endif
                 applied += " (at least 480 lines)";
             }
+            if (std::strcmp(d.key, "TF_NATIVE_RENDER_SCALE") == 0 && kLowEndDynamic && !(std::getenv("TF_DYNAMIC_SCALE") && *std::getenv("TF_DYNAMIC_SCALE")))
+            {
+#if defined(_WIN32)
+                _putenv_s("TF_DYNAMIC_SCALE", "1");
+#else
+                setenv("TF_DYNAMIC_SCALE", "1", 1);
+#endif
+                applied += " (dynamic: 67-50% to hold the rate)";
+            }
         }
         if (!applied.empty())
             std::fprintf(stderr, "[graphics] built-in or low-end graphics: the Low preset's %s (not set in settings.ini)\n", applied.c_str());
@@ -164,6 +229,10 @@ namespace graphics_driver
     void writeGpuFile(const std::string &hdDir)
     {
         const Info &i = info();
+        // (TODO 356) Only Microsoft's basic or remote display adapter in this session: the file stays as the last start
+        // on the real card wrote it. Written as "low end" it made the HD tools remove a finished HD set, for good.
+        if (i.softwareOnly)
+            return;
         std::string name;
         for (char c : i.name)
             if (c != '"' && c != '\\')
@@ -192,7 +261,9 @@ namespace graphics_driver
             std::fprintf(stderr, "[graphics] %s, driver %u.%u.%u.%u, %llu MB of its own video memory%s\n",
                          i.name.empty() ? "unknown card" : i.name.c_str(), i.version[0], i.version[1], i.version[2], i.version[3],
                          static_cast<unsigned long long>(i.dedicatedMB),
-                         lowEnd() ? ": built-in or low-end graphics, no HD textures made here" : "");
+                         i.softwareOnly ? ": Microsoft's basic or remote display adapter, not this PC's graphics card (settings and HD "
+                                          "textures are left as they are)"
+                                        : lowEnd() ? ": built-in or low-end graphics, no HD textures made here" : "");
         if (!i.warning.empty())
             std::fprintf(stderr, "[graphics] warning: %s\n", i.warning.c_str());
     }

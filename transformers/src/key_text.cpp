@@ -47,6 +47,11 @@ namespace key_text
         std::string g_shownLayout;           // (the layout they were made from: a change makes them again)
         std::chrono::steady_clock::time_point g_lastSearch{}, g_lastCheck{};
         int g_searches = 0;
+        // (TODO 348 (b)) The device the words in place were written for: 0 the controller, 1 the keyboard, 2 nothing to
+        // match (no string found, none looked for, a load) - the button symbols follow it (symbolsAsKeys).
+        std::atomic<int> g_wordsFor{2};
+        bool g_switchSearch = false; // (a search for the switch to the keyboard: past the 20 s spacing and the 12 looks)
+        bool g_switchLooked = false; // (this use of the keyboard has had its search: one for each switch, however long it takes)
         // (TODO 309: a load frees what the strings were found in - the HQ's Mini-Con pages - and the heap gives their bytes
         // to the level: the strings are let go when a load begins or the HQ ends, and looked for again once it settles)
         std::atomic<bool> g_dropRequested{false};
@@ -567,6 +572,47 @@ namespace key_text
 
     void levelChanged() { g_dropRequested = true; }
 
+    bool symbolsAsKeys(bool keys)
+    {
+        static std::atomic<int64_t> waitingSince{0};
+        const int words = g_wordsFor.load(std::memory_order_relaxed);
+        if (!enabled() || words == 2 || words == (keys ? 1 : 0))
+        {
+            waitingSince.store(0, std::memory_order_relaxed);
+            return keys;
+        }
+        // (the words still the other device's: the symbols too, 2.5 s at most - a search slower than that, or a string
+        // that cannot change, does not hold them back for good)
+        const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        int64_t since = waitingSince.load(std::memory_order_relaxed);
+        if (since == 0)
+        {
+            waitingSince.store(now, std::memory_order_relaxed);
+            since = now;
+        }
+        return now - since >= 2500 ? keys : !keys;
+    }
+
+    void switchTest(uint64_t vblank)
+    {
+        static const uint64_t at = std::getenv("TF_KEY_TEXT_SWITCH_TEST") ? std::strtoull(std::getenv("TF_KEY_TEXT_SWITCH_TEST"), nullptr, 10) : 0u;
+        static int stage = 0;
+        if (at == 0u || stage == 2)
+            return;
+        if (stage == 0)
+        {
+            ps2_host_input::setKeyboardPrompts(false); // (the controller's prompts until then)
+            stage = 1;
+        }
+        if (vblank >= at)
+        {
+            ps2_host_input::setKeyboardPrompts(true);
+            stage = 2;
+            std::fprintf(stderr, "[key text] TF_KEY_TEXT_SWITCH_TEST: the keyboard's prompts from VBlank %llu\n",
+                         static_cast<unsigned long long>(vblank));
+        }
+    }
+
     void frame(uint8_t *rdram)
     {
         if (!enabled())
@@ -597,7 +643,10 @@ namespace key_text
             if (loading == 0u && now < g_holdUntil && g_holdUntil - now > std::chrono::seconds(1))
                 g_holdUntil = now + std::chrono::seconds(1);
             if (now < g_holdUntil)
+            {
+                g_wordsFor = 2; // (a load: no hint up, the symbols need not wait)
                 return;
+            }
         }
         // (TODO 309: after a load, the strings let go that are still exactly as written - the boot table's, never freed - are
         // taken back with their originals; the others were freed with the load and stay let go)
@@ -623,12 +672,33 @@ namespace key_text
             }
         }
         const bool keyboard = ps2_host_input::keyboardPromptsShown();
-        // (Nothing to do until the keyboard is used: the controller's words are the game's own.)
+        // (TODO 348 (b)) A switch to the keyboard looks for the strings again: a hint opened since the last look shows
+        // copies of them of its own (two more on the training call), which only a new search finds - with the strings
+        // known from before, those kept "Left analog stick" beside a SPACE key until the next load. The button symbols
+        // wait for the words meanwhile (symbolsAsKeys), so the two switch together. One search for each switch: its
+        // result is then written, however long it took (asked for again by the clock, a search of more than a second -
+        // a slow or busy PC - was started over each time it ended, and the words never changed).
+        if (!keyboard)
+            g_switchLooked = false;
+        if (keyboard && !g_shown && g_searched && !g_searching.load() && !g_switchLooked)
+        {
+            g_searched = false;
+            g_switchSearch = true;
+        }
         if (!g_searched && !g_searching.load())
         {
-            if (!keyboard || (g_searches > 0 && now - g_lastSearch < std::chrono::seconds(20)) || g_searches >= 12)
+            if (!keyboard)
+            {
+                g_wordsFor = 0; // (the game's own words: the controller's)
+                g_switchSearch = false;
                 return;
-            ++g_searches;
+            }
+            if (!g_switchSearch && ((g_searches > 0 && now - g_lastSearch < std::chrono::seconds(20)) || g_searches >= 12))
+                return;
+            if (!g_switchSearch)
+                ++g_searches;
+            g_switchSearch = false;
+            g_switchLooked = true;
             g_lastSearch = now;
             g_searching = true;
             const unsigned epoch = g_epoch.load();
@@ -647,6 +717,8 @@ namespace key_text
         }
         if (empty)
         {
+            g_wordsFor = 2; // (nothing found that names a stick: the symbols need not wait)
+            g_shown = keyboard; // (no search at every switch for nothing: the 20 s looks below)
             // (the table not loaded yet when the keyboard was first used: looked for again a while later)
             if (keyboard && g_searches < 12 && now - g_lastSearch >= std::chrono::seconds(20))
                 g_searched = false;
@@ -659,6 +731,7 @@ namespace key_text
         g_lastCheck = now;
         if (!apply(rdram, keyboard, layoutText) && g_searches < 12 && now - g_lastSearch >= std::chrono::seconds(20))
             g_searched = false; // (search again)
+        g_wordsFor = keyboard ? 1 : 0;
         g_shown = keyboard;
         g_shownLayout = layoutText;
     }

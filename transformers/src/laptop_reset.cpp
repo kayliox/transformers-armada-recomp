@@ -81,7 +81,9 @@ namespace laptop_reset
 
         void tell(const std::string &backup)
         {
-            const std::string text = "Your graphics settings were reset to the recommended laptop settings for this update. "
+            // (TODO 356: not "laptop" - the test is the graphics card's own memory, and a desktop with a small card
+            // gets this too)
+            const std::string text = "Your graphics settings were reset to the recommended settings for this PC's graphics for this update. "
                                      "Your old settings are saved in " + backup + ".";
             std::fprintf(stderr, "[laptop reset] %s\n", text.c_str());
 #if defined(_WIN32)
@@ -180,11 +182,11 @@ namespace laptop_reset
         }
         if (removed.empty())
         {
-            std::fprintf(stderr, "[laptop reset] built-in or low-end graphics: the graphics settings were already the laptop "
+            std::fprintf(stderr, "[laptop reset] built-in or low-end graphics: the graphics settings were already the low-end "
                                  "defaults (%s marked)\n", file.string().c_str());
             return;
         }
-        std::fprintf(stderr, "[laptop reset] built-in or low-end graphics: back to the laptop defaults in %s (was: %s; the old "
+        std::fprintf(stderr, "[laptop reset] built-in or low-end graphics: back to the low-end defaults in %s (was: %s; the old "
                              "file kept as %s)\n", file.string().c_str(), removed.c_str(), backup.string().c_str());
         tell(backup.filename().string());
     }
