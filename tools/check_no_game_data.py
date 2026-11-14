@@ -33,7 +33,9 @@ GAME_TYPES = {
 }
 GAME_NAMES = {"slus_206.68", "sles_523.88", "system.cnf"}
 MAX_BYTES = 5 * 1024 * 1024
-ALLOWED: set[str] = set()   # (exact repo paths reviewed as ours)
+ALLOWED: set[str] = {        # (exact repo paths reviewed as ours)
+    "tools/ffmpeg_static/prebuilt/ffmpeg-7.1-tfa-static-msvc-x64.zip",  # FFmpeg's libraries, LGPL (TODO 371: BUILD.txt inside)
+}
 
 
 def git(*args: str) -> str:

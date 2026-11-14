@@ -138,6 +138,12 @@ namespace nr::frame
     inline std::atomic<float> g_clarityStrength{-1.0f};
     inline float clarityStrength() { return strengthOf(g_clarityStrength, "TF_NATIVE_CLARITY_STRENGTH", kClarityStrengthDefault, 1.0f); }
     inline void setClarityStrength(float s) { g_clarityStrength.store(std::clamp(s, 0.0f, 1.0f), std::memory_order_relaxed); }
+    // (TODO 349 (c), TF_NATIVE_SOFT_SUN: how much of the game's own direct sunlight on the lit characters and vehicles is
+    // taken away - 0 none (the game's, the default), 0.5 soft, 1 softer; nr_passes.cpp's lit metal. Read from the
+    // environment at first use, then set live.)
+    inline std::atomic<float> g_softSun{-1.0f};
+    inline float softSun() { return strengthOf(g_softSun, "TF_NATIVE_SOFT_SUN", 0.0f, 1.0f); }
+    inline void setSoftSun(float s) { g_softSun.store(std::clamp(s, 0.0f, 1.0f), std::memory_order_relaxed); }
     // The render scale (TF_NATIVE_RENDER_SCALE, the F1 setting, 25..100, default 100): the picture drawn with that share of
     // the window's lines and shown enlarged to it - for graphics cards that cannot fill the screen's pixels at the game's
     // rate. TF_NATIVE_HEIGHT, when set, still fixes the lines. Read from the environment at first use, then set live.

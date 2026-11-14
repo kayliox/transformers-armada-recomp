@@ -7,3 +7,5 @@
 .githooks/* text eol=lf
 # The Linux scripts (build.sh, setup.sh, update.sh, play.sh) run under bash: LF line endings too.
 *.sh text eol=lf
+# The Windows FFmpeg the port links in (tools/ffmpeg_static): a zip, never touched by line endings.
+tools/ffmpeg_static/prebuilt/*.zip binary

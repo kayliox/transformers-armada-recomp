@@ -1,5 +1,35 @@
 # What's new
 
+## 0.7.7
+
+**New**
+- F1 > Graphics > Softer sunlight on characters (native renderer): Off (the default, as the game has it), Soft or
+  Softer. The game lights the Autobots and their vehicles far more strongly in direct sun than in shade, until bright
+  paint turns almost white; this tones that strong light down. Shade and the enemies are not changed.
+
+**Changed**
+- Local contrast no longer makes what is already bright brighter: a sunlit car in the grass was lifted as a whole and
+  its paint went white. Rocks, ice and metal keep their extra detail.
+- Windows: the movie decoder (FFmpeg, cut down to what the game uses) is now built into the game, so no FFmpeg files sit
+  beside it any more: fewer files that Windows' Smart App Control can refuse. It cannot stop Smart App Control from
+  judging the game itself; see the troubleshooting page.
+
+**Fixed**
+- An update that stopped at the link with "LNK1136" (a damaged file) no longer stops there every time you press Try
+  again. When a compiled file in the build folder was damaged after it was made (a crash or the PC switched off before
+  the file reached the disk, an antivirus, a disk fault), every later build took it as finished and failed at the same
+  place. The build now finds such a file, makes it again by itself and says so. Thanks to SirCebollo.
+- Very far 3D (and Full 3D) no longer drop the game to half speed in thick forest. Since 0.7.3 they could make so many
+  trees 3D that the picture fell to about 15 a second; now at most 2,200 trees are 3D at once and the farthest stay
+  flat. Near 3D, the default, is not changed.
+- Photo mode (F8): the Autobot knocked down no longer keeps tumbling while photo mode is on, looping sounds no longer
+  play on, and F8 does nothing during a cutscene or a movie (a short note says so). Thanks to bbatts.
+- The flying enemies' motion trails were drawn too bright. With Motion trails set to Original they now look as on the
+  console, thin dark streaks behind the body, instead of large pale sheets over it; with Smooth (the default) the soft
+  trail now takes the body's own colour instead of white. Thanks to bbatts.
+- Shiny metal (such as Hot Shot's chrome) no longer shows black and white dots on faces turned away from the
+  camera, a speckle that came with 0.7.1's sharper reflections. Thanks to bbatts.
+
 ## 0.7.6
 
 **Fixed**

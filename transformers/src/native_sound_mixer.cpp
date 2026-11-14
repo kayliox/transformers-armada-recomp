@@ -21,6 +21,8 @@
 
 #include "native_sound_mixer.h"
 
+#include <atomic>
+
 #include "native_sound_data.h"
 #include "pad_speaker.h"
 
@@ -47,6 +49,7 @@ namespace native_sound::mixer
         constexpr double kRate = 48000.0;
         constexpr int kChannels = 48;
         constexpr double kMaxRenderSeconds = 0.25; // a longer gap (a load) is skipped, not mixed
+        std::atomic<bool> g_held{false}; // (TODO 369: photo mode - holdVoices)
         // The output level: the emulated SPU2's comes out at half of tone x envelope x volume word,
         // for voices and streams alike (the A/B of 2026-10-22: menu music 2.00x at correlation 0.996,
         // the title jingle 1.9x), so the mix is halved to sound as the game always has here.
@@ -1003,6 +1006,8 @@ namespace native_sound::mixer
         // (TODO 213) toPad: the game alerts go to padL / padR instead of the PC's mix (pad_speaker.h).
         void mixVoices(float &dryL, float &dryR, float &sendL, float &sendR, bool toPad, float &padL, float &padR)
         {
+            if (g_held.load(std::memory_order_relaxed))
+                return; // (photo mode: every voice where it is, unheard, until it is let go)
             const bool req = reqLog(); // (fixed for the process: read once a sample, not once a voice)
             for (auto &[handle, v] : g_voices)
             {
@@ -1610,6 +1615,8 @@ namespace native_sound::mixer
         if (reqLog())
             std::fprintf(stderr, "[ns req] %.3f SILENCE all voices (%d were playing)\n", g_reqClock, n);
     }
+
+    void holdVoices(bool held) { g_held.store(held, std::memory_order_relaxed); }
 
     void setReservedChannels(int channels)
     {

@@ -1,0 +1,39 @@
+# The game's own FFmpeg for Windows (TODO 371): FFmpeg 7.1 cut down to the MPEG-2 decoder, its parser and swscale,
+# built as static MSVC libraries by tools/ffmpeg_static/build.sh. Run by hand (or by a push to a branch named
+# ffmpeg-static*); the zip is kept as the run's artifact. Publishing it as a release asset is a separate, manual step;
+# the game's build then fetches that asset by its URL and SHA-256 (PS2Recomp runtime patch, ps2xRuntime/CMakeLists.txt).
+name: FFmpeg static (Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["ffmpeg-static*"]
+    paths: ["tools/ffmpeg_static/**", ".github/workflows/ffmpeg-static.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          path-type: inherit
+          install: make diffutils nasm zip xz curl tar
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          # (MSYS2's own link.exe would shadow MSVC's: off the PATH)
+          rm -f /usr/bin/link.exe
+          bash tools/ffmpeg_static/build.sh "$PWD/ffwork" "$PWD/ffmpeg-7.1-tfa-static-msvc-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-7.1-tfa-static-msvc-x64
+          path: ffmpeg-7.1-tfa-static-msvc-x64.zip
+          if-no-files-found: error

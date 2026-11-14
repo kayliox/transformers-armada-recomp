@@ -42,6 +42,9 @@ namespace native_sound::mixer
     void endPacket();                // (TODO 290 (10)) a frame packet's end: an engine loop keyed off at a transformation fades
     void forgetPlay(int32_t handle); // a held key-on dropped (the voice stopped or destroyed)
     void silenceVoices();
+    // (TODO 369) Photo mode: while held, no voice is mixed or moves on - each keeps its place in its data, its envelope and
+    // its loop - and the streams (the music) play on. Any thread.
+    void holdVoices(bool held);
     void setReservedChannels(int channels);
 
     // ---- streams ---------------------------------------------------------------------

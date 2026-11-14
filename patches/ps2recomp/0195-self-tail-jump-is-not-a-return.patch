@@ -1,0 +1,149 @@
+Subject: [PATCH] A function that tail-jumps to its own address has not returned (TODO 357)
+
+PS2Runtime::afterCall takes "the callee left pc at its own entry" for "it did not set pc (a stub): it has returned"
+and puts the caller's return address in. A jump through a pointer can target the jumping function itself: a
+decorator that forwards a virtual to its child's same slot by `jr $t9`, when the child shares the function
+(slChainedPositionBehaviour::vfunc_02 on a spread behaviour over a sphere behaviour; flStreamDecorator's
+forwarders on nested decorators; 28 functions of the game have this shape). The jump was dropped and the child
+never got the call - unless a checkpoint happened to be due at the jump, when the old way through the dispatcher
+entered it.
+
+dispatchGuestBranch now remembers a jump's target and the call level it was made at (two thread-local words, in
+ps2_runtime.cpp only: no header changes), and afterCall applies its rule only when the callee did not just jump
+to its own entry at that level. The callee is then entered again by afterCall's own continuation (the same
+checkpoints as for any other address a call went on at), or by the dispatcher where that is off. A stub that
+left pc alone records nothing and is "returned" as before. Nothing new can spin: one more entry per jump, each
+behind a checkpoint; 2^20 such jumps in one go are logged once and left to the dispatcher, as any guest loop.
+
+The jump record is read once and cleared on every way out of a call's end (a stop, a thread's end, the
+continuation, a thread switch's unwind): it is not carried past the call it was made in.
+
+PS2X_SELF_JUMP=0: the old rule (A/B). PS2X_SELF_JUMP_LOG=1: `[runtime] self jump: <function> ...` lines at the
+1st, 2nd, 4th, 8th ... jump of each function, with either rule.
+
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 3411b3d..7ea8961 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -2025,6 +2025,34 @@ namespace
+     const bool g_plainSwitches = !g_ps2HotStats && !envOff("PS2X_DISPATCH_LEAN") && !envOn("PS2X_DISPATCH_HISTORY");
+     const bool g_plainCalls = g_plainSwitches && !envOff("PS2X_LEAN_CALL") && !envOff("PS2X_DIRECT_CALLS");
+     const bool g_plainBranchCalls = g_plainSwitches && !envOff("PS2X_LEAN_BRANCH");
++
++    // (0195, TODO 357) A function that tail-jumps to its OWN address is not a function that returned.
++    // afterCall takes "the callee left pc at its own entry" for "it did not set pc: a stub, it has returned" and puts
++    // the caller's return address in. But a jump through a pointer can target the jumping function itself: a
++    // decorator forwarding a virtual to its child's same slot (`lw $a0, child; lw $t9, vtable; lw $t9, slot($t9);
++    // jr $t9`) whose child shares the function - slChainedPositionBehaviour::vfunc_02 on a spread behaviour over a
++    // sphere behaviour, flStreamDecorator's forwarders on nested decorators. The jump was dropped: the child never
++    // got the call. dispatchGuestBranch now remembers a jump's target and the call level it was made at; afterCall
++    // applies its rule only when the callee did not just jump there. A stub that merely left pc alone records
++    // nothing, so it is "returned" as before; nothing loops here that did not before - the callee is entered once
++    // more by the code below (its usual checkpoints), and a function that jumps to itself without end is a guest
++    // loop the dispatcher runs as it runs any other (kSelfJumpGuard jumps in one go: logged once, then left to it).
++    // PS2X_SELF_JUMP=0: the old rule (A/B). PS2X_SELF_JUMP_LOG=1: each such jump counted by function, a line at
++    // 1, 2, 4, 8 ... (`[runtime] self jump`), honoured or cut short.
++    thread_local uint32_t t_jumpTarget = 0u, t_jumpLevel = 0u;
++    const bool g_selfJump = !envOff("PS2X_SELF_JUMP");
++    const bool g_selfJumpLog = envOn("PS2X_SELF_JUMP_LOG");
++    constexpr uint32_t kSelfJumpGuard = 1u << 20;
++    void noteSelfJump(uint32_t entry, uint32_t returnsTo, bool honoured)
++    {
++        static std::mutex mutex;
++        static std::unordered_map<uint32_t, uint64_t> counts;
++        std::lock_guard<std::mutex> lock(mutex);
++        const uint64_t n = ++counts[entry];
++        if ((n & (n - 1u)) == 0u)
++            std::fprintf(stderr, "[runtime] self jump: %08x jumps to its own entry (its caller goes on at %08x): %llu so far, %s\n", entry,
++                         returnsTo, static_cast<unsigned long long>(n), honoured ? "entered again" : "cut short (PS2X_SELF_JUMP=0)");
++    }
+ }
+ 
+ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+@@ -2079,6 +2107,11 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+             reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
+         }
+ 
++        if (kind != GuestBranchKind::Return)
++        {
++            t_jumpTarget = targetPc; // (0195: for afterCall - a jump to the jumping function's own entry is no return)
++            t_jumpLevel = g_ps2DispatchLevels.level;
++        }
+         ctx->pc = targetPc;
+         return false;
+     }
+@@ -2311,6 +2344,11 @@ template <typename Thread>
+ PS2_FORCEINLINE bool PS2Runtime::afterCall(uint8_t *rdram, R5900Context *ctx, Thread &thread, uint32_t targetPc,
+                                            uint32_t entryPc, uint32_t fallthroughPc, uint32_t level)
+ {
++    // (0195) The jump record is read once and cleared before any way out of a call's end - a stop, a thread's end
++    // (pc 0), the continuation below; dispatchUnwound clears it on a thread switch's unwind. (A call that ends on
++    // a lean path's fast return never made one that could match: its last transfer went to its own fallthrough.)
++    const bool jumpedToEntry = t_jumpTarget == entryPc && t_jumpLevel == level && entryPc != 0u;
++    t_jumpTarget = 0u;
+     if (isStopRequested() || ctx->pc == 0u)
+     {
+         return false;
+@@ -2319,9 +2357,13 @@ PS2_FORCEINLINE bool PS2Runtime::afterCall(uint8_t *rdram, R5900Context *ctx, Th
+     // A callee that leaves pc at its own entry normally just did not set it
+     // (e.g. a stub) and has returned; but one that yielded at a loop back to
+     // its first instruction has not, and must be resumed there.
++    // (0195) ... unless it just JUMPED there (a tail call of itself through a pointer): then it goes on below.
+     if (ctx->pc == entryPc && !(m_eeScheduler && m_eeScheduler->unwindingForCheckpoint()))
+     {
+-        ctx->pc = fallthroughPc;
++        if (jumpedToEntry && g_selfJumpLog)
++            noteSelfJump(entryPc, fallthroughPc, g_selfJump);
++        if (!(jumpedToEntry && g_selfJump))
++            ctx->pc = fallthroughPc;
+     }
+ 
+     // (FPS) A call left unfinished with nothing due: the callee went on somewhere else - a switch's
+@@ -2340,6 +2382,7 @@ PS2_FORCEINLINE bool PS2Runtime::afterCall(uint8_t *rdram, R5900Context *ctx, Th
+     {
+         for (uint32_t l = 1u; l < level; ++l)
+             g_ps2DispatchLevels.resumedByDispatcher[l] = true;
++        uint32_t selfJumps = 0u; // (0195: jumps of one function to its own entry in this go)
+         while (ctx->pc != fallthroughPc)
+         {
+             if (m_eeScheduler->unwindingForCheckpoint())
+@@ -2351,9 +2394,29 @@ PS2_FORCEINLINE bool PS2Runtime::afterCall(uint8_t *rdram, R5900Context *ctx, Th
+                 return false; // (the dispatcher's own checkpoint before entering it)
+             const uint32_t continuePc = ctx->pc;
+             pushDispatchPc(thread.history, continuePc);
++            t_jumpTarget = 0u;
+             fn(rdram, ctx, this);
+-            if (isStopRequested() || ctx->pc == 0u || ctx->pc == continuePc)
+-                return false; // (the dispatcher's business: a thread's end, a loop that yielded at its start)
++            const bool jumpedAgain = t_jumpTarget == continuePc && t_jumpLevel == level; // (0195: read once, cleared)
++            t_jumpTarget = 0u;
++            if (isStopRequested() || ctx->pc == 0u)
++                return false; // (the dispatcher's business: a thread's end)
++            if (ctx->pc == continuePc)
++            {
++                // (0195) it jumped to its own entry again (a chain of three or more): entered again here, as any
++                // other address it could have gone on at; else a loop that yielded at its start - the dispatcher's
++                if (g_selfJump && jumpedAgain && !m_eeScheduler->unwindingForCheckpoint())
++                {
++                    if (g_selfJumpLog)
++                        noteSelfJump(continuePc, fallthroughPc, true);
++                    if (++selfJumps < kSelfJumpGuard)
++                        continue;
++                    static std::atomic<bool> told{false};
++                    if (!told.exchange(true))
++                        std::fprintf(stderr, "[runtime] %08x jumped to its own entry %u times in one go: left to the dispatcher (a guest loop?)\n",
++                                     continuePc, kSelfJumpGuard);
++                }
++                return false;
++            }
+         }
+         // This call's caller goes on here: the dispatcher's checkpoint before entering it again.
+         if (m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
+@@ -2414,6 +2477,7 @@ PS2_NOINLINE bool PS2Runtime::callEnd(uint8_t *rdram, R5900Context *ctx, uint32_
+ void PS2Runtime::dispatchUnwound() noexcept
+ {
+     g_ps2DispatchLevels.level = 0u;
++    t_jumpTarget = 0u; // (0195: a thread switch's unwind leaves no jump record behind)
+ }
+ 
+ void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)

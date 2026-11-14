@@ -1985,9 +1985,10 @@ namespace mod_menu
             mergedRow("trees", "Trees",
                       "How far the trees are real 3D models; farther away the game shows its own flat trees. Console: as on "
                       "the PS2. Near 3D: about twice the console's distance. Far 3D: four times. Very far 3D: eight times. "
-                      "Full 3D: every tree in view is 3D, so far mountains look clean (up to 4,096 trees at once). More 3D "
-                      "trees cost frame rate, mostly processor time: in thick forest Far 3D draws about a fifth fewer "
-                      "pictures a second than Near 3D, Very far 3D and Full 3D a third to a half fewer.",
+                      "Full 3D: any tree in view can be 3D, so far mountains look clean. At most 2,200 trees are 3D at once; "
+                      "past that the farthest stay flat, so thick forest does not drop the game to half speed. More 3D trees "
+                      "cost frame rate, mostly processor time: in thick forest Far 3D draws a little fewer pictures a second "
+                      "than Near 3D, Very far 3D and Full 3D up to half as many.",
                       trees(), true);
             if (advanced("graphics-distance"))
             {

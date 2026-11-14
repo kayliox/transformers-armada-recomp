@@ -1,0 +1,139 @@
+Subject: [PATCH] FFmpeg linked statically on Windows from the port's own zip; PS2X_MPEG_HASH (TODO 371)
+
+Windows 11's Smart App Control refused two libraries of the prebuilt FFmpeg folder on a player's PC (unsigned, without
+cloud reputation), and the game could not start. The port now carries its own FFmpeg for Windows: a zip of static MSVC
+libraries (libavcodec.a, libavutil.a, libswscale.a: FFmpeg 7.1 cut down to the MPEG-2 decoder, its parser and swscale,
+which is all MPEG.cpp calls; built by the port's tools/ffmpeg_static/build.sh from FFmpeg's pinned source, LGPL 2.1+),
+tools/ffmpeg_static/prebuilt/. It is unpacked (its SHA-256 checked, no download) and linked into the executable; no
+FFmpeg DLL is copied beside it, and the ones an older build copied are removed. PS2X_FFMPEG_STATIC=OFF, or the zip
+missing: the prebuilt DLLs as before. A testing aid for the A/B of the two: PS2X_MPEG_HASH=1 logs each picture's hash, of
+the decoder's planes and of the RGBA made from them.
+---
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -441,10 +441,61 @@ else()
+ endif()
+ 
+ option(PS2X_ENABLE_FFMPEG "Enable FFmpeg-backed MPEG video decoding" ${PS2X_ENABLE_FFMPEG_DEFAULT})
++# (TODO 371) Windows: FFmpeg linked in from the port's own zip (tools/ffmpeg_static/prebuilt: built by tools/ffmpeg_static/
++# build.sh from FFmpeg's pinned source, LGPL 2.1+), checked by its SHA-256 - no download. OFF, or the zip not there: the
++# prebuilt DLLs as before.
++option(PS2X_FFMPEG_STATIC "Windows: FFmpeg linked into the executable from the port's static zip" ON)
++set(PS2X_FFMPEG_STATIC_ZIP "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/ffmpeg_static/prebuilt/ffmpeg-7.1-tfa-static-msvc-x64.zip"
++    CACHE FILEPATH "Windows: the static FFmpeg zip")
++set(PS2X_FFMPEG_STATIC_SHA256 "8405647d6c8fdb5cefd35902ddcc89f9416bafe697d4b2d3edd5d2141b225657" CACHE STRING "Windows: its SHA-256")
++set(PS2X_FFMPEG_LINKED_STATIC FALSE CACHE INTERNAL "FFmpeg linked in (no DLLs beside the executable)")
+ 
+ if(NOT PS2X_ENABLE_FFMPEG)
+     message(STATUS "FFmpeg disabled; MPEG video decode falls back to stub frames")
+     add_library(ffmpeg INTERFACE)
++elseif(WIN32 AND PS2X_FFMPEG_STATIC AND EXISTS "${PS2X_FFMPEG_STATIC_ZIP}")
++    # (TODO 371) The game's own FFmpeg: 7.1 cut down to the MPEG-2 decoder, its parser and swscale, static MSVC libraries
++    # built by the port's tools/ffmpeg_static/build.sh (its GitHub workflow), unpacked from the port's zip, its SHA-256 checked.
++    # Linked into the executable: no FFmpeg DLL beside it - fewer files Windows (Smart App Control) can refuse. LGPL 2.1+.
++    include(ExternalProject)
++    set(FFMPEG_PREFIX_DIR "${CMAKE_BINARY_DIR}/ThirdParty/ffmpeg-static-prefix")
++    set(FFMPEG_SOURCE_DIR "${FFMPEG_PREFIX_DIR}/src/ffmpeg_static_external")
++    set(FFMPEG_INCLUDE_DIR "${FFMPEG_SOURCE_DIR}/include")
++    set(FFMPEG_LIB_DIR "${FFMPEG_SOURCE_DIR}/lib")
++    set(ffmpeg_static_hash "")
++    if(PS2X_FFMPEG_STATIC_SHA256)
++        set(ffmpeg_static_hash URL_HASH "SHA256=${PS2X_FFMPEG_STATIC_SHA256}")
++    endif()
++    ExternalProject_Add(ffmpeg_static_external
++        URL "${PS2X_FFMPEG_STATIC_ZIP}"
++        ${ffmpeg_static_hash}
++        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
++        PREFIX "${FFMPEG_PREFIX_DIR}"
++        CONFIGURE_COMMAND ""
++        BUILD_COMMAND ""
++        INSTALL_COMMAND ""
++        BUILD_BYPRODUCTS
++        "${FFMPEG_LIB_DIR}/libavcodec.a"
++        "${FFMPEG_LIB_DIR}/libavutil.a"
++        "${FFMPEG_LIB_DIR}/libswscale.a"
++    )
++    file(MAKE_DIRECTORY "${FFMPEG_INCLUDE_DIR}") # (an imported target's include folder must exist at configure time)
++    foreach(ffmpeg_part avcodec avutil swscale)
++        add_library(ffmpeg_${ffmpeg_part} STATIC IMPORTED GLOBAL)
++        set_target_properties(ffmpeg_${ffmpeg_part} PROPERTIES
++            IMPORTED_LOCATION "${FFMPEG_LIB_DIR}/lib${ffmpeg_part}.a"
++            INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_INCLUDE_DIR}"
++        )
++        add_dependencies(ffmpeg_${ffmpeg_part} ffmpeg_static_external)
++    endforeach()
++    add_library(ffmpeg INTERFACE)
++    # (avutil's random seed: bcrypt)
++    target_link_libraries(ffmpeg INTERFACE ffmpeg_avcodec ffmpeg_swscale ffmpeg_avutil bcrypt user32 advapi32)
++    # (nothing to copy beside the executable: the DLL step left out, also for a folder configured before)
++    set(PS2X_FFMPEG_BIN_DIR "" CACHE INTERNAL "Directory containing FFmpeg runtime DLLs")
++    set(PS2X_COPY_FFMPEG_DLLS_SCRIPT "" CACHE INTERNAL "Script used to stage FFmpeg runtime DLLs beside executables")
++    set(PS2X_FFMPEG_LINKED_STATIC TRUE CACHE INTERNAL "FFmpeg linked in (no DLLs beside the executable)")
++    message(STATUS "FFmpeg: linked in from ${PS2X_FFMPEG_STATIC_ZIP}")
+ elseif(WIN32)
+     include(ExternalProject)
+ 
+@@ -549,6 +600,15 @@ function(ps2x_stage_ffmpeg_runtime_dlls target_name)
+         return()
+     endif()
+ 
++    if(PS2X_FFMPEG_LINKED_STATIC)
++        # (TODO 371: FFmpeg linked in - the prebuilt folder's DLLs an older build copied beside the executable removed)
++        set(old_dlls "")
++        foreach(old IN ITEMS avcodec-61 avdevice-61 avfilter-10 avformat-61 avutil-59 brotlicommon brotlidec brotlienc freetype harfbuzz Iex-3_3 IlmThread-3_3 Imath-3_1 jxl_cms jxl_threads jxl libsharpyuv libwebp libwebpdecoder libwebpdemux libwebpmux OpenEXR-3_3 OpenEXRCore-3_3 OpenEXRUtil-3_3 SDL2 swresample-5 swscale-8 zlib1)
++            list(APPEND old_dlls "$<TARGET_FILE_DIR:${target_name}>/${old}.dll")
++        endforeach()
++        add_custom_command(TARGET ${target_name} POST_BUILD COMMAND "${CMAKE_COMMAND}" -E rm -f ${old_dlls} VERBATIM)
++        return()
++    endif()
+     if(NOT PS2X_FFMPEG_BIN_DIR OR NOT PS2X_COPY_FFMPEG_DLLS_SCRIPT)
+         return()
+     endif()
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/MPEG.cpp
+@@ -25,6 +25,8 @@ extern "C"
+ 
+ #include "Syscalls/Helpers/State.h"
+ 
++#include <cstdio>
++
+ // This file's traces can be switched on at run time (PS2X_MPEG_LOG=1), without building
+ // the whole runtime with its aggressive logging.
+ namespace
+@@ -481,6 +483,36 @@ namespace ps2_stubs
+                     return false;
+                 }
+ 
++                // (TODO 371, a testing aid) PS2X_MPEG_HASH=1: each picture's FNV-1a hash, of the decoder's planes and of the
++                // RGBA made from them - an A/B of two FFmpeg builds (the prebuilt DLLs, the static one) picture by picture.
++                static const bool hashLog = []
++                {
++                    const char *env = std::getenv("PS2X_MPEG_HASH");
++                    return env != nullptr && env[0] == '1';
++                }();
++                if (hashLog)
++                {
++                    const auto fnv = [](uint64_t h, const uint8_t *p, size_t n)
++                    {
++                        for (size_t i = 0; i < n; ++i)
++                            h = (h ^ p[i]) * 1099511628211ull;
++                        return h;
++                    };
++                    uint64_t planes = 1469598103934665603ull;
++                    for (int plane = 0; plane < 3 && m_frame->data[plane]; ++plane)
++                    {
++                        const int rows = plane == 0 ? height : (height + 1) / 2, bytes = plane == 0 ? width : (width + 1) / 2;
++                        for (int y = 0; y < rows; ++y)
++                            planes = fnv(planes, m_frame->data[plane] + static_cast<ptrdiff_t>(y) * m_frame->linesize[plane],
++                                         static_cast<size_t>(bytes));
++                    }
++                    const uint64_t rgba = fnv(1469598103934665603ull, decoded.rgba.data(), decoded.rgba.size());
++                    static uint64_t picture = 0;
++                    std::fprintf(stderr, "[mpeg hash] %llu %dx%d fmt %d pts %lld yuv %016llx rgba %016llx\n",
++                                 static_cast<unsigned long long>(picture++), width, height, static_cast<int>(srcFormat),
++                                 static_cast<long long>(decoded.pts90k), static_cast<unsigned long long>(planes),
++                                 static_cast<unsigned long long>(rgba));
++                }
+                 frames.push_back(std::move(decoded));
+                 return true;
+             }

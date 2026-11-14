@@ -1644,7 +1644,10 @@ namespace nr::frame
             if (!copy)
                 return false;
             dev.use(picture.id, gfx::UseFor::Draw);
-            const float k[4] = {1.0f / static_cast<float>(g.pictureW), 1.0f / static_cast<float>(g.pictureH), 1.2f * clarityStrength(), 0.0f};
+            // (w: TODO 349 (b) - the lift spares what is already bright; TF_NATIVE_CLARITYROOM=0: lifted whole, as before)
+            static const bool clarityRoomOff = std::getenv("TF_NATIVE_CLARITYROOM") && *std::getenv("TF_NATIVE_CLARITYROOM") == '0';
+            const float k[4] = {1.0f / static_cast<float>(g.pictureW), 1.0f / static_cast<float>(g.pictureH), 1.2f * clarityStrength(),
+                                clarityRoomOff ? 0.0f : 1.0f};
             const bool done = pass(gfx::Effect::LocalContrast, picture.id, g.pictureW, g.pictureH, copy, dev.view(bloom::level[1]), k, 4u);
             dev.bindTextures(0u, 0u, 0u);
             return done;
@@ -3770,6 +3773,11 @@ namespace nr::frame
                         c.wrapS[3] = source->gsW;
                         c.wrapT[3] = source->gsH;
                     }
+                    // (TODO 335 b) TF_NATIVE_CLAMPFOOT=0: the shader's CLAMP hold takes the pixel's footprint whole, as
+                    // before (flagged as + 0.25 on the modes, which every test of them reads as the same mode).
+                    static const bool clampFootWhole = std::getenv("TF_NATIVE_CLAMPFOOT") && *std::getenv("TF_NATIVE_CLAMPFOOT") == '0';
+                    if (clampFootWhole)
+                        c.wrapS[0] += 0.25f, c.wrapT[0] += 0.25f;
                 }
                 static const bool pinnedEdges = []() { const char *e = std::getenv("TF_NATIVE_PINNEDEDGES"); return !(e && *e == '0'); }();
                 if (const auto sq = squeezes.find(&draw); sq != squeezes.end())

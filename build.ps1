@@ -224,6 +224,93 @@ function RunLogged {
     }
 }
 
+# (TODO 378) A damaged object file: a build that stopped while the compiler was writing one (an update cancelled or
+# stopped, a crash, the PC switched off) can leave it cut short or empty with a fresh time, and MSBuild then counts it
+# as up to date, so every later build fails at the same link (a player's: "batch_00270000.obj : fatal error LNK1136").
+# Before a build the empty ones are deleted (Remove-EmptyBuildFiles); after a failed build the files the linker or the
+# librarian refused are found by their error code - never by the message, which is in the PC's language - deleted and
+# the build is run once more (Get-RefusedObjects, Invoke-HealingBuild).
+function Remove-EmptyBuildFiles([string]$Dir) {
+    if (-not (Test-Path -LiteralPath $Dir)) { return }
+    $gone = [Collections.Generic.List[string]]::new()
+    try {
+        foreach ($fi in [IO.DirectoryInfo]::new($Dir).EnumerateFiles("*", [IO.SearchOption]::AllDirectories)) {
+            if ($fi.Length -eq 0 -and ($fi.Extension -ieq ".obj" -or $fi.Extension -ieq ".lib")) {
+                try { $fi.Delete(); $gone.Add($fi.Name) } catch {}
+            }
+        }
+    } catch {}
+    if ($gone.Count) {
+        $text = "$($gone.Count) empty compiled file(s) left by a build that stopped half way were deleted, so they are made again: $($gone -join ', ')"
+        Write-Host "  $text" -ForegroundColor Yellow
+        Write-StepLog "build: $text"
+    }
+}
+# The object files a failed build's output says the linker or the librarian could not read: LNK1136 (invalid or
+# corrupt file), LNK1107 (invalid or corrupt file: cannot read at ...), LNK1106 (invalid file or disk full: cannot seek
+# to ... - what a file cut short gives, found by test), LNK1143 and LNK1235 (a corrupt section or symbol table), and
+# LNK1104 (cannot open file) when that file is empty. Only files under one of $Roots that are there. A name without a folder is read from the project's folder
+# (MSBuild adds the project in [brackets] at the end of the line).
+function Get-RefusedObjects([string[]]$Lines, [string[]]$Roots) {
+    $found = [Collections.Generic.List[string]]::new()
+    $roots = @($Roots | Where-Object { $_ } | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\') + '\' })
+    foreach ($line in $Lines) {
+        $file = $null
+        $empty = $false
+        $m = [regex]::Match($line, '^\s*(?<file>[^\[\r\n]+?\.obj)\s*:[^\[]*?\b(?:LNK1136|LNK1107|LNK1106|LNK1143|LNK1235)\b', 'IgnoreCase')
+        if ($m.Success) {
+            $file = $m.Groups['file'].Value.Trim()
+        } elseif ($line -match '\bLNK1104\b') {
+            $qc = '[''"\u2018\u2019\u201A\u201C\u201D\u201E\u00AB\u00BB]'    # (the quotes round the name: any language's)
+            $q = [regex]::Match($line, $qc + '(?<file>(?:(?!' + $qc + ').)+?\.obj)' + $qc, 'IgnoreCase')
+            if ($q.Success) { $file = $q.Groups['file'].Value.Trim(); $empty = $true }
+        }
+        if (-not $file) { continue }
+        try {
+            if (-not [IO.Path]::IsPathRooted($file)) {
+                $p = [regex]::Match($line, '\[(?<proj>[^\[\]]+\.(?:vcxproj|vcproj))\]\s*$', 'IgnoreCase')
+                if (-not $p.Success) { continue }
+                $file = Join-Path (Split-Path $p.Groups['proj'].Value -Parent) $file
+            }
+            $file = [IO.Path]::GetFullPath($file)
+        } catch { continue }
+        if (-not ($roots | Where-Object { $file.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) })) { continue }
+        if (-not [IO.File]::Exists($file)) { continue }
+        if ($empty -and ([IO.FileInfo]::new($file)).Length -ne 0) { continue }
+        if (-not ($found | Where-Object { $_ -ieq $file })) { $found.Add($file) }
+    }
+    , $found.ToArray()
+}
+# A cmake --build (its output through $Each, a script block given each line, which passes on what is shown) that
+# heals damaged object files: the refused ones deleted, the build run again. The linker stops at the first damaged
+# file it meets, so a build stopped with several compiles under way needs a round for each (found by test: a third
+# file was named after the second); it stops with the file's name when a file it made again is refused again, or after
+# 24 rounds.
+function Invoke-HealingBuild([string[]]$Arguments, [string]$Root, [scriptblock]$Each) {
+    $healed = [Collections.Generic.List[string]]::new()
+    for ($attempt = 1; ; $attempt++) {
+        $lines = [Collections.Generic.List[string]]::new()
+        $ErrorActionPreference = "Continue"
+        try { & cmake $Arguments 2>&1 | ForEach-Object { $line = "$_"; $lines.Add($line); & $Each $line } }
+        catch { $ErrorActionPreference = "Stop"; Assert-NotBlocked "cmake" -1 "$_"; throw }
+        $code = $LASTEXITCODE
+        $ErrorActionPreference = "Stop"
+        if ($code -eq 0) { return }
+        $refused = Get-RefusedObjects $lines.ToArray() @($Root)
+        if ($refused.Count -eq 0) { Assert-NotBlocked "cmake" $code; throw "cmake --build failed with exit code $code" }
+        $names = ($refused | ForEach-Object { Split-Path $_ -Leaf }) -join ", "
+        if ($attempt -gt 24 -or ($refused | Where-Object { $healed -icontains $_ })) {
+            throw "The build stopped again at a damaged file the compiler made: $($refused[0]). Delete that file and run " +
+                "the update (or the build) again: it is made again. If it stops at another one, delete the folder " +
+                "$(Split-Path $refused[0] -Parent) instead: everything in it is compiled again (10 to 20 minutes)."
+        }
+        foreach ($f in $refused) { Remove-Item -LiteralPath $f -Force; $healed.Add($f) }
+        $text = "a file the compiler made earlier was damaged ($names), most likely left by a build that stopped half way: deleted, the build runs once more and makes it again"
+        Write-Host "  A$($text.Substring(1))" -ForegroundColor Yellow
+        Write-StepLog "build: $text"
+    }
+}
+
 foreach ($tool in "cmake", "python", "git") {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
         throw "$tool was not found on PATH. See README.md for the requirements."
@@ -406,7 +493,8 @@ if (-not $SkipRecompile) {
     # effect only at the build after - a new file would be left out of this one)
     Run cmake (@("-S", (Join-Path $Root "PS2Recomp"), "-B", $ToolsBuild,
                  "-DPS2X_BUILD_RUNTIME=OFF", "-DPS2X_BUILD_TEST=OFF", "-DPS2X_BUILD_STUDIO=OFF") + $genArgs)
-    Run cmake (@("--build", $ToolsBuild, "--config", $Config, "--target", "ps2_recomp", "ps2_analyzer", "--") + $BuildParallel + @("/v:m"))
+    Remove-EmptyBuildFiles $ToolsBuild    # (TODO 378)
+    Invoke-HealingBuild (@("--build", $ToolsBuild, "--config", $Config, "--target", "ps2_recomp", "ps2_analyzer", "--") + $BuildParallel + @("/v:m")) $ToolsBuild { param($l) $l }
     # (both there right after the build: an antivirus that took one says so here, not as a puzzling failure later)
     foreach ($t in "ps2xAnalyzer\$Config\ps2_analyzer.exe", "ps2xRecomp\$Config\ps2_recomp.exe") { Assert-NotBlocked (Join-Path $ToolsBuild $t) }
 
@@ -633,36 +721,33 @@ $compiledBatches = 0
 $lastCompileAt = $null
 $lastShown = -100.0
 $buildStart = $Clock.Elapsed.TotalSeconds
-$ErrorActionPreference = "Continue"
-& cmake (@("--build", $Build, "--config", $Config, "--target", "TransformersRecomp", "tfa_launcher", "--") + $BuildParallel + @("/v:m", "/p:UseMultiToolTask=true")) 2>&1 | ForEach-Object {
-    $line = "$_"
+Remove-EmptyBuildFiles $Build    # (TODO 378)
+Invoke-HealingBuild (@("--build", $Build, "--config", $Config, "--target", "TransformersRecomp", "tfa_launcher", "--") + $BuildParallel + @("/v:m", "/p:UseMultiToolTask=true")) $Build {
+    param($line)
     if ($line -match '^\s+([\w.+-]+)\.(c|cc|cpp|cxx)\s*$') {
-        $compiled++
-        if ($Matches[1].StartsWith("batch_")) { $compiledBatches++ }
+        $script:compiled++
+        if ($Matches[1].StartsWith("batch_")) { $script:compiledBatches++ }
         $now = $Clock.Elapsed.TotalSeconds
-        $lastCompileAt = $now
-        if ($now - $lastShown -ge 10 -or $compiled -eq 1) {
-            $lastShown = $now
-            $progressLine = if ($forecast -and $compiled -lt $forecast.Total) {
+        $script:lastCompileAt = $now
+        if ($now - $script:lastShown -ge 10 -or $script:compiled -eq 1) {
+            $script:lastShown = $now
+            $progressLine = if ($forecast -and $script:compiled -lt $forecast.Total) {
                 # what is left at the record's rates, corrected by how this build is going so far
-                $left = Expected ([Math]::Max(0, $forecast.Batches - $compiledBatches)) ([Math]::Max(0, $forecast.Other - ($compiled - $compiledBatches)))
-                $done = Expected $compiledBatches ($compiled - $compiledBatches)
-                if ($compiled -ge 8 -and $done -gt 0) { $left *= [Math]::Min(4.0, [Math]::Max(0.25, ($now - $buildStart) / $done)) }
-                "    compiling the game: $compiled of about $($forecast.Total) files, $(Format-Estimate ($left + $linkTime)) left"
+                $left = Expected ([Math]::Max(0, $forecast.Batches - $script:compiledBatches)) ([Math]::Max(0, $forecast.Other - ($script:compiled - $script:compiledBatches)))
+                $done = Expected $script:compiledBatches ($script:compiled - $script:compiledBatches)
+                if ($script:compiled -ge 8 -and $done -gt 0) { $left *= [Math]::Min(4.0, [Math]::Max(0.25, ($now - $buildStart) / $done)) }
+                "    compiling the game: $script:compiled of about $($forecast.Total) files, $(Format-Estimate ($left + $linkTime)) left"
             } elseif ($forecast) {
                 # (MSBuild names a file when it starts it: the last ones are still compiling)
-                "    compiling the game: $compiled files started, finishing them and linking"
+                "    compiling the game: $script:compiled files started, finishing them and linking"
             } else {
-                "    compiling the game: $compiled file(s) so far"
+                "    compiling the game: $script:compiled file(s) so far"
             }
             Write-StepLog "build: $progressLine"
             $progressLine
         }
     } else { $line }
-}
-$code = $LASTEXITCODE
-$ErrorActionPreference = "Stop"
-if ($code -ne 0) { throw "cmake --build failed with exit code $code" }
+}    # (a failed build: Invoke-HealingBuild throws)
 Close-Stage
 $end = $Clock.Elapsed.TotalSeconds
 $compileSeconds = if ($lastCompileAt) { $lastCompileAt - $buildStart } else { 0 }

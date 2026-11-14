@@ -21,7 +21,7 @@ It uses the components below. Each keeps its own licence.
 | [SMAA](https://github.com/iryoku/smaa) | Jorge Jimenez and others | MIT-style (see its `LICENSE.txt`) | Anti-aliasing (`transformers/native_render/ext/smaa`) |
 | [FidelityFX CAS](https://github.com/GPUOpen-Effects/FidelityFX-CAS) | Advanced Micro Devices, Inc. | MIT | The sharpening's contrast-adaptive weights, written after it (`aaSharpen` in `transformers/native_render/nr_d3d.cpp`) |
 | [FidelityFX Super Resolution 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) | Advanced Micro Devices, Inc. | MIT | The window's upscaler at render scales under 100% - EASU and RCAS, ported to GLSL (`fsr::kEasu`, `fsr::kRcas` in `transformers/native_render/nr_present.cpp`) |
-| [FFmpeg](https://ffmpeg.org/) | The FFmpeg developers | LGPL-2.1 or later | Movie playback. Shared libraries (DLLs) downloaded during the build and placed beside the game. Source: <https://ffmpeg.org/download.html> |
+| [FFmpeg](https://ffmpeg.org/) | The FFmpeg developers | LGPL-2.1 or later | Movie playback. On Windows: FFmpeg 7.1 cut down to the MPEG-2 decoder and swscale, static libraries in `tools/ffmpeg_static/prebuilt/` (built by `tools/ffmpeg_static/build.sh` from the release tarball pinned there; `BUILD.txt` and `COPYING.LGPLv2.1` inside the zip) and linked into the game; you rebuild and relink it from source yourself. On Linux: the system's FFmpeg. Source: <https://ffmpeg.org/download.html> |
 
 ## Built into the game with the Vulkan backend
 

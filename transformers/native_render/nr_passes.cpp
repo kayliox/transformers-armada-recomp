@@ -13,6 +13,7 @@
 // 3 the sphere map of the view reflected about the normal (0x2800); ... 9 S = N.V, T the mesh's (0x1e70 of 6b20).
 // Alpha modes: 0 the colour's; 1 the distance from a plane (0x3660), 0 to 128.
 #include "nr_types.h"
+#include "nr_frame.h" // (frame::softSun: TODO 349 (c))
 
 #include <algorithm>
 #include <atomic>
@@ -145,6 +146,37 @@ namespace nr
         if (const Qword *lighting = sh.blockOf(Routine::LitMeshPrepare))
             if (const Qword *output = sh.blockOf(Routine::LitMeshDraw))
             {
+                {
+                    // (TODO 349, a measuring aid: TF_NATIVE_LIGHTLOG=2 - the lit metal's light as the game hands it over, each
+                    // different set once a second at most, 12 sets a second: the two lights' colours (q6, q10), their scale
+                    // (q5.w) and the ambient (q9.w), the material (q7) and the reflection's strength (q8.xy).)
+                    static const bool lightLog = std::getenv("TF_NATIVE_LIGHTLOG") && *std::getenv("TF_NATIVE_LIGHTLOG") == '2';
+                    if (lightLog)
+                    {
+                        static int64_t windowNs = 0;
+                        static std::vector<uint64_t> seen;
+                        const int64_t nowNs = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                       std::chrono::steady_clock::now().time_since_epoch())
+                                                                       .count());
+                        if (nowNs - windowNs > 1000000000ll)
+                            windowNs = nowNs, seen.clear();
+                        uint64_t key = 1469598103934665603ull;
+                        const float values[] = {lighting[6].v[0], lighting[6].v[1], lighting[6].v[2], lighting[10].v[0], lighting[10].v[1],
+                                                lighting[10].v[2], lighting[5].v[3], lighting[9].v[3], lighting[7].v[0], lighting[7].v[1],
+                                                lighting[7].v[2], lighting[8].v[0], lighting[8].v[1]};
+                        for (const float value : values)
+                            key = (key ^ static_cast<uint64_t>(static_cast<int64_t>(value * 256.0f))) * 1099511628211ull;
+                        if (seen.size() < 12u && std::find(seen.begin(), seen.end(), key) == seen.end())
+                        {
+                            seen.push_back(key);
+                            std::fprintf(stderr,
+                                         "[native render] lit metal: L1 colour %.3f %.3f %.3f L2 colour %.3f %.3f %.3f scale %.3f ambient %.3f "
+                                         "material %.3f %.3f %.3f reflection %.3f %.3f\n",
+                                         values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7], values[8],
+                                         values[9], values[10], values[11], values[12]);
+                        }
+                    }
+                }
                 Pass reflection = basePass(d);
                 reflection.mode[0] = 7.0f;
                 // (TODO 305 (4)) The sphere map's coordinates as the GS takes them: 0x2800 sends S, T = (0.5 + 0.5 E.xy /
@@ -157,6 +189,23 @@ namespace nr
                 for (int q = 0; q < 11; ++q)
                     copy(reflection.p[q], lighting[q]);
                 copy(reflection.p[11], output[16]);
+                // (TODO 349 (c), "Softer sunlight on characters", off by default: not the original game's look.) The game
+                // lights a character or vehicle by (L1 + L2) * scale + ambient, times 128 - and raises the scale (q5.w) and
+                // the reflection's strength (q8.x) with how much sun reaches it: Amazon 0.5 and 0.4 in shade, 1.8 and 0.8
+                // in the open, over about a second. Scale + ambient above 1 is light past the texture's own brightness -
+                // 2.0 in Amazon's sun, where a fully lit face comes out at twice its texture, clipped at white. That part
+                // above 1 is what the setting takes away: all of it at 1 ("softer"), half at 0.5; the reflection by the same
+                // share. At 1 or below - shade - nothing changes.
+                if (const float soft = frame::softSun(); soft > 0.0f)
+                {
+                    const float scale = reflection.p[5][3], ambient = reflection.p[9][3], whole = scale + ambient;
+                    if (whole > 1.0f && scale > 0.0f && ambient >= 0.0f && ambient < 1.0f)
+                    {
+                        const float softened = 1.0f + (whole - 1.0f) * (1.0f - soft);
+                        reflection.p[5][3] = softened - ambient;
+                        reflection.p[8][0] *= softened / whole;
+                    }
+                }
                 Pass base = reflection;
                 base.mode[0] = 8.0f;
                 base.mode[1] = 0.0f;

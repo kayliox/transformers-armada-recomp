@@ -6489,6 +6489,23 @@ namespace nr
                 // stands here; the texture is the block's context 1 or 2 one that matches.
                 // TF_NATIVE_SMEARSTATE=0: the block's, as before.
                 static const bool smearStateOff = std::getenv("TF_NATIVE_SMEARSTATE") && *std::getenv("TF_NATIVE_SMEARSTATE") == '0';
+                // (TODO 367) The flying enemies' after-image (the Jet Lasers) writes TEX0_1 too, but with the block's own texture,
+                // the reflection map, and only its function changed: MODULATE where the block has HIGHLIGHT2 (TF_NATIVE_SMEARLOG
+                // shows both words). The texture matched neither test below, so the draw kept the block's HIGHLIGHT2 - which adds
+                // the vertex alpha to the colour: pale sheets over the body where the PS2 draws the dark streaks of the reflection
+                // map, faded by alpha. Now a list TEX0_1 of the block's own texture is taken as it is (its TFX, TCC).
+                // TF_NATIVE_SMEARTFX=0: as before.
+                static const bool smearTfxOff = std::getenv("TF_NATIVE_SMEARTFX") && *std::getenv("TF_NATIVE_SMEARTFX") == '0';
+                static int smearLog = std::getenv("TF_NATIVE_SMEARLOG") ? std::atoi(std::getenv("TF_NATIVE_SMEARLOG")) : 0;
+                if (smearLog > 0 && d.shader.blockOf(Routine::Smear))
+                {
+                    --smearLog;
+                    std::fprintf(stderr, "[native render] after-image draw %zu: list tex0_1 %016llx written at %llu (the draw's stretch from %llu), "
+                                         "block tex0 %016llx / context 2 %016llx\n",
+                                 k, static_cast<unsigned long long>(regs.tex0[0]), static_cast<unsigned long long>(regs.tex0At[0]),
+                                 static_cast<unsigned long long>(regsWritesBefore), static_cast<unsigned long long>(d.tex0),
+                                 static_cast<unsigned long long>(d.tex02));
+                }
                 if (!smearStateOff && d.shader.blockOf(Routine::Smear) && regs.tex0[0])
                 {
                     const uint64_t tex0 = regs.tex0[0];
@@ -6499,6 +6516,8 @@ namespace nr
                         d.tex0 = tex0;
                         d.tex1 = d.tex12;
                     }
+                    else if (!smearTfxOff && (tex0 & kTex0SampleMask) == (d.tex0 & kTex0SampleMask))
+                        d.tex0 = tex0; // (the same texture: the list's function and alpha use)
                     d.alpha = regs.alpha[0];
                     d.test = regs.test[0];
                 }
@@ -7050,7 +7069,8 @@ namespace nr
             s.label = "Local contrast (native renderer)";
             s.order = 59;
             s.help = "Native renderer: brings out the detail of the 3D scene - rocks, ice, metal - against its surroundings, "
-                     "without changing its colours or overall brightness. The HUD and menus are not changed.";
+                     "without changing its colours. What is already bright is not made brighter. The HUD and menus are not "
+                     "changed.";
             s.choices = {{"0", "Off"}, {"1", "On"}};
             s.defaultValue = "0";
             s.apply = [](const std::string &value) {
@@ -7080,6 +7100,32 @@ namespace nr
             };
             s.available = []() { return ps2_settings::choice("TF_NATIVE_CLARITY") == "1"; };
             s.unavailableHelp = "Turn it on first (the row above).";
+            ps2_settings::add(s);
+        }
+        // (TODO 349 (c)) The game's own sunlight on the lit characters and vehicles, softened (TF_NATIVE_SOFT_SUN, live, off
+        // by default: the original game does not have it; nr_passes.cpp).
+        {
+            ps2_settings::Setting s;
+            s.key = "TF_NATIVE_SOFT_SUN";
+            s.section = "Graphics";
+            s.label = "Softer sunlight on characters (native renderer)";
+            s.order = 59;
+            s.help = "Native renderer: the game lights the Autobots and their vehicles far more strongly in direct sunlight than "
+                     "in shade, until bright paint turns almost white. This tones that strong light down. Where the game "
+                     "lights them softly, as in shade, nothing changes; on bright levels such as Antarctica it acts "
+                     "everywhere. The enemies, the scenery, the sky and the HUD are not touched. The original game does not "
+                     "have this.";
+            s.choices = {{"0", "Off"}, {"0.5", "Soft"}, {"1", "Softer"}};
+            s.defaultValue = "0";
+            s.apply = [](const std::string &value) {
+                frame::setSoftSun(static_cast<float>(std::atof(value.c_str())));
+                return true;
+            };
+            s.available = []() {
+                const char *on = std::getenv("TF_NATIVE_RENDER");
+                return ps2_settings::choice("TF_RENDERER") == "native" || (on && *on && *on != '0');
+            };
+            s.unavailableHelp = "Only for the native renderer (Display: Renderer).";
             ps2_settings::add(s);
         }
         // Its supersampling (TF_NATIVE_SSAA, live, off by default): the 3D drawn at 1.5x the screen's pixels each way.

@@ -1772,7 +1772,9 @@ namespace
                                    runtime->eeScheduler().currentVSyncTick()); // (TODO 315: objective_guide.h)
             speedrun_timer::frame(rdram, g_liveFmvStreams != 0, runtime->eeScheduler().currentVSyncTick());
             discord_presence::frame(rdram, game != 0u, g_executorVtable == 0x006B7360u, g_liveFmvStreams != 0 && g_liveFmvIsFilm);
-            photo_mode::frame(rdram, game != 0u); // (before tuning: the game's speed it sets)
+            // (before tuning: the game's speed it sets; TODO 369: not while a cutscene - taCutSceneSystem's "a script plays" byte,
+            // see cutsceneOwnsView - or a movie owns the view)
+            photo_mode::frame(rdram, game != 0u, rdram[0x006CFB94u] != 0u || g_liveFmvStreams != 0);
             fast_load::frame(rdram, *runtime, g_executorVtable == 0x006B7360u); // the sound muted while a level loads (fast_load.h)
             start_screens::frame(*runtime, game != 0u || g_executorVtable == 0x006B7360u); // (TODO 298: the start's turbo ends)
             {
@@ -3604,6 +3606,11 @@ namespace
     void setWorldVelocity(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t ra = getRegU32(ctx, 31), controller = getRegU32(ctx, 4);
+        if (ra == kRagdollVelocityReturn && tuning::speed() <= 0.0f)
+        {
+            ctx->pc = ra; // (TODO 369: the game stopped - photo mode: the ragdoll keeps the velocity it had, its root has not moved)
+            return;
+        }
         if (ra == kRagdollVelocityReturn &&
             !ragdollVelocityAt30(rdram, controller, getRegU32(ctx, 5), runtime->eeScheduler().currentVSyncTick()))
         {
@@ -6667,8 +6674,25 @@ namespace
     {
         const char *mode = std::getenv("TF_FOREST");
         g_forestOld = mode && std::string(mode) == "old";
+        // (TODO 376, option D) A budget of 3D trees under the frame-rate cliff: 2,200 at once. Past ~2,600-3,200 3D trees
+        // (measured the same on a GTX 1080 PC and the 7900 XTX) a frame needs more than a 30th of a second, Unlimited's
+        // rate falls to its floor of 30 - the console's frame of two VBlanks - and a frame that misses it waits for the
+        // next pair: 15 pictures a second with the game at half speed. Very far 3D got there in thick forest since
+        // trees350 (0.7.3: its worst 2 s went from 122 to 29 a second). With the budget the cap is 2,200 and the reach
+        // is fitted to it as to the cap before: the farthest trees stay the game's flat trees. By count, not by frame time:
+        // the cliff sits at the same number of trees on both PCs (the per-tree work is the game's and ours, not the
+        // graphics card's), a count gives every PC the same look, and a frame-time budget hunted (the Adaptive option,
+        // N7: it held the reach at half on 99% of the forest levels, also where the trees cost nothing). Near 3D never
+        // comes near it (under 300 3D trees in our Amazon runs). TF_FOREST_BUDGET=<n> another budget, 0 off
+        // (the cap of before, 4,096); TF_FOREST_CAP still sets the cap itself (tests).
+        const long budget = [] {
+            const char *b = std::getenv("TF_FOREST_BUDGET");
+            return b && *b ? std::atol(b) : 2200L;
+        }();
         if (const char *cap = std::getenv("TF_FOREST_CAP"); cap && *cap)
             g_forestCap = static_cast<uint32_t>(std::clamp(std::atol(cap), 16L, static_cast<long>(forestSlots())));
+        else if (budget > 0)
+            g_forestCap = std::min(forestSlots(), static_cast<uint32_t>(std::clamp(budget, 16L, static_cast<long>(forestSlots()))));
         else
             g_forestCap = forestSlots();
         g_forestLog = std::getenv("TF_FOREST_LOG") && *std::getenv("TF_FOREST_LOG") == '1';
@@ -6732,6 +6756,11 @@ namespace
             if ((g_meshSurfaceRender = runtime.lookupFunction(0x001FFC70u)) != nullptr) // (vlMeshSurface::vfunc_03, the mesh's render)
                 runtime.registerFunction(0x001FFC70u, meshSurfaceTimed);
         }
+        if (!g_forestOld)
+            std::fprintf(stderr, "[forest] 3D trees at most %u at once (%s)\n", g_forestCap,
+                         std::getenv("TF_FOREST_CAP") && *std::getenv("TF_FOREST_CAP") ? "TF_FOREST_CAP"
+                         : budget > 0 ? "the budget under the frame-rate cliff, TODO 376; TF_FOREST_BUDGET=0: off"
+                                      : "TF_FOREST_BUDGET=0: the slots' own");
         std::fprintf(stderr, "[forest] %s%s\n", g_forestOld ? "3D trees at most 400 (the game's)"
                                                  : g_forestAdaptive.load() ? "3D trees: the reach fitted to the cap, adaptive to the frame time"
                                                                           : "3D trees: the reach fitted to the cap, full whatever the frame time",

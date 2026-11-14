@@ -33,6 +33,7 @@
 #include "crosshair_row.h" // (TODO 358: the crosshair's size)
 #include "game_config.h"
 #include "menu_mouse.h"
+#include "native_sound_mixer.h" // (TODO 369: the voices held while the game stands still)
 #include "port_ext.h"
 #include "tuning.h"
 #include "view_turn.h"
@@ -90,6 +91,7 @@ namespace photo_mode
         std::atomic<bool> g_inLevel{false};
         std::atomic<bool> g_hideCrosshair{false}; // (small_crosshair: drawn by the port instead)
         std::atomic<bool> g_hudOn{false};
+        std::atomic<bool> g_refused{false}; // (TODO 369: F8 left out - a cutscene or a movie owns the view; the hint's)
 
         // The free camera (both threads).
         std::mutex g_lock;
@@ -662,6 +664,17 @@ namespace photo_mode
         if (on && !wasOn)
             hintUntil = GetTime() + 6.0;
         wasOn = on;
+        static double refusedUntil = 0.0;
+        if (g_refused.exchange(false))
+            refusedUntil = GetTime() + 2.5;
+        if (!on && GetTime() < refusedUntil) // (TODO 369: F8 during a cutscene or a movie)
+        {
+            const char *text = "Photo mode: not during a cutscene";
+            const int size = std::max(16, GetScreenHeight() / 40);
+            const int x = GetScreenWidth() / 2 - MeasureText(text, size) / 2, y = GetScreenHeight() - size * 3;
+            DrawText(text, x + 2, y + 2, size, Color{0, 0, 0, 170});
+            DrawText(text, x, y, size, Color{230, 240, 255, 230});
+        }
         if (!on)
             return;
         if (GetTime() < hintUntil)
@@ -741,7 +754,7 @@ namespace photo_mode
             g_pose.position[i] += move[i] * speed * dt;
     }
 
-    void frame(uint8_t *rdram, bool inLevel)
+    void frame(uint8_t *rdram, bool inLevel, bool scripted)
     {
         g_inLevel.store(inLevel, std::memory_order_relaxed);
         // TF_PHOTO_AT=<n> (tests): photo mode on after n game frames in a level (TF_PHOTO_MODE's, later).
@@ -752,6 +765,14 @@ namespace photo_mode
         {
             g_want.store(true);
             std::fprintf(stderr, "[photo] TF_PHOTO_AT: on after %d level frames\n", photoAt);
+        }
+        // (TODO 369) Not while a cutscene or a movie owns the view: their scripts place the camera and their objects by game time,
+        // which photo mode stops (a Data-Con's discovery left its pickup rising for good). F8 asked then is left out, with a hint.
+        if (scripted && !g_on.load(std::memory_order_relaxed) && g_want.load(std::memory_order_relaxed))
+        {
+            g_want.store(false);
+            g_refused.store(true);
+            std::fprintf(stderr, "[photo] not during a cutscene or a movie: left out\n");
         }
         const bool want = g_want.load(std::memory_order_relaxed) && inLevel;
         const uint32_t hud = game_config::valueAddress("showHUD");
@@ -776,12 +797,17 @@ namespace photo_mode
                     g_pose = Pose{};
                 }
                 g_hudOn.store(false);
+                if (!live)
+                    native_sound::mixer::holdVoices(true); // (the sounds stand still with the game: a loop does not play on)
                 std::fprintf(stderr, "[photo] on\n");
             }
             else
             {
                 if (!live)
+                {
                     tuning::setSpeed(g_speedBefore);
+                    native_sound::mixer::holdVoices(false); // (each goes on from where it stood)
+                }
                 if (g_hudBefore >= 0 && hud)
                     if (uint8_t *p = getMemPtr(rdram, hud))
                         *p = static_cast<uint8_t>(g_hudBefore);

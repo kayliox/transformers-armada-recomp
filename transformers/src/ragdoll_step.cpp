@@ -25,6 +25,7 @@
 #include "ragdoll_step.h"
 
 #include "port.h"
+#include "tuning.h" // (TODO 369: the game stopped - photo mode)
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
@@ -98,6 +99,17 @@ namespace ragdoll_step
             const uint32_t self = getRegU32(ctx, 4);
             const uint32_t count = word(rdram, self), particles = word(rdram, self + 4u);
             const bool entry = ctx->pc == kUpdate;
+            // (TODO 369) The game stopped (photo mode: its speed 0, tuning.h): no step. The integrator's move is x + (x - x_before)
+            // x damping + force x dt^2 - the inertia is per step, not per second - so steps of a stopped game's near-zero time
+            // went on moving the doll (without gravity) for as long as photo mode lasted, and its end never came. It stands
+            // where it is and goes on from there afterwards (its last-seen tick kept, so it is not taken for a new one).
+            if (entry && tuning::speed() <= 0.0f)
+            {
+                if (auto it = g_dolls.find(self); it != g_dolls.end())
+                    it->second.seen = runtime->eeScheduler().currentVSyncTick();
+                ctx->pc = getRegU32(ctx, 31);
+                return;
+            }
             uint8_t active = 0u;
             if (validRange(self, 0x60u))
                 active = rdram[self + kActive];

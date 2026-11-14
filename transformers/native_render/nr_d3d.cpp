@@ -785,6 +785,8 @@ PsOut ps(VsOut i)
         o.colour = float4(o.reactive, o.reactive, o.reactive, o.colour.a);
     return o;
 }
+)"
+                              R"(// (TODO 335 b: the string split here - MSVC's limit of one string literal)
 float4 psColour(VsOut i)
 {
     if (down.y > 0.5)
@@ -807,7 +809,16 @@ float4 psColour(VsOut i)
         // Magnified - every texture at the PS2's size - the footprint is under a texel: as before.)
         float tw, th;
         tex.GetDimensions(tw, th);
-        const float2 hold = max(float2(0.5 / tw, 0.5 / th), max(abs(uvx), abs(uvy)));
+        // (TODO 335 b) A footprint past a quarter of the texture is no image drawn small but coordinates running away
+        // near a point where they are divided by almost nothing: the lit metal's reflection near the sphere map's rim,
+        // uv = st / q per pixel with q near 0 (faces turned down, away from the eye). There the footprint grew past half
+        // the texture and the clamp's bounds crossed (hold above 1 - hold): each 2x2 block of pixels took its own texel,
+        // sharp at the level the GS's Q picks - black and white dots on the faces, where the GS, clamping the coordinate
+        // to the edge, draws them smooth. The hold now fades back to half a texel between a quarter and half the texture.
+        // (A CLAMP mode with + 0.25, TF_NATIVE_CLAMPFOOT=0: the footprint taken whole, as before.)
+        const float2 halfTexel = float2(0.5 / tw, 0.5 / th), foot = max(abs(uvx), abs(uvy));
+        const bool footWhole = frac(wrapS.x) > 0.125 || frac(wrapT.x) > 0.125;
+        const float2 hold = max(halfTexel, footWhole ? foot : lerp(foot, halfTexel, saturate(foot * 4.0 - 1.0)));
         if (wrapS.x > 1.5)
             i.uv.x = clamp(i.uv.x, (wrapS.y + 0.5) / wrapS.w, (wrapS.z + 0.5) / wrapS.w);
         else if (wrapS.x > 0.5)
@@ -1085,10 +1096,14 @@ float4 tonePs(float4 pos : SV_Position) : SV_Target
         // (TODO 108 (3) C1) The local contrast (TF_NATIVE_CLARITY, off by default): the picture's luminance lifted against a wide
         // blur of itself - k times the difference added to each channel (the colours kept), the difference held to +-0.2 so
         // hard edges get no halo. A full-screen triangle, before the HUD; s4 = linear, clamped.
+        // (TODO 349 (b)) A lift fades out on what is already bright: whole from 0.7 of the pixel's brightest channel down,
+        // none at white. A small bright thing in a dark surround - Hot Shot's car in the sun, in grass - is brighter than
+        // its blur all over, so all of it was lifted and its paint, near white already on the PS2, clipped (a third of it
+        // at white at 50%, where the game alone has a fifth). What is darker than its surround is darkened as before.
         const char kClarityShader[] = R"(
 cbuffer Clarity : register(b0)
 {
-    float4 clarityParam; // xy 1 / the target's width, height; z k
+    float4 clarityParam; // xy 1 / the target's width, height; z k; w 1: a lift spares what is already bright (TODO 349 (b))
 };
 Texture2D<float4> clarityIn : register(t0);
 Texture2D<float4> clarityBlur : register(t1);
@@ -1106,7 +1121,8 @@ float4 clarityPs(float4 pos : SV_Position) : SV_Target
     const float3 b = clarityBlur.SampleLevel(clarityLinear, pos.xy * clarityParam.xy, 0).rgb;
     const float3 w = float3(0.2126, 0.7152, 0.0722);
     const float d = clamp(dot(c, w) - dot(b, w), -0.2, 0.2);
-    return float4(saturate(c + d * clarityParam.z), 1.0);
+    const float room = d > 0.0 && clarityParam.w > 0.5 ? saturate((1.0 - max(c.r, max(c.g, c.b))) / 0.3) : 1.0;
+    return float4(saturate(c + d * room * clarityParam.z), 1.0);
 }
 )";
 

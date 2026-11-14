@@ -19,6 +19,7 @@ Deps:    Python 3.8+ standard library, git.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import subprocess
@@ -40,6 +41,11 @@ MAX_BYTES = 1024 * 1024
 ALLOWED_LARGE = {
     "transformers/native_render/ext/smaa/AreaTex.h",          # SMAA's lookup table (MIT-style licence, LICENSE.txt)
     "patches/ps2recomp/0004-gs-threaded-software-renderer.patch",  # our renderer patch
+}
+# Third parties' binary files reviewed as publishable (a game file type or over 1 MB), each by its SHA-256.
+REVIEWED_BINARIES = {
+    # FFmpeg's static libraries for Windows (TODO 371): LGPL 2.1+, built by tools/ffmpeg_static/build.sh from the pinned source
+    "tools/ffmpeg_static/prebuilt/ffmpeg-7.1-tfa-static-msvc-x64.zip": "8405647d6c8fdb5cefd35902ddcc89f9416bafe697d4b2d3edd5d2141b225657",
 }
 # (pattern, what it is) - checked on every text line
 PATTERNS = [
@@ -73,6 +79,10 @@ def is_text(data: bytes) -> bool:
 
 def check_file(path: str, data: bytes) -> list[str]:
     findings = []
+    if path in REVIEWED_BINARIES:  # (a third party's file reviewed for publishing: exactly that file, by its SHA-256)
+        if hashlib.sha256(data).hexdigest() != REVIEWED_BINARIES[path]:
+            findings.append(f"{path}: not the reviewed file (its SHA-256 differs)")
+        return findings
     low = path.lower()
     name = low.rsplit("/", 1)[-1]
     ext = "." + name.rsplit(".", 1)[-1] if "." in name else ""

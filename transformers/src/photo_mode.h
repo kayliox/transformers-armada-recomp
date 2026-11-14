@@ -21,8 +21,8 @@ namespace photo_mode
     // hint drawn over the picture.
     void windowFrame();
     // Once a game frame (overrides.cpp, after game_config::frame): the game's speed, the HUD and the
-    // pad, while photo mode is on.
-    void frame(uint8_t *rdram, bool inLevel);
+    // pad, while photo mode is on. scripted (TODO 369): a cutscene or a movie owns the view - F8 is not taken then.
+    void frame(uint8_t *rdram, bool inLevel, bool scripted = false);
     bool active();
     // Photo mode on with its HUD hidden (game_config's HUD switch hides the game's HUD while this is true).
     bool hudHidden();
