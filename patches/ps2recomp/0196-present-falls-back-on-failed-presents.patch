@@ -1,0 +1,656 @@
+Subject: [PATCH] Present: a run of failed presents, or pictures that stop moving on, go back to GL's swap (TODO 362)
+
+A player's fresh install showed only a black window with the game and its sound running, F1's menu missing too (it
+is drawn into the same pictures). The DXGI hand-over's failures that left it so were only counted: the interop's lock
+refused on every picture, the swap chain's back buffer or present failing (a lost presenting device), a GL fence or
+the read guard's query that never passes (the window's thread then crawled at a picture each 250 ms), the window's
+render texture that could not be made. Now: each kind's first failure is said with its code; half a second of them
+in a row (30), or pictures handed over that have not moved on for 5 s, or 30 pictures without a render texture, send
+the window to GL's own swap with the existing "GL's own swap from now on" line; 10 s after the start with nothing
+shown a line names the stage reached; two graphics chips (the window's screen on one, GL on another) are said at the
+start; and a picture check (each picture until it knows, nothing presented before it - a window that has once shown
+a flip-model swap chain's picture shows GL's own swap no more, black on both Intel laptops: two all-but-black marks drawn last into the window's picture,
+looked for in the window's own picture and in Direct3D's copy) sends it to GL's swap where they do not arrive - the
+ThinkPad's UHD 620 with the legacy-handle textures: every present succeeded, the window was black. close() no longer waits without end for a present thread held inside a driver's call. Test switches:
+PS2X_PRESENT_FAULT=lock|present|fence|target forces each failure; PS2X_PRESENT_FALLBACK=0 keeps the swap chain
+whatever fails (as before); PS2X_PRESENT_CHECK=0 no picture check. Healthy machines: nothing changes but the counts.
+
+--- a/ps2xRuntime/include/runtime/ps2_host_present.h
++++ b/ps2xRuntime/include/runtime/ps2_host_present.h
+@@ -46,11 +46,16 @@ namespace ps2_host_present
+         // Hands GL texture `texture` (the window's drawing, width x height, GL's rows bottom up)
+         // over to the present thread, which copies it into the swap chain's back buffer and
+         // presents it: the hand-over's number (0: not handed over).
+-        uint64_t present(unsigned int texture, int width, int height);
++        // `lit` (TODO 362, the picture check): the window's own reading of a few of the picture's points - 1 something in
++        // them, 0 all black, -1 not read (wantsCheck(): whether this picture is one to read).
++        uint64_t present(unsigned int texture, int width, int height, int lit = -1);
++        bool wantsCheck();
+         // Until the present thread has copied hand-over `number`'s texture (it may be drawn into
+         // again).
+         void waitCopied(uint64_t number);
+-        // The textures could not be made several times in a row: present() will not work here.
++        // The textures could not be made several times in a row, the presents failed half a second in a row, or the
++        // pictures have not moved on for 5 s (TODO 362): present() will not work here. Also writes the watchdog's line
++        // (no picture shown 10 s after the start). The window's thread, each picture.
+         bool broken();
+         void close();
+     }
+--- a/ps2xRuntime/src/lib/ps2_host_present.cpp
++++ b/ps2xRuntime/src/lib/ps2_host_present.cpp
+@@ -5,12 +5,16 @@
+ #include "runtime/ps2_platform.h"
+ 
+ #include "raylib.h"
++#if defined(_WIN32)
++#include "glad.h" // (TODO 362: the picture check's few points - raylib's GL loader, as the Direct3D side)
++#endif
+ 
+ #include <array>
+ #include <atomic>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
++#include <initializer_list>
+ 
+ namespace ps2_host_present
+ {
+@@ -24,6 +28,21 @@ namespace ps2_host_present
+         size_t g_target = 0u;
+         int g_width = 0, g_height = 0;
+         bool g_drawing = false;
++        // (TODO 362) Pictures in a row whose render texture could not be made (raylib's reason is in its own log, stdout):
++        // nothing was handed over for them - a run of them sends the window back to GL's swap.
++        int g_noTarget = 0;
++        int g_marksMissing = 0; // (TODO 362: the picture check's marks missing from the window's own picture, in a row)
++
++        // (TODO 362) PS2X_PRESENT_FAULT=target (a test switch): the window's picture taken as not made, every time.
++        bool targetFault()
++        {
++            static const bool on = []()
++            {
++                const char *env = std::getenv("PS2X_PRESENT_FAULT");
++                return env && std::strcmp(env, "target") == 0;
++            }();
++            return on;
++        }
+ 
+         // The DXGI swap chain by default since 2026-10-24 (PS2X_PRESENT=gl: GL's own swap). Measured
+         // with PresentMon on the user's 240 Hz FreeSync screen, a level at 120 pictures a second: GL's
+@@ -96,14 +115,30 @@ namespace ps2_host_present
+                 if (g_targets[i].id != 0u)
+                     UnloadRenderTexture(g_targets[i]);
+                 g_targets[i] = LoadRenderTexture(width, height);
++                if (targetFault() && g_targets[i].id != 0u)
++                {
++                    UnloadRenderTexture(g_targets[i]);
++                    g_targets[i] = RenderTexture2D{};
++                }
+                 g_handed[i] = 0u;
+             }
+             g_width = width;
+             g_height = height;
++            static bool told = false;
++            if (g_targets[0].id == 0u && !told)
++            {
++                told = true;
++                std::fprintf(stderr, "[present] the window's picture (a %dx%d render texture) could not be made%s (raylib's reason: play_*.out)\n",
++                             width, height, targetFault() ? " - forced by PS2X_PRESENT_FAULT" : "");
++            }
+         }
+         g_target = (g_target + 1u) % g_targets.size();
+         if (g_targets[g_target].id == 0u)
++        {
++            ++g_noTarget;
+             return;
++        }
++        g_noTarget = 0;
+         dxgi::waitCopied(g_handed[g_target]);
+         BeginTextureMode(g_targets[g_target]);
+         g_drawing = true;
+@@ -132,17 +167,57 @@ namespace ps2_host_present
+         }
+         if (g_drawing)
+         {
++            int lit = -1;
++#if defined(_WIN32)
++            // (TODO 362) The picture check (ps2_host_present_dxgi.cpp): each picture until it knows, two marks drawn last
++            // into this picture - the first column's top and bottom pixel, colour 3,5,7 (all but black: not seen) - and read
++            // back here, for the present thread to look for them in Direct3D's copy. Missing here 3 times: this window's
++            // drawing does not reach its picture - GL's own swap.
++            const bool check = dxgi::wantsCheck();
++            if (check)
++            {
++                DrawPixel(0, 0, Color{3, 5, 7, 255});
++                DrawPixel(0, g_height - 1, Color{3, 5, 7, 255});
++            }
++#endif
+             EndTextureMode();
+-            g_handed[g_target] = dxgi::present(g_targets[g_target].texture.id, g_width, g_height);
++#if defined(_WIN32)
++            if (check)
++            {
++                GLint before = 0;
++                glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &before);
++                glBindFramebuffer(GL_READ_FRAMEBUFFER, g_targets[g_target].id);
++                unsigned char px[4] = {};
++                lit = 0;
++                for (const int y : {0, g_height - 1})
++                {
++                    glReadPixels(0, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
++                    lit = lit || (px[0] == 3u && px[1] == 5u && px[2] == 7u) ? 1 : 0;
++                }
++                glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(before));
++                if (lit)
++                    g_marksMissing = 0;
++                else if (++g_marksMissing == 3)
++                    std::fprintf(stderr, "[present] the picture check: the window's own picture does not hold what is drawn into it (3 times)\n");
++            }
++#endif
++            g_handed[g_target] = dxgi::present(g_targets[g_target].texture.id, g_width, g_height, lit);
+             g_drawing = false;
+         }
+         PollInputEvents(); // (EndDrawing's; its swap is the swap chain's present)
+-        if (dxgi::broken())
++        // (TODO 362: half a second of pictures that could not be handed over; PS2X_PRESENT_FALLBACK=0: kept, as before)
++        static const bool fallback = !std::getenv("PS2X_PRESENT_FALLBACK") || *std::getenv("PS2X_PRESENT_FALLBACK") != '0';
++        const bool noTarget = fallback && (g_noTarget >= 30 || g_marksMissing >= 3);
++        if (noTarget && g_noTarget >= 30)
++            std::fprintf(stderr, "[present] %d pictures in a row had no render texture to be drawn into\n", g_noTarget);
++        if (noTarget || dxgi::broken())
+         {
+             std::fprintf(stderr, "[present] the DXGI swap chain cannot take GL's pictures here: GL's own swap from now on\n");
+             dxgi::close();
+             g_active = false;
+             g_handed.fill(0u);
++            g_noTarget = 0;
++            g_marksMissing = 0;
+         }
+     }
+ }
+@@ -156,11 +231,16 @@ namespace ps2_host_present::dxgi
+         return false;
+     }
+ 
+-    uint64_t present(unsigned int, int, int)
++    uint64_t present(unsigned int, int, int, int)
+     {
+         return 0u;
+     }
+ 
++    bool wantsCheck()
++    {
++        return false;
++    }
++
+     void waitCopied(uint64_t)
+     {
+     }
+--- a/ps2xRuntime/src/lib/ps2_host_present_dxgi.cpp
++++ b/ps2xRuntime/src/lib/ps2_host_present_dxgi.cpp
+@@ -54,6 +54,7 @@
+ #include <cstdio>
+ #include <cstdlib>
+ #include <deque>
++#include <initializer_list>
+ #include <mutex>
+ #include <string>
+ #include <thread>
+@@ -97,6 +98,7 @@ namespace ps2_host_present::dxgi
+             int width = 0, height = 0;
+             GLsync drawn = nullptr;
+             Clock::time_point at{}; // (handed over)
++            int lit = -1;           // (TODO 362: the picture check - the window's own reading: 1 lit, 0 black, -1 not read)
+         };
+ 
+         struct State
+@@ -150,6 +152,20 @@ namespace ps2_host_present::dxgi
+             uint64_t handed = 0u;               // (the window's thread's count)
+             std::atomic<uint64_t> copied{0u};   // the jobs whose picture GL has copied (their texture free again)
+             std::atomic<int> fitFailures{0};    // the textures could not be made, so many times in a row
++            // (TODO 362) Presents that failed in a row, of any kind (the interop's lock, the back buffer, the present itself):
++            // a run of them sends the window back to GL's swap (broken()). Before, they were only counted, so a driver
++            // that refused every lock or present left the window black with the game and its sound running - and F1's
++            // menu, drawn into the same pictures, never showed either.
++            std::atomic<int> presentFailures{0};
++            std::atomic<uint64_t> shownTotal{0u};
++            std::atomic<int> lastFailure{0};
++            std::atomic<unsigned long> lastCode{0u};
++            // What the present thread last waited for without moving (the stuck pictures' line): 0 nothing, 1 GL's copy into
++            // Direct3D's texture unfinished, 2 the presenting device's copy out of the next texture unfinished.
++            std::atomic<int> waitingOn{0};
++            std::atomic<bool> finished{false}; // (the present thread has left run())
++            bool abandon = false;              // (stopping with pictures stuck on their way: the thread leaves them)
++            Clock::time_point openedAt{};
+             // PS2X_PRESENT_STATS (the present thread's)
+             uint32_t presents = 0u, failed = 0u;
+             double drawnMs = 0.0, lockMs = 0.0, blitMs = 0.0, unlockMs = 0.0, presentMs = 0.0, lockMost = 0.0, blitMost = 0.0, unlockMost = 0.0,
+@@ -184,6 +200,51 @@ namespace ps2_host_present::dxgi
+             return enabled;
+         }
+ 
++        // (TODO 362) PS2X_PRESENT_FAULT=lock|present|fence (a test switch): that failure forced on every picture, to prove the
++        // way back to GL's swap where a driver fails so. lock: the interop's lock refused; present: the swap chain's present
++        // failed; fence: GL's copy into Direct3D's texture never finishes. (target: the window's own picture cannot be made -
++        // ps2_host_present.cpp.)
++        enum Fault
++        {
++            kNoFault,
++            kFaultLock,
++            kFaultPresent,
++            kFaultFence
++        };
++        Fault fault()
++        {
++            static const Fault forced = []()
++            {
++                const char *env = std::getenv("PS2X_PRESENT_FAULT");
++                const std::string v = env ? env : "";
++                return v == "lock" ? kFaultLock : v == "present" ? kFaultPresent : v == "fence" ? kFaultFence : kNoFault;
++            }();
++            return forced;
++        }
++
++        // (TODO 362) A present that failed: counted in a row; the first of each kind said, with its code.
++        enum Failure
++        {
++            kFailLock = 1,
++            kFailBuffer,
++            kFailPresent
++        };
++        const char *failureName(int kind)
++        {
++            return kind == kFailLock ? "the interop's lock of Direct3D's texture" : kind == kFailBuffer ? "the swap chain's back buffer" : "the swap chain's present";
++        }
++        void noteFailure(int kind, unsigned long code)
++        {
++            g.presentFailures.fetch_add(1, std::memory_order_relaxed);
++            g.lastFailure.store(kind, std::memory_order_relaxed);
++            g.lastCode.store(code, std::memory_order_relaxed);
++            static std::atomic<int> told{0};
++            if (!(told.fetch_or(1 << kind) & (1 << kind)))
++                std::fprintf(stderr, "[present] %s failed (%08lx)%s\n", failureName(kind), code,
++                             fault() != kNoFault ? " - forced by PS2X_PRESENT_FAULT" : "");
++        }
++        constexpr int kFailedInARow = 30; // (half a second at 60 pictures a second)
++
+         template <typename T>
+         void release(T *&object)
+         {
+@@ -379,7 +440,41 @@ namespace ps2_host_present::dxgi
+             Picture *picture = nullptr;
+             GLsync copied = nullptr;
+             Clock::time_point started{}, locked{};
++            // (TODO 362: the picture check - the window's thread found its marks in its picture; the present thread's own
++            // context found them too)
++            bool checked = false, checkLit = false, sharedLit = false;
+         };
++
++        // (TODO 362) The picture check: on the ThinkPad's UHD 620 with the legacy-handle textures, every present succeeded and
++        // the swap chain showed pictures - all black, the window black with the game running and nothing in the log. Until it
++        // is known (from the first picture on: nothing is presented before), the window's thread draws two marks into its picture, the
++        // first column's top and bottom pixel in a colour no picture shows there by chance (3,5,7: all but black, not seen),
++        // and reads them back (ps2_host_present.cpp); the present thread reads the same pixels from Direct3D's copy. What the
++        // game shows does not matter (a black fade, a loading screen, a movie's black frames: the marks are there all the
++        // same). Marks missing from the window's own picture 3 times: its drawing does not reach its picture here
++        // (ps2_host_present.cpp). Marks in it but not in Direct3D's copy 3 times: the hand-over gives nothing here
++        // (broken()). Marks in Direct3D's copy: the check ends. PS2X_PRESENT_CHECK=0: none.
++        struct Check
++        {
++            bool done = false;
++            int black = 0, unread = 0;
++            ID3D11Texture2D *staging = nullptr;
++            int width = 0, height = 0;
++        } g_check;
++        std::atomic<bool> g_zeros{false};
++        bool checkEnabled()
++        {
++            static const bool enabled = !std::getenv("PS2X_PRESENT_CHECK") || *std::getenv("PS2X_PRESENT_CHECK") != '0';
++            return enabled;
++        }
++        bool checkThis(uint64_t)
++        {
++            return checkEnabled() && !g_check.done;
++        }
++        bool isCanary(const unsigned char *p)
++        {
++            return p[0] == 3u && p[1] == 5u && p[2] == 7u; // (ps2_host_present.cpp's mark)
++        }
+         constexpr size_t kInFlight = 2u; // (of the three textures: the third one's copy into the back buffer)
+ 
+         bool passed(GLsync fence)
+@@ -408,8 +503,12 @@ namespace ps2_host_present::dxgi
+             }
+             g.fitFailures.store(0, std::memory_order_relaxed);
+             Picture &picture = g.pictures[g.next];
+-            if (!g.lockObjects(g.interopDevice, 1, &picture.object))
++            const bool lockFault = fault() == kFaultLock;
++            if (lockFault || !g.lockObjects(g.interopDevice, 1, &picture.object))
++            {
++                noteFailure(kFailLock, lockFault ? static_cast<unsigned long>(ERROR_BUSY) : static_cast<unsigned long>(GetLastError()));
+                 return flight;
++            }
+             g.next = (g.next + 1u) % static_cast<uint32_t>(g.pictures.size());
+             flight.locked = Clock::now();
+             // (GL's rows bottom up, Direct3D's top down: the blit turns the picture over)
+@@ -417,6 +516,17 @@ namespace ps2_host_present::dxgi
+             glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, job.texture, 0);
+             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, picture.framebuffer);
+             glBlitFramebuffer(0, 0, job.width, job.height, 0, job.height, job.width, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
++            if (job.lit >= 0) // (TODO 362: the picture check - the window's thread read its own picture; and this context's view of it)
++            {
++                flight.checked = true;
++                flight.checkLit = job.lit == 1;
++                unsigned char px[4] = {};
++                for (const int y : {0, job.height - 1})
++                {
++                    glReadPixels(0, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
++                    flight.sharedLit = flight.sharedLit || isCanary(px);
++                }
++            }
+             glBindFramebuffer(GL_FRAMEBUFFER, 0u);
+             flight.copied = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0u);
+             glFlush();
+@@ -601,10 +711,68 @@ namespace ps2_host_present::dxgi
+             const Clock::time_point t1 = Clock::now();
+             ID3D11Texture2D *back = nullptr;
+             HRESULT hr = g.swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void **>(&back));
++            const bool gotBuffer = SUCCEEDED(hr);
++            bool held = false;
+             if (SUCCEEDED(hr))
+             {
+                 g.context->CopyResource(back, flight.picture->shown);
+                 back->Release();
++                if (flight.checked) // (TODO 362: the picture check - the same picture's points as Direct3D has it)
++                {
++                    if (flight.checkLit)
++                    {
++                        D3D11_TEXTURE2D_DESC sd{};
++                        flight.picture->shown->GetDesc(&sd);
++                        if (g_check.staging && (g_check.width != static_cast<int>(sd.Width) || g_check.height != static_cast<int>(sd.Height)))
++                            release(g_check.staging);
++                        if (!g_check.staging)
++                        {
++                            sd.Usage = D3D11_USAGE_STAGING;
++                            sd.BindFlags = 0u;
++                            sd.MiscFlags = 0u;
++                            sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
++                            g.device->CreateTexture2D(&sd, nullptr, &g_check.staging);
++                            g_check.width = static_cast<int>(sd.Width);
++                            g_check.height = static_cast<int>(sd.Height);
++                        }
++                        D3D11_MAPPED_SUBRESOURCE mapped{};
++                        bool lit = false, read = false;
++                        if (g_check.staging)
++                        {
++                            g.context->CopyResource(g_check.staging, flight.picture->shown);
++                            if (SUCCEEDED(g.context->Map(g_check.staging, 0, D3D11_MAP_READ, 0, &mapped)))
++                            {
++                                read = true;
++                                const uint8_t *data = static_cast<const uint8_t *>(mapped.pData);
++                                for (const int y : {0, g_check.height - 1})
++                                    lit = lit || isCanary(data + static_cast<size_t>(y) * mapped.RowPitch);
++                                g.context->Unmap(g_check.staging, 0);
++                            }
++                        }
++                        if (g_check.done)
++                        {
++                            // (the other picture on its way decided it)
++                        }
++                        else if (read && lit)
++                        {
++                            g_check.done = true;
++                            std::fprintf(stderr, "[present] the picture check: Direct3D's copy shows what GL drew\n");
++                        }
++                        else if (!read && ++g_check.unread >= 3)
++                        {
++                            g_check.done = true;
++                            std::fprintf(stderr, "[present] the picture check could not read Direct3D's copy: left out\n");
++                        }
++                        else if (read && ++g_check.black >= 3)
++                        {
++                            g_check.done = true;
++                            std::fprintf(stderr, "[present] the picture check: Direct3D's copies miss what GL drew into the pictures ("
++                                                 "%d times; the present thread's GL %s it): the hand-over shows nothing here\n", g_check.black,
++                                         flight.sharedLit ? "saw" : "did not see");
++                            g_zeros.store(true, std::memory_order_relaxed);
++                        }
++                    }
++                }
+                 capture::take(g.device, g.context, flight.picture->shown, g.width, g.height); // (PS2X_PRESENT_CAPTURE)
+                 // (the copies out of `shown` marked: the texture is not drawn into again before they are done - TODO 98)
+                 if (!flight.picture->read && readGuard())
+@@ -618,10 +786,26 @@ namespace ps2_host_present::dxgi
+                     g.context->End(flight.picture->read);
+                     flight.picture->reading = true;
+                 }
++                // (TODO 362) Nothing is presented until the picture check has found its marks in Direct3D's copy: a window
++                // that has once shown a flip-model swap chain's picture shows GL's own swap no more (both Intel laptops: black
++                // after a fallback that came after presents), so the way back is only safe before the first present. A few
++                // pictures at the start (one on a healthy machine).
++                held = checkEnabled() && !g_check.done;
+                 const int interval = syncInterval();
+-                hr = g.swapChain->Present(static_cast<UINT>(interval), interval == 0 && g.tearing ? DXGI_PRESENT_ALLOW_TEARING : 0u);
++                if (!held)
++                    hr = fault() == kFaultPresent ? DXGI_ERROR_DEVICE_REMOVED
++                                                  : g.swapChain->Present(static_cast<UINT>(interval), interval == 0 && g.tearing ? DXGI_PRESENT_ALLOW_TEARING : 0u);
+             }
++            if (held)
++                return;
+             ++(SUCCEEDED(hr) ? g.presents : g.failed);
++            if (SUCCEEDED(hr))
++            {
++                g.presentFailures.store(0, std::memory_order_relaxed);
++                g.shownTotal.fetch_add(1u, std::memory_order_relaxed);
++            }
++            else
++                noteFailure(gotBuffer ? kFailPresent : kFailBuffer, static_cast<unsigned long>(hr));
+             if (statsEnabled())
+             {
+                 const Clock::time_point t2 = Clock::now();
+@@ -673,8 +857,11 @@ namespace ps2_host_present::dxgi
+                     if (g.jobs.empty() && g.stop)
+                         break;
+                 }
++                // (TODO 362) Told to stop while pictures cannot move on (broken(): stuck): they are left where they are.
++                if (g.stop && g.abandon)
++                    break;
+                 bool progressed = false;
+-                if (!flying.empty() && passed(flying.front().copied))
++                if (!flying.empty() && (fault() != kFaultFence || !flying.front().picture) && passed(flying.front().copied))
+                 {
+                     lock.unlock();
+                     finishCopy(flying.front());
+@@ -695,12 +882,25 @@ namespace ps2_host_present::dxgi
+                 }
+                 if (!progressed)
+                 {
++                    // (TODO 362, the stuck pictures' line: what it is waiting for)
++                    g.waitingOn.store(!flying.empty() ? 1 : (!g.jobs.empty() && g.fitted) ? 2 : 0, std::memory_order_relaxed);
+                     lock.unlock();
+                     std::this_thread::sleep_for(std::chrono::microseconds(500));
+                     lock.lock();
+                 }
++                else
++                    g.waitingOn.store(0, std::memory_order_relaxed);
+             }
+             lock.unlock();
++            // (TODO 362) Pictures left on their way (abandoned): unlocked where GL's copy is done, else left locked.
++            for (Flight &flight : flying)
++            {
++                if (flight.picture && passed(flight.copied))
++                    g.unlockObjects(g.interopDevice, 1, &flight.picture->object);
++                if (flight.copied)
++                    glDeleteSync(flight.copied);
++            }
++            flying.clear();
+             dropPictures();
+             if (g.source)
+                 glDeleteFramebuffers(1, &g.source);
+@@ -709,6 +909,11 @@ namespace ps2_host_present::dxgi
+                 g.closeDevice(g.interopDevice);
+             g.interopDevice = nullptr;
+             wglMakeCurrent(nullptr, nullptr);
++            {
++                std::lock_guard<std::mutex> lock(g.mutex);
++                g.finished.store(true, std::memory_order_release);
++            }
++            g.done.notify_all();
+         }
+ 
+         // The present thread's context: a hidden window of the window's pixel format, a context
+@@ -835,6 +1040,24 @@ namespace ps2_host_present::dxgi
+         DXGI_ADAPTER_DESC1 adapterDesc{};
+         chosen->GetDesc1(&adapterDesc);
+         g.intel = adapterDesc.VendorId == 0x8086u;
++        // (TODO 362) Two graphics chips (a laptop's built-in one with the screen, a dedicated one the game asks the driver
++        // for): GL may draw on another chip than the one whose screen the swap chain is for, where the interop may refuse
++        // or show nothing. Said, so a black window's log names it.
++        {
++            const char *vendor = reinterpret_cast<const char *>(glGetString(GL_VENDOR));
++            const char *renderer = reinterpret_cast<const char *>(glGetString(GL_RENDERER));
++            const std::string v = vendor ? vendor : "";
++            const UINT glVendor = v.find("NVIDIA") != std::string::npos                                         ? 0x10DEu
++                                  : v.find("Intel") != std::string::npos                                        ? 0x8086u
++                                  : (v.find("ATI") != std::string::npos || v.find("AMD") != std::string::npos) ? 0x1002u
++                                  : v.find("Microsoft") != std::string::npos                                    ? 0x1414u
++                                                                                                                : 0u;
++            if (glVendor && glVendor != adapterDesc.VendorId)
++                std::fprintf(stderr,
++                             "[present] two graphics chips: the window's screen is on %ls, GL draws on %s - if the window stays black, "
++                             "PS2X_PRESENT=gl in settings.ini\n",
++                             adapterDesc.Description, renderer ? renderer : v.c_str());
++        }
+         const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+         const auto createDevice = [&](ID3D11Device *&device, ID3D11DeviceContext *&context)
+         {
+@@ -897,6 +1120,11 @@ namespace ps2_host_present::dxgi
+         }
+         g.factory->MakeWindowAssociation(g.window, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
+         g.stop = false;
++        g.abandon = false;
++        g.finished.store(false, std::memory_order_relaxed);
++        g.openedAt = Clock::now();
++        if (fault() != kNoFault)
++            std::fprintf(stderr, "[present] PS2X_PRESENT_FAULT=%s: that failure forced on every picture (a test)\n", std::getenv("PS2X_PRESENT_FAULT"));
+         g.thread = std::thread(run);
+         std::fprintf(stderr, "[present] Direct3D 11 on %ls; swap chain %dx%d, 3 buffers, flip discard%s; presents %s\n",
+                      adapterDesc.Description, g.width, g.height, g.tearing ? ", may tear" : "",
+@@ -905,7 +1133,12 @@ namespace ps2_host_present::dxgi
+         return true;
+     }
+ 
+-    uint64_t present(unsigned int texture, int width, int height)
++    bool wantsCheck()
++    {
++        return g.swapChain && checkThis(g.handed + 1u);
++    }
++
++    uint64_t present(unsigned int texture, int width, int height, int lit)
+     {
+         if (!g.swapChain || width <= 0 || height <= 0)
+             return 0u;
+@@ -919,6 +1152,7 @@ namespace ps2_host_present::dxgi
+         job.height = height;
+         job.drawn = drawn;
+         job.at = Clock::now();
++        job.lit = lit;
+         {
+             std::lock_guard<std::mutex> lock(g.mutex);
+             g.jobs.push_back(job);
+@@ -929,9 +1163,63 @@ namespace ps2_host_present::dxgi
+ 
+     // GL cannot draw into Direct3D's textures here (NVIDIA's GTX 1080, 2026-10-26: every picture's
+     // try made them anew and failed, at 15 pictures a second): the caller goes back to GL's swap.
++    // (TODO 362) Also: a run of failed presents (the interop's lock, the back buffer, the present: before, only counted, the
++    // window stayed black for good), and pictures handed over that have not moved on for 5 s (a fence or a query that never
++    // passes: before, the window's thread crawled behind them at a picture each 250 ms, black). And the watchdog's line: no
++    // picture shown 10 s after the swap chain was made while pictures are handed over - the stage reached, said once.
++    // (The window's thread, each picture.)
+     bool broken()
+     {
+-        return g.fitFailures.load(std::memory_order_relaxed) >= 3;
++        if (g.fitFailures.load(std::memory_order_relaxed) >= 3)
++            return true;
++        const Clock::time_point now = Clock::now();
++        const uint64_t copied = g.copied.load(std::memory_order_acquire), shown = g.shownTotal.load(std::memory_order_relaxed);
++        static bool watched = false;
++        if (!watched && g.handed > 0u && shown == 0u && now - g.openedAt > std::chrono::seconds(10))
++        {
++            watched = true;
++            const int waiting = g.waitingOn.load(std::memory_order_relaxed);
++            std::fprintf(stderr,
++                         "[present] no picture has reached the window in 10 s: %llu handed over, %llu copied into Direct3D's textures, "
++                         "%d failed in a row (the last: %s %08lx); the present thread %s\n",
++                         static_cast<unsigned long long>(g.handed), static_cast<unsigned long long>(copied),
++                         g.presentFailures.load(std::memory_order_relaxed),
++                         g.lastFailure.load(std::memory_order_relaxed) ? failureName(g.lastFailure.load(std::memory_order_relaxed)) : "none",
++                         g.lastCode.load(std::memory_order_relaxed),
++                         waiting == 1 ? "waits for GL's copy to finish" : waiting == 2 ? "waits for the presenting device's copy out" : "is not held up");
++        }
++        // (PS2X_PRESENT_FALLBACK=0: the window stays with the swap chain whatever fails, as before - an A/B)
++        static const bool fallback = !std::getenv("PS2X_PRESENT_FALLBACK") || *std::getenv("PS2X_PRESENT_FALLBACK") != '0';
++        if (!fallback)
++            return false;
++        if (g_zeros.load(std::memory_order_relaxed))
++            return true;
++        if (g.presentFailures.load(std::memory_order_relaxed) >= kFailedInARow)
++        {
++            std::fprintf(stderr, "[present] %d presents in a row failed (the last: %s %08lx)\n", g.presentFailures.load(std::memory_order_relaxed),
++                         failureName(g.lastFailure.load(std::memory_order_relaxed)), g.lastCode.load(std::memory_order_relaxed));
++            return true;
++        }
++        static uint64_t seen = 0u;
++        static Clock::time_point moved{};
++        if (copied != seen || g.handed <= copied || moved == Clock::time_point{})
++        {
++            seen = copied;
++            moved = now;
++        }
++        else if (now - moved > std::chrono::seconds(5))
++        {
++            const int waiting = g.waitingOn.load(std::memory_order_relaxed);
++            std::fprintf(stderr, "[present] the pictures have not moved on for 5 s (%llu handed over, %llu copied): the present thread %s\n",
++                         static_cast<unsigned long long>(g.handed), static_cast<unsigned long long>(copied),
++                         waiting == 1 ? "waits for GL's copy to finish" : waiting == 2 ? "waits for the presenting device's copy out" : "is not held up");
++            {
++                std::lock_guard<std::mutex> lock(g.mutex);
++                g.abandon = true;
++            }
++            return true;
++        }
++        return false;
+     }
+ 
+     void waitCopied(uint64_t number)
+@@ -949,8 +1237,22 @@ namespace ps2_host_present::dxgi
+             {
+                 std::lock_guard<std::mutex> lock(g.mutex);
+                 g.stop = true;
++                g.abandon = true; // (TODO 362: pictures on their way are left, not finished - one that cannot finish held it)
+             }
+             g.wake.notify_one();
++            // (TODO 362) Not waited for without end: a present thread held inside a driver's call is left behind (and what
++            // it uses is not freed) - the window goes on with GL's swap either way.
++            bool ended = false;
++            {
++                std::unique_lock<std::mutex> lock(g.mutex);
++                ended = g.done.wait_for(lock, std::chrono::seconds(2), []() { return g.finished.load(std::memory_order_acquire); });
++            }
++            if (!ended)
++            {
++                std::fprintf(stderr, "[present] the present thread did not stop in 2 s: left behind\n");
++                g.thread.detach();
++                return;
++            }
+             g.thread.join();
+         }
+         else if (g.interopDevice)
+@@ -975,6 +1277,7 @@ namespace ps2_host_present::dxgi
+             DestroyWindow(g.partWindow);
+         g.partWindow = nullptr;
+         g.partDc = nullptr;
++        release(g_check.staging);
+         release(g.swapChain);
+         release(g.shareFence);
+         release(g.presentFence);

@@ -1,5 +1,11 @@
 # What's new
 
+## 0.7.4
+
+**Fixed**
+- On some PCs the game showed only a black window, with sound (and F1 did not show either). When the usual way of
+  showing the picture fails, the game now switches to another one, and the log says what failed.
+
 ## 0.7.3
 
 **New**
