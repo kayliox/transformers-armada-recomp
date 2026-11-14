@@ -2045,6 +2045,18 @@ namespace
         g_owedYaw = g_owedPitch = 0.0f;
     }
 
+    // (TF_TURN_TEST's next speed once its tick is reached - from the walking camera's turn and, for the other cameras
+    // (the car's: TODO 347), from mouseLook)
+    void applyTestTurn(uint64_t tick)
+    {
+        if (g_testTurnNext < g_testTurns.size() && tick >= g_testTurns[g_testTurnNext].tick)
+        {
+            const TestTurn &t = g_testTurns[g_testTurnNext++];
+            view_turn::setTestMouse(t.x, t.y);
+            std::fprintf(stderr, "[turn] test mouse %.0f, %.0f pixels a second from tick %llu\n", t.x, t.y, static_cast<unsigned long long>(t.tick));
+        }
+    }
+
     void cameraTurn(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         if (cutsceneOwnsView(rdram))
@@ -2055,12 +2067,7 @@ namespace
             return;
         }
         const uint32_t camera = getRegU32(ctx, 5);
-        if (g_testTurnNext < g_testTurns.size() && testTick(runtime) >= g_testTurns[g_testTurnNext].tick)
-        {
-            const TestTurn &t = g_testTurns[g_testTurnNext++];
-            view_turn::setTestMouse(t.x, t.y);
-            std::fprintf(stderr, "[turn] test mouse %.0f, %.0f pixels a second from tick %llu\n", t.x, t.y, static_cast<unsigned long long>(t.tick));
-        }
+        applyTestTurn(testTick(runtime));
         float pixelsX = 0.0f, pixelsY = 0.0f;
         float mouseYaw = 0.0f, mousePitch = 0.0f; // (the mouse's part of the turn: N9's turn for every picture)
         uint8_t *angles = camera != 0u ? getMemPtr(rdram, camera + 0x118u) : nullptr;
@@ -2159,7 +2166,36 @@ namespace
         if (camera != 0u)
             noteAimStick(rdram, camera);
         static const bool springForMouse = std::getenv("TF_MOUSE_LOOKSPRING") && *std::getenv("TF_MOUSE_LOOKSPRING") == '1';
-        uint8_t *stiffness = camera != 0u && !springForMouse && mouseIsTurning() ? getMemPtr(rdram, camera + 0x300u) : nullptr;
+        // (TODO 363) The game reads its Look Spring option into the context's stiffness only when the Autobot is made (a level's
+        // start): set Off in the pause menu's options in a level, it went on springing until the next level (the PS2 the same:
+        // the option's setter 0x278010 only stores the byte). While the option byte (the options [0x6CF244] +2) is 0 the
+        // stiffness reads 0 for the call too, so Off acts at once. Switched On in a level made with it Off, the stiffness is
+        // written as the game writes it when the Autobot is made (0x2917E8: option 2 set -> the float at 0x63B320, 0.75;
+        // else 0), so On acts at once too. TF_LOOKSPRING_LIVE=0: as before.
+        static const bool springLive = !(std::getenv("TF_LOOKSPRING_LIVE") && *std::getenv("TF_LOOKSPRING_LIVE") == '0');
+        bool springOptionOff = false;
+        if (springLive && camera != 0u)
+        {
+            uint32_t options = 0u;
+            if (const uint8_t *p = getConstMemPtr(rdram, 0x006CF244u))
+                std::memcpy(&options, p, sizeof(options));
+            if (options >= 0x00100000u && options < PS2_RAM_SIZE - 4u)
+                if (const uint8_t *b = getConstMemPtr(rdram, options + 2u))
+                {
+                    springOptionOff = *b == 0u;
+                    float now = 0.0f, made = 0.0f;
+                    uint8_t *s = getMemPtr(rdram, camera + 0x300u);
+                    const uint8_t *g = getConstMemPtr(rdram, 0x0063B320u);
+                    if (!springOptionOff && s && g)
+                    {
+                        std::memcpy(&now, s, sizeof(now));
+                        std::memcpy(&made, g, sizeof(made));
+                        if (now == 0.0f && made > 0.0f && made < 10.0f)
+                            std::memcpy(s, &made, sizeof(made)); // (the game's own value, as at the Autobot's making)
+                    }
+                }
+        }
+        uint8_t *stiffness = camera != 0u && ((!springForMouse && mouseIsTurning()) || springOptionOff) ? getMemPtr(rdram, camera + 0x300u) : nullptr;
         float savedStiffness = 0.0f;
         if (stiffness)
         {
@@ -2209,7 +2245,7 @@ namespace
             std::fprintf(stderr, "[turn log] tick %llu pitch %.5f yaw %.5f view %.4f %.4f %.4f cam %.4f %.4f %.4f %.4f spring %.3f%s\n", static_cast<unsigned long long>(testTick(runtime)), a[0], a[1],
                          view[0], view[1], view[2], cq[0], cq[1], cq[2], cq[3],
                          [&] { float v = 0.0f; if (const uint8_t *p = getConstMemPtr(rdram, camera + 0x300u)) std::memcpy(&v, p, sizeof(v)); return v; }(),
-                         stiffness ? " (held off: the mouse turns)" : "");
+                         stiffness ? (springOptionOff ? " (held off: the option is Off)" : " (held off: the mouse turns)") : "");
         }
         if (angles && idField)
             view_turn::noteTurned(rdram, camera, mouseYaw, mousePitch, 1.0f / framesPerSecond());
@@ -2297,6 +2333,102 @@ namespace
         g_turretTurn(rdram, ctx, runtime);
     }
 
+    // (TODO 347) The car's camera and the mouse. The car's camera (taVehicleCameraScript, its update 0x2F5910) does not
+    // turn at a rate as the walking one does: the right stick's deflection is a place - its X a look angle beside the car
+    // of up to 90 degrees (x D_006CBE9C, pi/2), its Y a look up of up to 55 (x D_006CBEA0) - reached through a spring each
+    // (+0xA0 the yaw's, +0x84 the pitch's: position +0, target +4 = the stick, velocity +8; stiffness 20, damping 9 =
+    // critically damped), and the stick let go is the spring back behind the car. The mouse as a stick (mouseLook below)
+    // is a deflection for only the frames it moves: the view went out a little and was pulled straight back, the camera
+    // fighting the mouse. Now the mouse's travel turns those springs' positions directly, an angle per pixel as the walking
+    // camera's: all the way round (the yaw kept in [-pi, pi), the look up within the stick's own range); the mouse still
+    // for TF_CAR_MOUSE_HOLD seconds (1.5; 0: the mouse a stick here as before), the game's own spring takes the view back
+    // behind the car, smoothly. The pad's stick is left as it was; the car's heading follow (its own spring) goes on.
+    // TF_CAR_LOOK_LOG=1: each frame the camera ran with the mouse's turn, the angles and the view, for measuring.
+    constexpr uint32_t kVehicleCameraUpdate = 0x002F5910u;
+    constexpr uint32_t kCarYawSpring = 0xA0u, kCarPitchSpring = 0x84u; // (each: position +0, velocity +8)
+    constexpr float kCarYawPerUnit = 1.5707964f;    // D_006CBE9C
+    constexpr float kCarPitchPerUnit = 0.95993108f; // D_006CBEA0
+    PS2Runtime::RecompiledFunction g_vehicleCameraUpdate = nullptr;
+    uint64_t g_carCameraKick = 0u;           // g_frameKicks + 1 when the car's camera last ran (0: not yet)
+    float g_carMouseX = 0.0f, g_carMouseY = 0.0f; // the mouse's travel the car's camera has not taken yet, pixels
+    bool g_carMouseHeld = false;             // the mouse holds the view (else the game's springs)
+    float g_carYaw = 0.0f, g_carPitch = 0.0f, g_carStill = 0.0f;
+
+    float carMouseHold()
+    {
+        static const float hold = [] {
+            const char *v = std::getenv("TF_CAR_MOUSE_HOLD");
+            return v && *v ? static_cast<float>(std::atof(v)) : 1.5f;
+        }();
+        return hold;
+    }
+
+    // (mouseLook's question: the car's camera is the one running)
+    bool carCameraTakesMouse() { return carMouseHold() > 0.0f && g_carCameraKick != 0u && g_frameKicks <= g_carCameraKick + 2u; }
+
+    void vehicleCameraUpdate(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint32_t self = getRegU32(ctx, 4);
+        const float dt = ctx->f[12];
+        // (a camera that was not running: entered again - the game puts its springs behind the car itself)
+        if (g_carCameraKick == 0u || g_frameKicks > g_carCameraKick + 1u)
+        {
+            g_carMouseHeld = false;
+            g_carMouseX = g_carMouseY = 0.0f;
+        }
+        g_carCameraKick = g_frameKicks + 1u;
+        uint8_t *s = carMouseHold() > 0.0f ? getMemPtr(rdram, self) : nullptr;
+        const float px = g_carMouseX, py = g_carMouseY;
+        g_carMouseX = g_carMouseY = 0.0f;
+        if (s)
+        {
+            if (px != 0.0f || py != 0.0f)
+            {
+                if (!g_carMouseHeld)
+                {
+                    // (from where the view is now - the game's spring may be on its way back)
+                    float yawUnits = 0.0f, pitchUnits = 0.0f;
+                    std::memcpy(&yawUnits, s + kCarYawSpring, sizeof(yawUnits));
+                    std::memcpy(&pitchUnits, s + kCarPitchSpring, sizeof(pitchUnits));
+                    g_carYaw = std::isfinite(yawUnits) ? yawUnits * kCarYawPerUnit : 0.0f;
+                    g_carPitch = std::isfinite(pitchUnits) ? std::clamp(pitchUnits * kCarPitchPerUnit, 0.0f, kCarPitchPerUnit) : 0.0f;
+                    g_carMouseHeld = true;
+                }
+                g_carYaw = std::remainder(g_carYaw + px * kRadiansPerPixel, 6.2831853f);
+                if (g_carYaw >= 3.1415927f)
+                    g_carYaw -= 6.2831853f;
+                g_carPitch = std::clamp(g_carPitch + py * kRadiansPerPixel, 0.0f, kCarPitchPerUnit);
+                g_carStill = 0.0f;
+            }
+            else if (g_carMouseHeld && (g_carStill += dt) >= carMouseHold())
+                g_carMouseHeld = false; // (the follow takes over: the game's own springs ease the view back)
+            if (g_carMouseHeld)
+            {
+                const float zero = 0.0f, yawUnits = g_carYaw / kCarYawPerUnit, pitchUnits = g_carPitch / kCarPitchPerUnit;
+                std::memcpy(s + kCarYawSpring, &yawUnits, sizeof(yawUnits));
+                std::memcpy(s + kCarYawSpring + 8u, &zero, sizeof(zero));
+                std::memcpy(s + kCarPitchSpring, &pitchUnits, sizeof(pitchUnits));
+                std::memcpy(s + kCarPitchSpring + 8u, &zero, sizeof(zero));
+            }
+        }
+        g_vehicleCameraUpdate(rdram, ctx, runtime);
+        static const bool log = std::getenv("TF_CAR_LOOK_LOG") && *std::getenv("TF_CAR_LOOK_LOG") == '1';
+        if (log && s)
+        {
+            // (the springs as the update left them; the view: eye +0x10, looked-at point +0x50)
+            float f[2] = {}, eye[3] = {}, at[3] = {};
+            std::memcpy(&f[0], s + kCarYawSpring, 4);
+            std::memcpy(&f[1], s + kCarPitchSpring, 4);
+            std::memcpy(eye, s + 0x10u, sizeof(eye));
+            std::memcpy(at, s + 0x50u, sizeof(at));
+            const float viewYaw = std::atan2(at[1] - eye[1], at[0] - eye[0]) * 57.29578f;
+            const float viewPitch = std::atan2(at[2] - eye[2], std::hypot(at[0] - eye[0], at[1] - eye[1])) * 57.29578f;
+            std::fprintf(stderr, "[car look] tick %llu dt %.4f mouse %+.0f,%+.0f %s yaw %+.2f pitch %+.2f deg; view yaw %+.2f pitch %+.2f, eye %.1f %.1f %.1f\n",
+                         static_cast<unsigned long long>(tf::port::testTickNow()), dt, px, py, g_carMouseHeld ? "held" : "game",
+                         f[0] * kCarYawPerUnit * 57.29578f, f[1] * kCarPitchPerUnit * 57.29578f, viewYaw, viewPitch, eye[0], eye[1], eye[2]);
+        }
+    }
+
     void mouseLook()
     {
         // (The third-person camera took this frame's travel itself: cameraTurn above.)
@@ -2309,6 +2441,7 @@ namespace
             dropMouseTravel(); // (TODO 176: a cutscene's view)
             return;
         }
+        applyTestTurn(tf::port::testTickNow());
         const float yawPerFrame = kYawPerSecond / framesPerSecond();
         const float pitchPerFrame = kPitchPerSecond / framesPerSecond();
         float pixelsX = 0.0f, pixelsY = 0.0f;
@@ -2323,6 +2456,16 @@ namespace
         {
             g_mouseTurned = true; // (TODO 292 C: the mouse turns the view)
             g_mouseTurnFrame = g_frameKicks;
+        }
+        if (carCameraTakesMouse())
+        {
+            // (TODO 347: the car's camera turns by the travel itself - vehicleCameraUpdate above - not by a stick)
+            g_carMouseX += pixelsX;
+            g_carMouseY += pixelsY;
+            if (g_owedYaw != 0.0f || g_owedPitch != 0.0f)
+                ps2_host_input::setMouseStick(0.0f, 0.0f);
+            g_owedYaw = g_owedPitch = 0.0f;
+            return;
         }
         // (TODO 287: the game inverts the stick by the save's option; taken back for the mouse, which has its own setting)
         if (g_stickInvertY)
@@ -10056,6 +10199,8 @@ namespace
         ultrawide::install(runtime);
         sound_trace::install(runtime); // TF_PITCH_LOG=1 (sound_trace.cpp)
         cam_trace::install(runtime);   // TF_CAM_TRACE=1 (cam_trace.cpp)
+        if ((g_vehicleCameraUpdate = runtime.lookupFunction(kVehicleCameraUpdate)) != nullptr)
+            runtime.registerFunction(kVehicleCameraUpdate, vehicleCameraUpdate); // (TODO 347: the car's camera and the mouse; after cam_trace's, which it calls)
         file_trace::install(runtime);  // TF_FILE_LOG=1 (file_trace.cpp)
         sirens_trace::install(runtime); // TF_SIRENS_LOG=<file> (sirens_trace.cpp)
         native_disc::install(runtime);  // TF_NATIVE_DISC=1: TwoFish's disc reads answered on the host (native_disc.cpp)

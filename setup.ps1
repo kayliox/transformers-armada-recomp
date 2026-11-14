@@ -189,6 +189,7 @@ try {
     # (a program built on this PC taken by an antivirus: build.ps1 says so in words a player can act on)
     $m = [regex]::Match("$_", "Your antivirus blocked (\S+?\.exe)\.")
     if ($m.Success) { Write-AntivirusEvidence $m.Groups[1].Value $Port; Fail "$_" }
+    if ("$_".StartsWith("Windows' Smart App Control blocked")) { Fail "$_" }  # (TODO 371: build.ps1's plain words)
     throw
 }
 
@@ -200,7 +201,11 @@ if ($SkipHdTextures) {
     # (the choices were written before the build, above)
     Step "Making the HD textures (tools\make_hd_textures.ps1)"
     & (Join-Path $Port "tools\make_hd_textures.ps1") -Python $Python
-    if (-not $?) { Fail "making the HD textures failed (see above); -SkipHdTextures plays without them" }
+    $hdOk = $?; $hdCode = $LASTEXITCODE
+    # (TODO 371) 7: Windows' Smart App Control refused a file the HD textures need - said above; the setup goes on, the
+    # game draws its own textures.
+    if ($hdCode -eq 7) { Write-StepLog "setup: HD textures skipped (Smart App Control)" }
+    elseif (-not $hdOk) { Fail "making the HD textures failed (see above); -SkipHdTextures plays without them" }
 }
 
 # --- the steps of a repository that holds this folder (its hooks) ---------------------------------

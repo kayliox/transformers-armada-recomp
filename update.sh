@@ -16,6 +16,7 @@ set -uo pipefail
 port=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo=$port state=$port/.setup.json states=$port/states result_file=$port/states/update_result.txt
 force=0 check_only=0 wait_pid=0 play=0
+args=("$@")
 while [ $# -gt 0 ]; do
     case "$1" in
     --force) force=1; shift ;;
@@ -27,6 +28,27 @@ while [ $# -gt 0 ]; do
     *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
+# (SteamOS, Bazzite) The game was built in a container - tfa-setup keeps its name in .setup.json ("Container"); set up
+# by hand as the README says, it is tfa-build - and this system has no build tools: the update runs in that container
+# (the game's own "Update now" too), and the game is started again here afterwards, not in the container: its
+# libraries are this system's.
+if [ -z "${TF_UPDATE_PLAY_OUTSIDE:-}" ] && ! command -v cmake >/dev/null 2>&1 && command -v distrobox >/dev/null 2>&1; then
+    box=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("Container", ""))' "$state" 2>/dev/null || true)
+    if [ -z "$box" ] && distrobox list --no-color 2>/dev/null | awk -F'|' '{gsub(/ /, "", $2); print $2}' | grep -qx tfa-build; then
+        box=tfa-build
+    fi
+    if [ -n "$box" ]; then
+        flag=$port/states/.play_after_update
+        rm -f "$flag"
+        distrobox enter "$box" -- env TF_UPDATE_PLAY_OUTSIDE="$flag" "$port/update.sh" ${args[@]+"${args[@]}"}
+        code=$?
+        if [ -e "$flag" ]; then
+            rm -f "$flag"
+            setsid "$port/play.sh" >/dev/null 2>&1 </dev/null &
+        fi
+        exit "$code"
+    fi
+fi
 exec > >(tee -a "$port/update.log") 2>&1
 start_time=$SECONDS
 
@@ -44,6 +66,8 @@ start_game() {
     [ "$play" = 1 ] || return 0
     step "Starting the game"
     [ -x "$port/out/build/transformers/TransformersRecomp" ] || { echo "update: the game is missing ($port/out/build/transformers/TransformersRecomp)"; return 0; }
+    # (in the build container: the update.sh outside it starts the game, on the system - see above)
+    if [ -n "${TF_UPDATE_PLAY_OUTSIDE:-}" ]; then mkdir -p "$states" && : >"$TF_UPDATE_PLAY_OUTSIDE"; return 0; fi
     setsid "$port/play.sh" >/dev/null 2>&1 </dev/null &
 }
 fail() {

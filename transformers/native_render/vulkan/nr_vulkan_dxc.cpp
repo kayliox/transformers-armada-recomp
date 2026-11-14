@@ -10,13 +10,16 @@
 #endif
 #include <windows.h> // (whole: DXC's interfaces are COM's - IUnknown, BSTR, IStream)
 #include <dxcapi.h>
+#else
+// (Linux: the same release's libdxcompiler.so; its header brings the COM types itself - WinAdapter.h)
+#include <dlfcn.h>
+#include <dxcapi.h>
 #endif
 
 #include <cstring>
 
 namespace nr::vulkan::dxc
 {
-#if defined(_WIN32)
     namespace
     {
         IDxcUtils *g_utils = nullptr;
@@ -29,6 +32,7 @@ namespace nr::vulkan::dxc
     {
         if (g_compiler)
             return true;
+#if defined(_WIN32)
         // (that file only, never another dxcompiler.dll found on the PATH; its own dependencies from its folder or System32)
         const std::wstring path = wide(library);
         HMODULE dll = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -38,6 +42,17 @@ namespace nr::vulkan::dxc
             return false;
         }
         auto create = reinterpret_cast<DxcCreateInstanceProc>(reinterpret_cast<void *>(GetProcAddress(dll, "DxcCreateInstance")));
+#else
+        // (that file only, by its full path: never a libdxcompiler.so found on the system's library path)
+        void *so = dlopen(library, RTLD_NOW | RTLD_LOCAL);
+        if (!so)
+        {
+            const char *e = dlerror();
+            why = std::string("cannot load ") + library + (e ? std::string(": ") + e : std::string());
+            return false;
+        }
+        auto create = reinterpret_cast<DxcCreateInstanceProc>(dlsym(so, "DxcCreateInstance"));
+#endif
         if (!create)
         {
             why = std::string(library) + " has no DxcCreateInstance";
@@ -101,18 +116,4 @@ namespace nr::vulkan::dxc
         result->Release();
         return !spirv.empty();
     }
-#else
-    bool load(const char *, std::string &why)
-    {
-        why = "no shader compiler on this system yet";
-        return false;
-    }
-    bool compile(const char *, size_t, const char *, const char *, const std::vector<std::pair<std::string, std::string>> &,
-                 std::vector<uint32_t> &spirv, std::string &errors)
-    {
-        spirv.clear();
-        errors = "no shader compiler on this system yet";
-        return false;
-    }
-#endif
 }

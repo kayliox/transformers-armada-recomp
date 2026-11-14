@@ -52,11 +52,29 @@ namespace nr::pace
     //    the wall clock alone; a new cap (Unlimited to a cap included) starts afresh.
     //  - a gate: at least three quarters of a period since the last picture went, nothing owed - bunched arrivals and a
     //    stall's catch-up never pass two at once, and an offset shrinks by a quarter period a picture.
+    // (TODO 336 (24)) The two rules fail differently. Without credit (NoCredit) a picture's moment came too soon after the
+    // last shown one's - a loading screen above the cap: it waits, and is left out once a newer picture is ready. With its
+    // credit and only the gate against it (Gate) it merely came close behind the last one - the timing's jitter, a
+    // millisecond at a cap of 240, where the gate leaves 1.04 ms: it waits the gate's rest out and is shown. (0.7.2 left
+    // it out as well when the next picture was ready, which at such rates it always is: 3.5% of the pictures at a cap of
+    // 240 - Testbench, the game at 239 a second.) Left out with its credit only when the hand-over is a whole period
+    // behind its time (a stall's catch-up burst: the newest shown).
     // capDueAt(t, moment): when that picture may go by the wall clock (t itself when it may now, or without a cap);
     // capTryTake(t, moment): it may go at t - checked and taken under the one lock (true without a cap). Every picture
     // shown under a cap goes through capTryTake. Any thread.
+    // capTry: the same, saying which rule holds the picture.
     int64_t capDueAt(int64_t t, int64_t momentNs);
     bool capTryTake(int64_t t, int64_t momentNs);
+    enum class CapAnswer { Go, NoCredit, Gate };
+    CapAnswer capTry(int64_t t, int64_t momentNs);
+    // The gate's holds since the last call (the pacing log): the pictures it held, how long in all (ms) and how much of
+    // that the waiting thread spent giving up time slices rather than asleep (ms: the precise wait's cost). Any thread.
+    struct GateHolds
+    {
+        unsigned pictures = 0u;
+        double heldMs = 0.0, slicesMs = 0.0;
+    };
+    GateHolds takeGateHolds();
 
     // A picture's moment and the VBlanks' clock it was made on (from the frame: Frame::dueNs / PictureOut::dueNs,
     // periodNs, pictureNs, refreshNs, vblanksOnRefresh).

@@ -1,0 +1,22 @@
+From: TPepperoni666 <TPepperoni666@users.noreply.github.com>
+Subject: [PATCH] SDL3's window: SIGINT / SIGTERM end the process at once (as raylib's)
+
+SDL installs handlers that turn SIGINT / SIGTERM into a quit event; the window's teardown then ran on a display
+that could already be gone (a compositor ended with the game) and its X11 calls never returned, or Xlib's I/O
+error handler called exit() and hung there. SDL_HINT_NO_SIGNAL_HANDLERS: the default action, as under raylib.
+---
+diff --git a/ps2xRuntime/src/lib/ps2_platform.cpp b/ps2xRuntime/src/lib/ps2_platform.cpp
+--- a/ps2xRuntime/src/lib/ps2_platform.cpp
++++ b/ps2xRuntime/src/lib/ps2_platform.cpp
+@@ -654,6 +654,11 @@
+         State &s = S();
+         // Gamepads read while another window has the focus (as GLFW's: the pad code asks about the focus itself).
+         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
++        // SIGINT / SIGTERM end the process at once, as under raylib's window: SDL's own handlers would turn them into a
++        // quit event and the window's teardown - and when the display went away with the signal (a compositor ended
++        // with the game, Steam's "Exit game" on a nested session) that teardown's X11 calls waited for an answer that
++        // never came, or Xlib's I/O error handler called exit() and its handlers hung: the game stayed until SIGKILL.
++        SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+         // The native DualSense / DualShock 4 code (ps2_sony_pad.h) owns Sony pads' HID unless PS2X_GAMEPAD_BACKEND=glfw
+         // (Steam Input, DS4Windows): SDL then leaves their HID alone (it would write their output reports too).
+         {

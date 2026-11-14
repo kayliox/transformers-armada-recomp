@@ -9,19 +9,43 @@
 #   ./setup.sh            # again later: reuses the path it remembered
 #   ./setup.sh --gentle on   # (TODO 310) easy on the PC: the build on half the processor threads at a lower priority
 #                            # (kept in hd_textures/hd_options.json, so update.sh goes easy too; --gentle off undoes it)
+#   ./setup.sh --packages ubuntu   # the packages the build needs (ubuntu, debian, fedora or arch), on one line: for a
+#                                  # setup program or a container to install, nothing else done
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 state=$root/.setup.json
-iso="" gentle=""
+iso="" gentle="" packages=""
 while [ $# -gt 0 ]; do
     case "$1" in
     --iso) iso=$2; shift 2 ;;
     --gentle) gentle=$2; shift 2 ;;
-    -h | --help) sed -n '2,12p' "$0"; exit 0 ;;
+    --packages) packages=$2; shift 2 ;;
+    -h | --help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
+# The build's packages on each distribution: the message below lists them, --packages prints one list (the Linux
+# tfa-setup installs it in its build container on SteamOS and Bazzite). curl, bison, flex, Perl's JSON, the Vulkan and
+# SPIR-V headers are for the native renderer, built through vkd3d.
+ubuntu_packages="git cmake ninja-build g++ pkg-config python3 libgl-dev libx11-dev libxrandr-dev libxinerama-dev
+    libxcursor-dev libxi-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev
+    curl bison flex libjson-perl libvulkan-dev spirv-headers"
+fedora_packages="git cmake ninja-build gcc-c++ pkgconf python3 mesa-libGL-devel libX11-devel libXrandr-devel
+    libXinerama-devel libXcursor-devel libXi-devel ffmpeg-free-devel curl bison flex perl-JSON vulkan-headers
+    spirv-headers-devel"
+arch_packages="git cmake ninja gcc pkgconf python mesa libx11 libxrandr libxinerama libxcursor libxi ffmpeg
+    curl bison flex perl-json vulkan-headers spirv-headers"
+if [ -n "$packages" ]; then
+    case "$packages" in
+    ubuntu | debian) list=$ubuntu_packages ;;
+    fedora) list=$fedora_packages ;;
+    arch) list=$arch_packages ;;
+    *) echo "--packages: ubuntu, debian, fedora or arch" >&2; exit 2 ;;
+    esac
+    echo $list # (unquoted: one line, one space between)
+    exit 0
+fi
 # (TODO 310) Each step with its time to TF_STEP_LOG when the setup or the update set it, synced to the disk at once: it
 # names the step even when the PC went off (tools/step_log.ps1's, on Windows).
 steplog() { if [ -n "${TF_STEP_LOG:-}" ]; then printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$TF_STEP_LOG" && sync "$TF_STEP_LOG" 2>/dev/null; fi; return 0; }
@@ -83,18 +107,15 @@ SteamOS keeps its system read-only. Build inside a container instead, e.g.:
 then install the packages below in it and run ./setup.sh there (the game itself runs on SteamOS).
 EOF
     fi
-    cat <<'EOF'
+    # (each list as it is written above: its lines end in " \" here, for copying)
+    shown() { printf '%s\n' "$1" | sed -e '$!s/$/ \\/'; }
+    cat <<EOF
 Ubuntu / Debian:
-  sudo apt install git cmake ninja-build g++ pkg-config python3 libgl-dev libx11-dev libxrandr-dev libxinerama-dev \
-    libxcursor-dev libxi-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev \
-    curl bison flex libjson-perl libvulkan-dev spirv-headers
+  sudo apt install $(shown "$ubuntu_packages")
 Fedora:
-  sudo dnf install git cmake ninja-build gcc-c++ pkgconf python3 mesa-libGL-devel libX11-devel libXrandr-devel \
-    libXinerama-devel libXcursor-devel libXi-devel ffmpeg-free-devel curl bison flex perl-JSON vulkan-headers \
-    spirv-headers-devel
+  sudo dnf install $(shown "$fedora_packages")
 Arch:
-  sudo pacman -S git cmake ninja gcc pkgconf python mesa libx11 libxrandr libxinerama libxcursor libxi ffmpeg \
-    curl bison flex perl-json vulkan-headers spirv-headers
+  sudo pacman -S $(shown "$arch_packages")
 (curl, bison, flex, Perl's JSON, the Vulkan and SPIR-V headers: for the native renderer, built through vkd3d.)
 Then run ./setup.sh again.
 EOF

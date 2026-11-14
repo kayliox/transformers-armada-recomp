@@ -17,6 +17,16 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace nr::pace
 {
     int mode()
@@ -41,6 +51,8 @@ namespace nr::pace
     {
         std::atomic<int> g_pictureCap{0};
         std::atomic<unsigned> g_capDrops{0};
+        std::atomic<unsigned> g_gateHeld{0};                    // (TODO 336 (24): the gate's holds, for the pacing log)
+        std::atomic<int64_t> g_gateHeldNs{0}, g_gateSlicesNs{0};
 
         std::mutex g_capMutex;       // (the cap's state below)
         int64_t g_capLastNs = 0;     // when the last picture went (0: none yet - the next one goes at once)
@@ -64,6 +76,40 @@ namespace nr::pace
                 : 0.0;
             return std::min(1.1, g_capCredit + std::max(byMoment, byWall));
         }
+
+        // (TODO 336 (24)) A wait to a moment on the steady clock, to about a tenth of a millisecond - for the gate's rest,
+        // a millisecond or less: a sleep ends up to a timer step late (1 to 2 ms where half a millisecond was asked for),
+        // a quarter to half a period at a cap of 240. Windows: a high-resolution timer (Windows 10 1803 on) to 0.3 ms
+        // before the moment; without one, and elsewhere, sleeps while 2 ms or more are left. The rest is given up time
+        // slice by time slice: under half a millisecond with the timer, and only where the gate holds a picture (a few
+        // times a second at most). The calling thread's own timer. Returns the time spent in slices (ns).
+        int64_t waitUntil(int64_t untilNs)
+        {
+#if defined(_WIN32)
+            thread_local const HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002u /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */,
+                                                                     TIMER_ALL_ACCESS);
+            if (timer)
+            {
+                if (const int64_t left = untilNs - now(); left > 500000)
+                {
+                    LARGE_INTEGER due;
+                    due.QuadPart = -((left - 300000) / 100); // (relative, in 100 ns)
+                    if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE))
+                        WaitForSingleObject(timer, static_cast<DWORD>(left / 1000000 + 2));
+                }
+            }
+            else
+#endif
+            {
+                for (int64_t left = untilNs - now(); left >= 2000000; left = untilNs - now())
+                    std::this_thread::sleep_for(std::chrono::nanoseconds(left - 1500000));
+            }
+            const int64_t slicesFrom = now();
+            int64_t t = slicesFrom;
+            for (; t < untilNs; t = now())
+                std::this_thread::yield();
+            return t - slicesFrom;
+        }
     }
 
     void setPictureCap(int perSecond)
@@ -86,6 +132,15 @@ namespace nr::pace
 
     void noteCapDrop() { g_capDrops.fetch_add(1u, std::memory_order_relaxed); }
 
+    GateHolds takeGateHolds()
+    {
+        GateHolds h;
+        h.pictures = g_gateHeld.exchange(0u, std::memory_order_relaxed);
+        h.heldMs = static_cast<double>(g_gateHeldNs.exchange(0, std::memory_order_relaxed)) / 1.0e6;
+        h.slicesMs = static_cast<double>(g_gateSlicesNs.exchange(0, std::memory_order_relaxed)) / 1.0e6;
+        return h;
+    }
+
     int64_t capDueAt(int64_t t, int64_t momentNs)
     {
         const int cap = pictureCap();
@@ -101,25 +156,27 @@ namespace nr::pace
         return std::max({t, gate, byCredit});
     }
 
-    bool capTryTake(int64_t t, int64_t momentNs)
+    bool capTryTake(int64_t t, int64_t momentNs) { return capTry(t, momentNs) == CapAnswer::Go; }
+
+    CapAnswer capTry(int64_t t, int64_t momentNs)
     {
         const int cap = pictureCap();
         if (cap <= 0)
-            return true;
+            return CapAnswer::Go;
         const double period = 1.0e9 / cap;
         std::lock_guard<std::mutex> lock(g_capMutex);
+        const double credit = capCreditLocked(t, momentNs, period);
+        if (credit < 1.0)
+            return CapAnswer::NoCredit;
         // (the gate is load-bearing: when the game runs ahead of real time - a stall's catch-up, old moments - the
         // moments' count says yes to every picture, and only the gate keeps two from going at once)
         if (g_capLastNs && t - g_capLastNs < static_cast<int64_t>(kCapGate * period))
-            return false;
-        const double credit = capCreditLocked(t, momentNs, period);
-        if (credit < 1.0)
-            return false;
+            return CapAnswer::Gate;
         g_capCredit = credit - 1.0;
         g_capLastNs = t;
         g_capLastMoment = momentNs ? momentNs : t; // (both anchors together; a moment that jumped back is the new base)
         g_capLastHadMoment = momentNs != 0;
-        return true;
+        return CapAnswer::Go;
     }
 
     struct Pacer::State
@@ -228,6 +285,7 @@ namespace nr::pace
                 it.readyNs = s.queue.front().readyNs ? s.queue.front().readyNs : seen;
             }
             // Its time: the frame's moment plus the delay (on a fixed refresh, whole VBlanks).
+            int64_t scheduledNs = it.readyNs; // (when it was to go: its time when paced, else as soon as ready)
             if (paced && it.moment.dueNs != 0)
             {
                 const double periodMs = it.moment.periodNs > 0 ? static_cast<double>(it.moment.periodNs) / 1.0e6 : 16.667;
@@ -247,6 +305,7 @@ namespace nr::pace
                     delay = std::ceil(delay / q - 1.0e-3) * q;
                 }
                 const int64_t at = it.moment.dueNs + static_cast<int64_t>(delay * 1.0e6);
+                scheduledNs = std::max(scheduledNs, at);
                 // (meanwhile the later pictures' fences are stamped as they pass, to the half millisecond)
                 for (int64_t t = now(); t < at; t = now())
                 {
@@ -258,13 +317,29 @@ namespace nr::pace
             // little early by the VBlanks' jitter at cap 60 is not held, a stall's catch-up burst is). Without credit the
             // picture waits; it is left out only once a newer picture is ready AND that one's moment has come - so at cap 30
             // a 30-a-second menu's own picture is never dropped for an in-between one due later (a visible step).
+            // (TODO 336 (24)) A picture with its credit that only the gate holds (it came close behind the last one: the
+            // timing's jitter) waits the gate's rest out, to a tenth of a millisecond, and is shown; left out for a newer
+            // one only when it is a whole period behind its time (a stall's catch-up burst).
             if (const int cap = g_pictureCap.load(std::memory_order_relaxed); cap > 0)
             {
-                (void)cap;
+                const int64_t periodNs = 1000000000ll / cap;
                 bool dropped = false;
-                int64_t t = now();
-                for (; !capTryTake(t, it.moment.dueNs); t = now())
+                int64_t gateFrom = 0;
+                for (int64_t t = now();; t = now())
                 {
+                    const CapAnswer answer = capTry(t, it.moment.dueNs);
+                    if (answer == CapAnswer::Go)
+                    {
+                        if (gateFrom)
+                            g_gateHeldNs.fetch_add(t - gateFrom, std::memory_order_relaxed);
+                        break;
+                    }
+                    if (answer == CapAnswer::Gate && !gateFrom)
+                    {
+                        gateFrom = t;
+                        g_gateHeld.fetch_add(1u, std::memory_order_relaxed);
+                    }
+                    if (answer == CapAnswer::NoCredit || t - scheduledNs >= periodNs)
                     {
                         std::lock_guard<std::mutex> lock(s.mutex);
                         if (s.queue.size() > 1u)
@@ -275,7 +350,12 @@ namespace nr::pace
                     }
                     if (dropped)
                         break;
-                    std::this_thread::sleep_for(std::chrono::nanoseconds(std::clamp<int64_t>(capDueAt(t, it.moment.dueNs) - t, 100000, 500000)));
+                    const int64_t due = capDueAt(t, it.moment.dueNs);
+                    if (answer == CapAnswer::Gate)
+                        g_gateSlicesNs.fetch_add(waitUntil(std::min(due, t + 1000000)), // (in steps of a millisecond at most: the
+                                                 std::memory_order_relaxed);            // fences stamped between)
+                    else
+                        std::this_thread::sleep_for(std::chrono::nanoseconds(std::clamp<int64_t>(due - t, 100000, 500000)));
                     s.stampPassed(s.gpu.completed(), now());
                 }
                 if (dropped)

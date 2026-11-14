@@ -252,6 +252,9 @@ distrobox enter tfa-build        # from here on, in the container: install the t
 The container builds the game and nothing else: the build puts the FFmpeg libraries it found beside the executable,
 so the folder plays on SteamOS whichever machine or container built it. Add `play.sh` to Steam as a non-Steam game
 (**Games > Add a Non-Steam Game to My Library > Browse**, file type **All Files**) and start it from Gaming Mode.
+Use Steam's menu for this: on Bazzite 45 and other systems with a newer KDE, the file manager's right-click **Add to
+Steam** refuses `play.sh` ("Unsupported file type"). Updates (`./update.sh`, or the game's own **F1 > About > Update
+now**) build in the same container by themselves.
 
 A save state is tied to the memory layout of the build that made it, so do not count on moving one between the
 Windows and Linux builds; the memory cards move freely (see [docs/PLAYING.md](docs/PLAYING.md#function-keys)).
@@ -312,6 +315,8 @@ old files stay in `transformers-armada-recomp` as they were.
 
 - **Player guide:** [docs/PLAYING.md](docs/PLAYING.md) (settings, controls, updates)
 - **Problems:** [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) (common fixes and FAQ)
+- **Windows 11 Smart App Control** can refuse the game or parts of it, because you build the game yourself and it is
+  not signed. What it looks like and what to do: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 - **Bugs and ideas:** open an [issue](https://github.com/kayliox/transformers-armada-recomp/issues).
   Never attach disc images, save states or memory card files: they contain game data.
 

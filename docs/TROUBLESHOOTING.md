@@ -24,6 +24,20 @@ false alarm. Don't turn the antivirus off. Instead:
    Only restore a `tfa-setup.exe` you downloaded from this project's GitHub releases.
 3. Run the setup again. Finished steps are kept.
 
+### Windows says "Part of this app has been blocked", "Bad Image ... 0xc0e90002" or "An Application Control policy has blocked this file"
+
+That is Smart App Control, a Windows 11 protection. It only lets programs run that are signed or that Microsoft already
+knows. This game is built on your own PC and is not signed, so Smart App Control may refuse the game, a file it loads,
+or the texture upscaler, and it may let one build through and refuse the next. Nothing is damaged, and turning off
+your antivirus does not help.
+
+- To see which files it refused: Event Viewer > Applications and Services Logs > Microsoft > Windows > CodeIntegrity >
+  Operational, event 3077.
+- To play: Windows Security > App & browser control > Smart App Control settings > Off. On some Windows 11 versions it
+  cannot be turned back on without resetting Windows, so decide for yourself whether you want that.
+- If only the HD textures were refused, the game runs with its own textures; F1 > Graphics > Make HD textures makes them
+  once Smart App Control is off.
+
 ### The build fails
 
 - Run the setup again. A network hiccup during a download is the most common cause.

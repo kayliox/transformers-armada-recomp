@@ -64,6 +64,7 @@ unsafe extern "system" {
     fn CloseHandle(handle: Handle) -> i32;
     fn QueryInformationJobObject(job: Handle, class: i32, info: *mut c_void, length: u32, returned: *mut u32) -> i32;
     fn GetExitCodeProcess(process: Handle, code: *mut u32) -> i32;
+    fn IsProcessInJob(process: Handle, job: Handle, result: *mut i32) -> i32;
     fn QueryFullProcessImageNameW(process: Handle, flags: u32, name: *mut u16, size: *mut u32) -> i32;
     fn GetProcessTimes(process: Handle, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
 }
@@ -77,6 +78,7 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn GetAsyncKeyState(key: i32) -> i16;
     fn AllowSetForegroundWindow(pid: u32) -> i32;
+    fn MessageBoxW(window: Handle, text: *const u16, caption: *const u16, kind: u32) -> i32;
 }
 
 /// The Shift key held down right now (a launcher's start with Shift held: the setup's window instead of the game).
@@ -86,6 +88,28 @@ unsafe extern "system" {
 pub fn allow_foreground() {
     const ASFW_ANY: u32 = 0xFFFF_FFFF;
     unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+}
+
+/// (TODO 371) Windows 11's Smart App Control: HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy, VerifiedAndReputablePolicyState
+/// (Microsoft's "Test app signatures with Smart App Control": 0 off, 1 on, 2 evaluation). None: not there (older Windows).
+pub fn smart_app_control_state() -> Option<u32> {
+    const RRF_RT_REG_DWORD: u32 = 0x0000_0010;
+    let (key, value) = (wide(r"SYSTEM\CurrentControlSet\Control\CI\Policy"), wide("VerifiedAndReputablePolicyState"));
+    let mut data = 0u32;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), value.as_ptr(), RRF_RT_REG_DWORD, std::ptr::null_mut(),
+                     (&mut data as *mut u32).cast(), &mut size)
+    };
+    (status == 0).then_some(data)
+}
+
+/// A plain message box (no owner window), for a launcher's start that has no window of its own.
+pub fn message_box(caption: &str, text: &str) {
+    const MB_ICONWARNING: u32 = 0x0000_0030;
+    const MB_SETFOREGROUND: u32 = 0x0001_0000;
+    let (text, caption) = (wide(text), wide(caption));
+    unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), MB_ICONWARNING | MB_SETFOREGROUND) };
 }
 
 pub fn shift_held() -> bool {
@@ -152,6 +176,32 @@ impl ProcessTree {
             }
             let listed = (*(buffer.as_ptr().cast::<u32>().add(1))) as usize;
             buffer[1..1 + listed.min(64)].iter().map(|&pid| pid as u32).collect()
+        }
+    }
+
+    /// (TODO 370) Waits for job member `pid` to end: its exit code. None: it has gone, or the id names a process that is not
+    /// in the job - Windows gives an id again soon after its process ends, and waiting on the stranger took ITS exit code (the
+    /// launcher test's 109 on the release runner) or would wait for a process that has nothing to do with the game. The
+    /// process is checked once it is open, so its id cannot be given again while it is waited for.
+    pub fn wait_for_member(&self, pid: u32) -> Option<i32> {
+        if self.job.is_null() {
+            return None;
+        }
+        unsafe {
+            let process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() {
+                return None;
+            }
+            let mut member = 0i32;
+            if IsProcessInJob(process, self.job, &mut member) == 0 || member == 0 {
+                CloseHandle(process);
+                return None;
+            }
+            WaitForSingleObject(process, INFINITE);
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(process, &mut code) != 0;
+            CloseHandle(process);
+            ok.then_some(code as i32)
         }
     }
 

@@ -98,7 +98,7 @@ fn wait_for_rest(tree: &winapi::ProcessTree, code: &mut i32) {
     loop {
         let left: Vec<(u32, bool)> = tree.processes().into_iter().map(|pid| (pid, winapi::is_console_host(pid))).collect();
         let Some(&(pid, host)) = left.iter().min_by_key(|(_, host)| *host) else { return };
-        match winapi::wait_for_exit(pid) {
+        match tree.wait_for_member(pid) {
             Some(next) if !host => *code = next,
             Some(_) => {}
             None => std::thread::sleep(std::time::Duration::from_millis(200)),
@@ -140,9 +140,21 @@ pub(super) fn run(args: &[String]) -> i32 {
                 Err(error) => { eprintln!("Couldn't wait for the game: {error}"); return 1; }
             };
             wait_for_rest(&tree, &mut code);
+            // (TODO 371) Refused by Windows (Smart App Control, a file missing): said plainly - a launcher shows nothing else.
+            if let Some(text) = blocked_start_text(code) {
+                eprintln!("{text}");
+                winapi::message_box(BLOCKED_CAPTION, &text);
+            }
             code
         }
-        Err(error) => { eprintln!("Couldn't start the game: {error}"); 1 }
+        Err(error) => {
+            eprintln!("Couldn't start the game: {error}");
+            if let Some(text) = error.raw_os_error().and_then(blocked_start_text) {
+                eprintln!("{text}");
+                winapi::message_box(BLOCKED_CAPTION, &text);
+            }
+            1
+        }
     }
 }
 

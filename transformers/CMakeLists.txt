@@ -253,6 +253,16 @@ if(TF_VULKAN)
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
             SOURCE_SUBDIR not-a-cmake-project)
         FetchContent_MakeAvailable(tf_dxc)
+    elseif(UNIX AND NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+        # (Linux: the same release's tarball - its libdxcompiler.so, loaded by the bake by its full path)
+        set(TF_DXC_URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/linux_dxc_2026_09_28.x86_x64.tar.gz)
+        set(TF_DXC_SHA256 96faadc7f5c282d2ffda49804beb4c3ee38127bc252b723234e3c5cdf7aa39a1)
+        FetchContent_Declare(tf_dxc
+            URL ${TF_DXC_URL}
+            URL_HASH SHA256=${TF_DXC_SHA256}
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+            SOURCE_SUBDIR not-a-cmake-project)
+        FetchContent_MakeAvailable(tf_dxc)
     endif()
     add_library(tf_volk STATIC "${tf_volk_SOURCE_DIR}/volk.c")
     target_include_directories(tf_volk PRIVATE "${tf_volk_SOURCE_DIR}" "${tf_vulkan_headers_SOURCE_DIR}/include")
@@ -271,16 +281,24 @@ if(TF_VULKAN)
     # (bake_spirv.cpp, never shipped) loads the fetched DXC's dxcompiler.dll and compiles every shader the backend makes,
     # the pixel shader's 64 variants included, into a table of SPIR-V words (nr_spirv_baked.cpp) - again whenever the HLSL
     # or the bake changes (its program is then built again). So the game needs no shader compiler and no dxcompiler.dll.
-    # Without a compiler for this system (DXC is fetched for Windows only so far) the table is empty and the backend says
-    # so at start.
+    # Without a compiler for this system (DXC is fetched for Windows and x86-64 Linux) the table is empty and the backend
+    # says so at start.
     set(TF_VK_BAKED "${TF_VK_GEN}/nr_spirv_baked.cpp")
     if(WIN32)
+        set(TF_DXC_LIBRARY "${tf_dxc_SOURCE_DIR}/bin/x64/dxcompiler.dll")
+        set(TF_DXC_INCLUDE "${tf_dxc_SOURCE_DIR}/inc")
+    elseif(DEFINED tf_dxc_SOURCE_DIR)
+        set(TF_DXC_LIBRARY "${tf_dxc_SOURCE_DIR}/lib/libdxcompiler.so")
+        set(TF_DXC_INCLUDE "${tf_dxc_SOURCE_DIR}/include/dxc")
+    endif()
+    if(TF_DXC_LIBRARY)
         add_executable(tf_vulkan_bake
             "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/bake_spirv.cpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan/nr_vulkan_dxc.cpp")
         target_include_directories(tf_vulkan_bake PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/native_render"
-                                   "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan" "${TF_VK_GEN}" "${tf_dxc_SOURCE_DIR}/inc")
+                                   "${CMAKE_CURRENT_SOURCE_DIR}/native_render/vulkan" "${TF_VK_GEN}" "${TF_DXC_INCLUDE}")
         target_compile_features(tf_vulkan_bake PRIVATE cxx_std_20)
+        target_link_libraries(tf_vulkan_bake PRIVATE ${CMAKE_DL_LIBS})
         # (its own folder: not beside the game)
         set_target_properties(tf_vulkan_bake PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tf_vulkan_bake")
         add_dependencies(tf_vulkan_bake tf_vulkan_hlsl)
@@ -297,8 +315,8 @@ if(TF_VULKAN)
             file(WRITE "${TF_DXC_STAMP}" "${TF_DXC_NAMED}")
         endif()
         add_custom_command(OUTPUT "${TF_VK_BAKED}"
-            COMMAND tf_vulkan_bake "${tf_dxc_SOURCE_DIR}/bin/x64/dxcompiler.dll" "${TF_VK_BAKED}"
-            DEPENDS tf_vulkan_bake "${tf_dxc_SOURCE_DIR}/bin/x64/dxcompiler.dll" "${TF_DXC_STAMP}"
+            COMMAND tf_vulkan_bake "${TF_DXC_LIBRARY}" "${TF_VK_BAKED}"
+            DEPENDS tf_vulkan_bake "${TF_DXC_LIBRARY}" "${TF_DXC_STAMP}"
             COMMENT "Vulkan backend: its shaders compiled to SPIR-V (every variant)")
     elseif(NOT EXISTS "${TF_VK_BAKED}")
         file(WRITE "${TF_VK_BAKED}" "// No SPIR-V: no shader compiler for this system yet (transformers/CMakeLists.txt).

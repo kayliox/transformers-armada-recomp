@@ -523,6 +523,16 @@ impl Job {
         let log = Arc::new(Mutex::new(std::fs::File::create(&log_path).ok().and_then(|_| {
             std::fs::OpenOptions::new().append(true).open(&log_path).ok()
         })));
+        // (TODO 371) When this run was: a log sent in later says which run it is.
+        {
+            let mut t = LocalTime::default();
+            unsafe { GetLocalTime(&mut t) };
+            if let Some(file) = log.lock().unwrap().as_mut() {
+                use std::io::Write;
+                let _ = writeln!(file, "{} started {:04}-{:02}-{:02} {:02}:{:02}:{:02} (setup program {})", if self.update { "update" } else { "setup" },
+                                 t.year, t.month, t.day, t.hour, t.minute, t.second, env!("CARGO_PKG_VERSION"));
+            }
+        }
         let mut path_env = std::env::var("PATH").unwrap_or_default();
         // (a run that does not finish - closed half way - leaves this mark: the setup opens again next time,
         // not the game; a player's report. Installs from before the mark have none: finished.)
@@ -1606,7 +1616,65 @@ fn fresh_path(old: &str) -> String {
 /// Starts the game (what Play.bat does): settings.ini made from settings.example.ini on the first
 /// start, then the game's exe in the game's folder.
 fn play(repo: &Path) {
-    let _ = start_game(repo);
+    // (TODO 371) A start Windows refuses ends within seconds with its code: watched for a minute, then said plainly.
+    if let Some(child) = start_game(repo) {
+        std::thread::spawn(move || watch_start(child));
+    }
+}
+
+/// (TODO 371) The caption of the message a refused start gets.
+pub(crate) const BLOCKED_CAPTION: &str = "Transformers Armada: Windows blocked the game";
+
+/// (TODO 371) What to tell a player when Windows refused the game or a file it loads: Windows 11's Smart App Control
+/// (it lets run only what is signed or what Microsoft's cloud already knows; the game is built on the player's PC, so
+/// its files are new to it) or a file that is missing or refused. `code`: the game's exit code (0xC0E90002 a policy
+/// refusal, 0xC0000428 a refused signature, 0xC0000135 / 0xC000012F / 0xC0000142 the loader's), or 4551, the start's
+/// own error when the game's exe itself is refused. None: not one of these.
+pub(crate) fn blocked_start_text(code: i32) -> Option<String> {
+    const POLICY_VIOLATION: i32 = 0xC0E9_0002u32 as i32;
+    const INVALID_IMAGE_HASH: i32 = 0xC000_0428u32 as i32;
+    const DLL_NOT_FOUND: i32 = 0xC000_0135u32 as i32;
+    const BAD_IMAGE: i32 = 0xC000_012Fu32 as i32;
+    const DLL_INIT_FAILED: i32 = 0xC000_0142u32 as i32;
+    const ERROR_POLICY_VIOLATION: i32 = 4551;
+    let switch = "To play, turn it off: Windows Security > App & browser control > Smart App Control settings > Off. \
+                  On some Windows 11 versions it cannot be turned back on without resetting Windows.";
+    let events = "To see which files it blocked: Event Viewer > Applications and Services Logs > Microsoft > Windows > \
+                  CodeIntegrity > Operational, event 3077.";
+    match code {
+        POLICY_VIOLATION | INVALID_IMAGE_HASH | ERROR_POLICY_VIOLATION => Some(format!(
+            "Windows' Smart App Control blocked the game, or a file it loads, from starting. It lets only programs \
+             Microsoft already knows run, and this game is built on your PC, so its files are new to it. Nothing is \
+             damaged.\n\n{events}\n\n{switch}")),
+        DLL_NOT_FOUND | BAD_IMAGE | DLL_INIT_FAILED => {
+            let sac = if winapi::smart_app_control_state() == Some(1) {
+                format!(" Smart App Control is on on this PC and may have refused it. {events} {switch}")
+            } else {
+                String::new()
+            };
+            Some(format!(
+                "The game could not start: Windows did not load one of its files (code 0x{:08X}). If Windows Security's \
+                 Protection history lists one of the game's files, restore it; running the setup again puts missing files \
+                 back.{sac}", code as u32))
+        }
+        _ => None,
+    }
+}
+
+/// (TODO 371) A started game watched for a minute: refused by Windows, it ends at once with one of the codes above.
+fn watch_start(mut child: std::process::Child) {
+    for _ in 0..240 {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if let Some(text) = status.code().and_then(blocked_start_text) {
+                    winapi::message_box(BLOCKED_CAPTION, &text);
+                }
+                return;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(250)),
+            Err(_) => return,
+        }
+    }
 }
 
 fn start_game(repo: &Path) -> Option<std::process::Child> {
@@ -1618,7 +1686,16 @@ fn start_game(repo: &Path) -> Option<std::process::Child> {
     if !moved && !settings.exists() && example.exists() {
         let _ = std::fs::copy(&example, &settings);
     }
-    Command::new(game_exe(repo)).current_dir(&game).spawn().ok()
+    match Command::new(game_exe(repo)).current_dir(&game).spawn() {
+        Ok(child) => Some(child),
+        Err(error) => {
+            // (TODO 371: the game's exe itself refused - os error 4551)
+            if let Some(text) = error.raw_os_error().and_then(blocked_start_text) {
+                winapi::message_box(BLOCKED_CAPTION, &text);
+            }
+            None
+        }
+    }
 }
 
 /// (TODO 276) The game started for a launcher - Steam's non-Steam game, Quiver, a shortcut - and waited for: the
@@ -1628,14 +1705,17 @@ fn start_game(repo: &Path) -> Option<std::process::Child> {
 fn play_and_wait(repo: &Path) {
     let Some(child) = start_game(repo) else { return };
     let tree = winapi::ProcessTree::new(&child, false);
-    let _ = winapi::wait_for_exit(child.id());
+    // (TODO 371: refused by Windows - said plainly, as nothing else shows for a launcher's start)
+    if let Some(text) = winapi::wait_for_exit(child.id()).and_then(blocked_start_text) {
+        winapi::message_box(BLOCKED_CAPTION, &text);
+    }
     loop {
         let left: Vec<u32> = tree.processes().into_iter().filter(|&pid| !winapi::is_console_host(pid)).collect();
         if left.is_empty() {
             break;
         }
         for pid in left {
-            let _ = winapi::wait_for_exit(pid);
+            let _ = tree.wait_for_member(pid); // (TODO 370: never a stranger that was given a member's id)
         }
     }
 }
@@ -2208,6 +2288,18 @@ mod path_tests {
         assert!(out.starts_with(r"C:\Tools;"));
         assert!(out.to_lowercase().contains(&format!(r"{root}\System32\WindowsPowerShell\v1.0").to_lowercase()));
         assert_eq!(with_system_dirs(&out), out);
+    }
+
+    #[test]
+    fn a_start_windows_refused_is_said_plainly() {
+        // (TODO 371) Smart App Control's refusals: the policy code, the refused signature, the start's own error
+        for code in [0xC0E9_0002u32 as i32, 0xC000_0428u32 as i32, 4551] {
+            let text = blocked_start_text(code).expect("a refusal");
+            assert!(text.contains("Smart App Control") && text.contains("event 3077") && text.contains("Off"));
+        }
+        let missing = blocked_start_text(0xC000_0135u32 as i32).expect("a loader failure");
+        assert!(missing.contains("0xC0000135") && missing.contains("Protection history"));
+        assert!(blocked_start_text(0).is_none() && blocked_start_text(1).is_none() && blocked_start_text(-1).is_none());
     }
 
     #[test]

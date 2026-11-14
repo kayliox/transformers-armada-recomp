@@ -1,5 +1,33 @@
 # What's new
 
+## 0.7.5
+
+**New**
+- Linux: the optional Vulkan renderer (built with TF_VULKAN and SDL3) now builds and runs; its shaders are made at build
+  time as on Windows, and the game quits at once on Ctrl+C or when the session ends. Thanks to TPepperoni.
+- Linux (SteamOS, Bazzite): `./update.sh` and the game's own F1 > About > Update now build in the build container by
+  themselves when the system has no build tools, and the game starts on the system afterwards. `./setup.sh --packages
+  ubuntu` (or debian, fedora, arch) prints the packages the build needs. The README says how to add `play.sh` to Steam
+  where the file manager's "Add to Steam" refuses it. Thanks to TPepperoni.
+
+**Fixed**
+- When Windows 11's Smart App Control refuses the game or one of its files (the game is built on your PC and is not
+  signed), the setup, the updater, the launcher and Play.bat now say so in plain words, with where to see what was
+  refused and where the switch is, instead of a bare "Bad Image" or "Application Control policy" error. If only the HD
+  texture maker is refused, the setup and the update finish without HD textures. Fewer files are copied beside the game.
+- With a frame rate cap of 240 (or any cap the game runs right at), a few pictures a second were left out since
+  0.7.2, which could show as tiny hitches on fast screens. Every picture is shown again; loading screens and menus
+  still keep to the cap.
+- The setup's launcher (Steam and other launchers) could, in rare cases, keep waiting on an unrelated program after
+  the game had restarted itself and closed.
+- Vibration after the game restarts to apply a setting is now exactly as the game set it: save states remember the
+  controller's motor setup. Thanks to TPepperoni.
+- In vehicle mode the mouse turns the camera freely all the way round the car; the camera eases back behind the car
+  only after the mouse has been still for a moment (1.5 seconds), instead of pulling against the mouse while it
+  turns. A controller works as before.
+- The game's Look Spring option now takes effect at once when you change it in a level (before, the camera kept
+  springing back, or kept still, until the next level).
+
 ## 0.7.4
 
 **Fixed**

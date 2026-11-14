@@ -171,7 +171,23 @@ function Test-AntivirusBlock([string]$Exe, $Code, [string]$Text) {
     if ($Code -in 225, -1073739514, 3221227782) { return $true }
     return ($Text -match "contains a virus|potentially unwanted software|Access is denied|0xC0000906")
 }
+# (TODO 371) Windows 11's Smart App Control refusing a program or a library it loads: it lets run only what is signed or
+# what Microsoft's cloud already knows, and the programs built here are new on every build. PowerShell says "An
+# Application Control policy has blocked this file"; a program whose library was refused ends with 0xC0E90002; Win32
+# 4551. Said with the file's name and where the switch is - any program, not only the ones built here.
+function Test-SmartAppBlock($Code, [string]$Text) {
+    if ($Code -in -1058471934, 3236495362, 4551) { return $true }
+    return ($Text -match "Application Control policy has blocked|0xc0e90002|ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION")
+}
+function Get-SmartAppBlockMessage([string]$What) {
+    "Windows' Smart App Control blocked $What. It lets only programs Microsoft already knows run, and this game's programs " +
+    "are built on your PC, so they are new to it. The file is not damaged. To see every file it blocked: Event Viewer > " +
+    "Applications and Services Logs > Microsoft > Windows > CodeIntegrity > Operational, event 3077. To play, turn it off: " +
+    "Windows Security > App & browser control > Smart App Control settings > Off (on some Windows 11 versions it cannot be " +
+    "turned back on without resetting Windows), then run the setup again (finished steps are kept)."
+}
 function Assert-NotBlocked([string]$Exe, $Code = 0, [string]$Text = "") {
+    if (Test-SmartAppBlock $Code $Text) { throw (Get-SmartAppBlockMessage (Split-Path $Exe -Leaf)) }
     if (Test-AntivirusBlock $Exe $Code $Text) { throw (Get-AntivirusBlockMessage $Exe) }
 }
 

@@ -82,8 +82,30 @@ if ($Resume) {
 }
 # (TODO 267) Beside the game (-GamePid): never waiting for it; the upscale stops when it ends.
 $withGame = if ($GamePid -gt 0) { @("--game-pid", "$GamePid") } else { @() }
+# (TODO 371) Windows 11's Smart App Control refusing the upscaler (realesrgan-ncnn-vulkan.exe, downloaded) or a Python
+# library's file (numpy, Pillow, scipy: unsigned): it lets run only what is signed or what Microsoft's cloud already
+# knows. Not a failed setup or update: no HD textures, the game draws its own, and F1 makes them later. Exit 7 tells
+# setup.ps1 / update.ps1 so. The marker below starts the message the trap knows it by.
+$SmartAppMarker = "Windows' Smart App Control blocked"
+function Find-SmartAppBlock([string]$Text) {
+    if ($Text -notmatch "Application Control policy has blocked|WinError 4551|0xc0e90002") { return $null }
+    $what = "a program or library the HD textures need"
+    $m = [regex]::Match($Text, "while importing (\S+?):")
+    if ($m.Success) { $what = "a Python library's file ($($m.Groups[1].Value)) the HD textures need" }
+    elseif ($Text -match "realesrgan") { $what = "the texture upscaler (realesrgan-ncnn-vulkan.exe)" }
+    return "$SmartAppMarker $what. No HD textures were made: the game runs with its own textures. Once Smart App Control is " +
+        "off (Windows Security > App & browser control > Smart App Control settings; on some Windows 11 versions it cannot " +
+        "be turned back on without resetting Windows), F1 > Graphics > Make HD textures makes them. To see every file it " +
+        "blocked: Event Viewer > Applications and Services Logs > Microsoft > Windows > CodeIntegrity > Operational, event 3077."
+}
 # (in that window a stop is shown for a minute before it closes; otherwise an error ends the script as always)
 trap {
+    if ("$_".StartsWith($SmartAppMarker)) {
+        Write-Host "`nwarning: $_" -ForegroundColor Yellow
+        if (Get-Command SetStatus -ErrorAction SilentlyContinue) { try { SetStatus "card_broken" } catch {} } # (not tried again at each start)
+        if ($Resume) { Write-Host "This window closes in a minute."; Start-Sleep -Seconds 60 }
+        exit 7
+    }
     if ($Verify) {
         Write-Host "`nVerifying the HD textures stopped: $_" -ForegroundColor Red
         Write-Host "Nothing was changed. This window closes in a minute."
@@ -149,8 +171,13 @@ function Step($msg) {
 }
 function Run([string]$Exe, [string[]]$Arguments) {
     $ErrorActionPreference = "Continue"
-    & $Exe @Arguments 2>&1 | ForEach-Object { "$_" }
-    if ($LASTEXITCODE -ne 0) { throw "$Exe failed with exit code $LASTEXITCODE" }
+    $seen = New-Object System.Collections.Generic.List[string]
+    try { & $Exe @Arguments 2>&1 | ForEach-Object { $l = "$_"; $seen.Add($l); $l } }
+    catch { $b = Find-SmartAppBlock "$_"; if ($b) { throw $b }; throw }
+    if ($LASTEXITCODE -ne 0) {
+        $b = Find-SmartAppBlock ($seen -join "`n"); if ($b) { throw $b }  # (TODO 371)
+        throw "$Exe failed with exit code $LASTEXITCODE"
+    }
 }
 
 # (TODO 186) numpy, which the sharp fonts need, installed when it is missing; $LASTEXITCODE 0 when it is there.
@@ -373,6 +400,8 @@ if ($stoppedByResets) {
     $code = 0
 }
 $ErrorActionPreference = "Stop"
+$sacBlock = if ($code -ne 0) { Find-SmartAppBlock (($lines | ForEach-Object { "$_" }) -join "`n") } else { $null }
+if ($sacBlock) { throw $sacBlock }  # (TODO 371: the trap says it and ends with 7)
 $summary = $lines | Where-Object { $_ -match '^upscaled \d+/\d+ uniques' } | Select-Object -Last 1
 # (TODO 242) Exit 3: this graphics card's upscales come out broken in every way the upscaler has (a GTX 1660 SUPER's
 # were all black). Nothing is made on it - the game draws its own textures - and the next run tries the card again.

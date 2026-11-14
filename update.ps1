@@ -75,6 +75,20 @@ function Result([string]$text) {
     New-Item -ItemType Directory -Force $States | Out-Null
     Set-Content -Path $ResultFile -Value $text -Encoding ASCII
 }
+# (TODO 371) Windows 11's Smart App Control refusing a program: it lets run only what is signed or what Microsoft's cloud
+# already knows, and the game and its tools are built on this PC (new to it). PowerShell: "An Application Control policy
+# has blocked this file"; a program whose library was refused: 0xC0E90002; Win32 4551.
+function Test-SmartAppBlock($Code, [string]$Text) {
+    if ($Code -in -1058471934, 3236495362, 4551) { return $true }
+    return ($Text -match "Application Control policy has blocked|0xc0e90002")
+}
+function Get-SmartAppBlockMessage([string]$What) {
+    "Windows' Smart App Control blocked $What. It lets only programs Microsoft already knows run, and this game is built " +
+    "on your PC, so its files are new to it. Nothing is damaged. To see every file it blocked: Event Viewer > Applications " +
+    "and Services Logs > Microsoft > Windows > CodeIntegrity > Operational, event 3077. To play, turn it off: Windows " +
+    "Security > App & browser control > Smart App Control settings > Off (on some Windows 11 versions it cannot be turned " +
+    "back on without resetting Windows)."
+}
 function Start-Game {
     if (-not $Play) { return }
     Step "Starting the game"
@@ -89,7 +103,20 @@ function Start-Game {
         Start-Process -FilePath $exe -WorkingDirectory $Port -WindowStyle Hidden `
             -RedirectStandardError $env:TF_UPDATE_GAME_LOG -RedirectStandardOutput "$($env:TF_UPDATE_GAME_LOG).out"
     } else {
-        Start-Process -FilePath $exe -WorkingDirectory $Port
+        # (TODO 371) Windows 11's Smart App Control refusing the game built here: said plainly, not as an "unexpected error"
+        try { Start-Process -FilePath $exe -WorkingDirectory $Port }
+        catch {
+            if (-not (Test-SmartAppBlock 0 "$($_.Exception.Message)")) { throw }
+            $text = Get-SmartAppBlockMessage "the game (TransformersRecomp.exe)"
+            Write-Host "`nupdate: $text" -ForegroundColor Red
+            if (Get-Command Write-StepLog -ErrorAction SilentlyContinue) { Write-StepLog "update: the game was blocked by Smart App Control" }
+            # (the update itself is done: its result stays "ok", or the game would say it did not finish. Nothing of the
+            # game shows now, so a message box says it - also when this run has no window of its own.)
+            try {
+                Add-Type -AssemblyName PresentationFramework
+                [System.Windows.MessageBox]::Show($text, "Transformers Armada: Windows blocked the game", "OK", "Warning") | Out-Null
+            } catch {}
+        }
     }
 }
 # git in the copy: its exit code and its output (stderr too), never an exception.
@@ -208,7 +235,17 @@ function Fail($msg) {
 }
 # (anything unexpected ends like a failure: the result written, the game started again - never a
 # player left without their game)
-trap { Fail ("unexpected error: " + $_.Exception.Message) }
+trap {
+    # (TODO 371: a program Windows refused, named where PowerShell names it)
+    if (Test-SmartAppBlock 0 "$($_.Exception.Message)") {
+        $file = "$($_.InvocationInfo.BoundParameters['FilePath'])"
+        $m = [regex]::Match("$($_.Exception.Message)", "Program '([^']+)'")
+        if ($m.Success) { $file = $m.Groups[1].Value }
+        Fail (Get-SmartAppBlockMessage $(if ($file) { Split-Path $file -Leaf } else { "a program the update runs" }))
+    }
+    if ("$($_.Exception.Message)".StartsWith("Windows' Smart App Control blocked")) { Fail $_.Exception.Message }  # (build.ps1's words)
+    Fail ("unexpected error: " + $_.Exception.Message)
+}
 # (the shared helpers: real-Python detection, probes, git long paths)
 . (Join-Path $Port "tools\setup_common.ps1")
 if ($Hooks) { . $Hooks }
@@ -354,7 +391,10 @@ if ($needTextures -and (Test-Path (Join-Path $Port "hd_textures"))) {
     }
     if (Test-Path (Join-Path $Port "hd_textures\upscaled")) {
         & (Join-Path $Port "tools\make_hd_textures.ps1") -Python $Python
-        if (-not $?) { Fail "updating the HD textures failed (see above)" }
+        $hdOk = $?; $hdCode = $LASTEXITCODE
+        # (TODO 371) 7: Smart App Control refused a file the HD textures need - said above; the update goes on.
+        if ($hdCode -eq 7) { if (Get-Command Write-StepLog -ErrorAction SilentlyContinue) { Write-StepLog "update: HD textures skipped (Smart App Control)" } }
+        elseif (-not $hdOk) { Fail "updating the HD textures failed (see above)" }
     } else {
         Invoke-OptionalFonts -Python $Python -Port $Port
     }

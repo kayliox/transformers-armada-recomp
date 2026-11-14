@@ -1,0 +1,96 @@
+Subject: [PATCH] FFmpeg: only the DLLs the executable loads are copied beside it (TODO 371)
+
+Windows 11's Smart App Control refused two libraries of the prebuilt FFmpeg folder on a player's PC (jxl.dll, then
+libsharpyuv.dll: "Bad Image ... 0xc0e90002", an unsigned library without cloud reputation), and the game could not
+start. The build copied every DLL of that folder (28) beside the executable; the executable loads 14 of them (its
+imports and theirs). CopyFfmpegDlls.cmake now walks the imports with dumpbin /DEPENDENTS (beside MSVC's link.exe) from
+the executable and copies only what it reaches in the FFmpeg folder, and removes the copies of the others an older
+build left. Without the executable or dumpbin, or when a walk fails, it copies them all as before.
+---
+--- a/ps2xRuntime/CMakeLists.txt
++++ b/ps2xRuntime/CMakeLists.txt
+@@ -557,11 +557,21 @@ function(ps2x_stage_ffmpeg_runtime_dlls target_name)
+         add_dependencies(${target_name} ffmpeg_external)
+     endif()
+ 
++    # (the import walk: only the DLLs the executable loads are copied - CopyFfmpegDlls.cmake; dumpbin sits beside MSVC's link.exe)
++    get_filename_component(ps2x_linker_dir "${CMAKE_LINKER}" DIRECTORY)
++    find_program(PS2X_DUMPBIN dumpbin HINTS "${ps2x_linker_dir}")
++    set(ps2x_dumpbin_arg "")
++    if(PS2X_DUMPBIN)
++        set(ps2x_dumpbin_arg "-Ddumpbin=${PS2X_DUMPBIN}")
++    endif()
++
+     add_custom_command(
+         TARGET ${target_name} POST_BUILD
+         COMMAND "${CMAKE_COMMAND}"
+         "-Dsource_dir=${PS2X_FFMPEG_BIN_DIR}"
+         "-Ddest_dir=$<TARGET_FILE_DIR:${target_name}>"
++        "-Dexe=$<TARGET_FILE:${target_name}>"
++        ${ps2x_dumpbin_arg}
+         -P "${PS2X_COPY_FFMPEG_DLLS_SCRIPT}"
+         VERBATIM
+     )
+--- a/ps2xRuntime/cmake/CopyFfmpegDlls.cmake
++++ b/ps2xRuntime/cmake/CopyFfmpegDlls.cmake
+@@ -13,7 +13,59 @@ endif()
+ 
+ file(MAKE_DIRECTORY "${dest_dir}")
+ 
+-foreach(ffmpeg_runtime_dll IN LISTS ffmpeg_runtime_dlls)
++# Only the DLLs the executable loads (-Dexe=<the executable>, -Ddumpbin=<dumpbin.exe>): the prebuilt FFmpeg folder holds
++# 28, the executable's import closure 14 (avcodec, avutil, swscale and what they import from that folder). Every file
++# copied beside the game is one more that Windows' Smart App Control may refuse to load (an unsigned library without
++# cloud reputation: "Bad Image ... 0xc0e90002"), so the others are not copied, and copies an older build left are
++# removed. Without the executable or dumpbin, or when the walk fails, all of them are copied as before.
++set(needed_dlls "")
++if(DEFINED exe AND EXISTS "${exe}" AND DEFINED dumpbin AND EXISTS "${dumpbin}")
++    # (breadth first through dumpbin /DEPENDENTS: a name counts when the FFmpeg folder has that file)
++    set(queue "${exe}")
++    set(walk_failed FALSE)
++    while(queue)
++        list(POP_FRONT queue current)
++        execute_process(COMMAND "${dumpbin}" /NOLOGO /DEPENDENTS "${current}"
++                        OUTPUT_VARIABLE listing RESULT_VARIABLE walk_result ERROR_QUIET)
++        if(NOT walk_result EQUAL 0)
++            set(walk_failed TRUE)
++            break()
++        endif()
++        string(REGEX MATCHALL "[A-Za-z0-9_.+-]+\\.[Dd][Ll][Ll]" names "${listing}")
++        foreach(name IN LISTS names)
++            if(EXISTS "${source_dir}/${name}")
++                string(TOLOWER "${name}" name_lower)
++                if(NOT name_lower IN_LIST needed_dlls)
++                    list(APPEND needed_dlls "${name_lower}")
++                    list(APPEND queue "${source_dir}/${name}")
++                endif()
++            endif()
++        endforeach()
++    endwhile()
++    if(walk_failed)
++        set(needed_dlls "")
++    endif()
++endif()
++set(copy_list "")
++if(needed_dlls)
++    foreach(ffmpeg_runtime_dll IN LISTS ffmpeg_runtime_dlls)
++        get_filename_component(dll_name "${ffmpeg_runtime_dll}" NAME)
++        string(TOLOWER "${dll_name}" dll_lower)
++        if(dll_lower IN_LIST needed_dlls)
++            list(APPEND copy_list "${ffmpeg_runtime_dll}")
++        elseif(EXISTS "${dest_dir}/${dll_name}")
++            file(REMOVE "${dest_dir}/${dll_name}") # (an older build's copy the game never loads)
++        endif()
++    endforeach()
++    list(LENGTH copy_list copied_count)
++    list(LENGTH ffmpeg_runtime_dlls all_count)
++    message(STATUS "FFmpeg: ${copied_count} of the ${all_count} DLLs copied beside the executable (its import closure)")
++else()
++    set(copy_list ${ffmpeg_runtime_dlls})
++    message(STATUS "FFmpeg: every DLL copied (the executable's imports could not be walked)")
++endif()
++
++foreach(ffmpeg_runtime_dll IN LISTS copy_list)
+     execute_process(
+         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${ffmpeg_runtime_dll}" "${dest_dir}"
+         RESULT_VARIABLE copy_result

@@ -1,0 +1,96 @@
+Subject: [PATCH] Runtime: a game started again from a state still vibrates (the pad's actuator alignment is kept in the state)
+
+The actuator alignment (scePadSetActAlign) is host memory and the guest sets it once, before a state is saved: a process that loads the state (the settings' Restart to apply) never has it, so every scePadSetActDirect read as no motor and the game's vibration was dead after a restart.
+
+A state now keeps the alignment in a section of its own (PADA, optional: the format version is the same and an older runtime ignores it), and loading it restores exactly what the game set, so a game that aligns nothing, or aligns every motor off, stays as it was. A state made before the section existed carries none: a port with nothing aligned then reads the DualShock 2's own (byte 0 the small motor, byte 1 the large one, as this game aligns them), and a port the running game has aligned keeps its own. This replaces the first version of this patch, which assumed the DualShock 2's alignment for every port that had none.
+
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp
+@@ -913,4 +913,37 @@ namespace ps2_stubs
+         for (PadPortState &port : g_padPorts)
+             in.pod(port);
+     }
++
++    // The actuator alignment (scePadSetActAlign) is host memory that the guest sets once, so a state keeps it in a section of its
++    // own: a game loaded from a state (the settings' Restart to apply) has exactly what it set, and a game that aligns nothing
++    // stays without motors.
++    void savePadActAlign(ps2x::StateWriter &out)
++    {
++        std::lock_guard<std::mutex> lock(g_actMutex);
++        out.blob(g_actAlign, sizeof(g_actAlign));
++    }
++
++    void loadPadActAlign(ps2x::StateReader &in)
++    {
++        std::lock_guard<std::mutex> lock(g_actMutex);
++        in.blob(g_actAlign, sizeof(g_actAlign)); // (any other stored size fails the reader)
++    }
++
++    // A state made before the section existed carries no alignment, and the process that loads it may never have heard the guest
++    // set one (the guest did before the state was saved). A port with nothing aligned then reads the DualShock 2's own: byte 0 the
++    // small motor, byte 1 the large one, as this game aligns them. A port the running game has aligned keeps its own.
++    void defaultPadActAlign()
++    {
++        static const uint8_t kDualShock2[6] = {0u, 1u, 0xFFu, 0xFFu, 0xFFu, 0xFFu};
++        std::lock_guard<std::mutex> lock(g_actMutex);
++        for (uint8_t(&port)[6] : g_actAlign)
++        {
++            bool none = true;
++            for (const uint8_t a : port)
++                if (a != 0xFFu)
++                    none = false;
++            if (none)
++                std::memcpy(port, kDualShock2, sizeof(kDualShock2));
++        }
++    }
+ }
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/SaveState.h
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/SaveState.h
+@@ -24,6 +24,11 @@ namespace ps2_stubs
+ 
+     void savePadStubState(ps2x::StateWriter &out);
+     void loadPadStubState(ps2x::StateReader &in);
++    // The pad's actuator alignment (scePadSetActAlign) in a section of its own; a state without it gets the DualShock 2's alignment
++    // where nothing is aligned.
++    void savePadActAlign(ps2x::StateWriter &out);
++    void loadPadActAlign(ps2x::StateReader &in);
++    void defaultPadActAlign();
+ 
+     void saveAudioStubState(ps2x::StateWriter &out);
+     void loadAudioStubState(ps2x::StateReader &in);
+--- a/ps2xRuntime/src/lib/ps2_savestate.cpp
++++ b/ps2xRuntime/src/lib/ps2_savestate.cpp
+@@ -57,6 +57,9 @@ namespace
+     // The SPU2 reverb's resampling history (since 2026-10-08; a state without it loads with the
+     // history empty: 0.8 ms of the effect).
+     constexpr uint32_t kReverb = tag('R', 'V', 'R', 'B');
++    // The pad's actuator alignment (scePadSetActAlign): host memory the guest sets once. A state without it (made before it was
++    // kept) loads with the DualShock 2's alignment where nothing is aligned.
++    constexpr uint32_t kPadAlign = tag('P', 'A', 'D', 'A');
+     // The identity of the game files the state holds open (since 2026-11-12, TODO 304): a state made with other files
+     // (with mods, without them, another disc) is refused before anything is overwritten - the game's memory knows
+     // that disc's layout and waits forever for reads past this disc's end. A state without it loads as before.
+@@ -1146,6 +1149,8 @@ namespace ps2_savestate
+                 { PS2StateAccess::saveDisc(runtime, out); });
+         section(kHle, [&](ps2x::StateWriter &out)
+                 { PS2StateAccess::saveHle(runtime, out); });
++        section(kPadAlign, [&](ps2x::StateWriter &out)
++                { ps2_stubs::savePadActAlign(out); });
+         section(kCard, [&](ps2x::StateWriter &out)
+                 { saveCard(out); });
+         section(kScheduler, [&](ps2x::StateWriter &out)
+@@ -1276,6 +1281,14 @@ namespace ps2_savestate
+         if (!apply(kHle, [&](ps2x::StateReader &in)
+                    { PS2StateAccess::loadHle(runtime, in); return true; }))
+             return false;
++        if (sections.contains(kPadAlign))
++        {
++            if (!apply(kPadAlign, [&](ps2x::StateReader &in)
++                       { ps2_stubs::loadPadActAlign(in); return true; }))
++                return false;
++        }
++        else
++            ps2_stubs::defaultPadActAlign();
+         if (!apply(kScheduler, [&](ps2x::StateReader &in)
+                    { runtime.eeScheduler().loadState(in); return true; }))
+             return false;

@@ -10,6 +10,7 @@
 #include "runtime/ps2_audio_stream.h"
 #include "runtime/ps2_host_display.h"
 #include "runtime/ps2_host_input.h"
+#include "runtime/ps2_platform.h"
 #include "runtime/ps2_settings.h"
 #include "runtime/ps2_sony_pad.h"
 
@@ -271,9 +272,12 @@ namespace
     }
 
     // Zink when the default driver lacks the interlock and Zink has it. TF_ZINK=0: never, =1: always; a
-    // MESA_LOADER_DRIVER_OVERRIDE already set wins.
+    // MESA_LOADER_DRIVER_OVERRIDE already set wins. Not under SDL3's window (PS2X_PLATFORM=sdl3): the GS draws on the CPU
+    // there (gs_gpu.cpp), and the probe's window calls would be SDL's, which cannot answer GLFW's extension question.
     void chooseGlDriver()
     {
+        if (ps2_platform::sdl3())
+            return;
         const char *force = std::getenv("TF_ZINK");
         if (std::getenv("MESA_LOADER_DRIVER_OVERRIDE") || (force && *force == '0'))
             return;
