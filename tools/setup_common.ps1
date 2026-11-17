@@ -161,7 +161,7 @@ function Test-WindowsSdk {
 # (TODO 407) The Visual Studio installs with the C++ tools that this CMake does not know, when it knows none of them
 # (Visual Studio 2026 alone, and a CMake from before it): their names - the build would stop at "could not find any
 # instance of Visual Studio". Empty when one is usable, or nothing to say. $List/$CMakeHelp: for the tests.
-function Get-VsUnknownToCmake($List = $null, [string]$CMakeHelp = $null) {
+function Get-VsUnknownToCmake($List = $null, $CMakeHelp = $null) {
     if ($null -eq $List) {
         $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
         if (-not (Test-Path $vswhere)) { return @() }

@@ -1,5 +1,10 @@
 # What's new
 
+## 0.8.5
+
+**Fixed**
+- Setup (Windows): it stopped at "Tools" on every PC with Visual Studio, saying CMake "does not know" Visual Studio 2022 (or another version), even with a CMake that does. A new install and a setup run again could not finish since 0.8.3. Updating an installed game was not affected.
+
 ## 0.8.4
 
 **Changed**

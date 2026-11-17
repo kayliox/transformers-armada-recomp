@@ -234,6 +234,10 @@ Check (@(Get-VsUnknownToCmake @($list[0]) $helpOld).Count -eq 1) "setup: Visual 
 Check (@(Get-VsUnknownToCmake @($list[0]) $helpNew).Count -eq 0) "setup: Visual Studio 2026 alone, CMake that knows it: nothing to do"
 Check (@(Get-VsUnknownToCmake $list $helpOld).Count -eq 0) "setup: 2026 + 2022 with the older CMake: 2022 is usable, nothing to do"
 Check (@(Get-VsUnknownToCmake @() $helpOld).Count -eq 0) "setup: no Visual Studio: nothing here (the prerequisite step's)"
+# (0.8.5 hotfix) Called the way setup.ps1 calls it - with no help text - the function must ask cmake itself. A [string]
+# parameter turned the missing help text into "" (never $null), so no CMake ever "knew" any Visual Studio and the setup
+# stopped at Tools on every PC with Visual Studio (0.8.3 and 0.8.4).
+Check ((Get-Command Get-VsUnknownToCmake).Parameters["CMakeHelp"].ParameterType -ne [string]) "setup: the CMake help text parameter is not a [string] (a missing one must stay null)"
 
 if ($failed) { Write-Host "`n$failed check(s) failed" -ForegroundColor Red; exit 1 }
 Write-Host "`nall checks passed" -ForegroundColor Green
