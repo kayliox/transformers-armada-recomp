@@ -6,15 +6,12 @@
 // docs/RENDERER_BACKEND.md describes the split and what a backend has to provide.
 
 #include "nr_frame.h"
-#include "flight_recorder.h" // (TODO 405)
 #include "nr_types.h"
 #include "nr_draw.h"
 #include "nr_device.h"
-#include "nr_occlusion.h"
+#include "nr_backend.h"
 #include "nr_policy.h"
 #include "nr_taa.h"
-#include "view_turn.h"
-#include "runtime/ps2_host_display.h"
 
 #include <algorithm>
 #include <array>
@@ -48,61 +45,45 @@ namespace nr
 
 namespace nr::frame
 {
-    // A mip level from the one above: each texel the rounded mean of its 2x2 (per channel, (sum + 2) / 4; an odd
-    // edge's last row or column repeated) - two channels at a time in 16-bit lanes (TODO 76: the per-channel loop
-    // was most of a new game texture's cost once its video memory came from the pool).
-    void halveLevel(const uint32_t *src, uint32_t pw, uint32_t ph, uint32_t *dst)
-    {
-        const uint32_t w = std::max(1u, pw / 2u), h = std::max(1u, ph / 2u);
-        constexpr uint32_t m = 0x00FF00FFu, r = 0x00020002u;
-        for (uint32_t y = 0; y < h; ++y)
-        {
-            const uint32_t *r0 = src + static_cast<size_t>(std::min(ph - 1u, 2u * y)) * pw;
-            const uint32_t *r1 = src + static_cast<size_t>(std::min(ph - 1u, 2u * y + 1u)) * pw;
-            uint32_t *out = dst + static_cast<size_t>(y) * w;
-            for (uint32_t x = 0; x < w; ++x)
-            {
-                const uint32_t x0 = std::min(pw - 1u, 2u * x), x1 = std::min(pw - 1u, 2u * x + 1u);
-                const uint32_t a = r0[x0], b = r0[x1], c = r1[x0], d = r1[x1];
-                const uint32_t lo = (a & m) + (b & m) + (c & m) + (d & m) + r;
-                const uint32_t hi = ((a >> 8) & m) + ((b >> 8) & m) + ((c >> 8) & m) + ((d >> 8) & m) + r;
-                out[x] = ((lo >> 2) & m) | (((hi >> 2) & m) << 8);
-            }
-        }
-    }
+    // (halveLevel, mipChain: in the core since nr_core S5 - nr_mips.cpp)
 
-    // The mip chain (the frame builder's), each level the one before box-filtered (2x2, per channel) - or as made
-    // ahead (the large images: off the game's thread). (The levels read in place: a 4K image is not copied on the
-    // game's thread; `computed` holds the ones made here.)
-    void mipChain(uint32_t width, uint32_t height, const uint32_t *pixels, const std::vector<std::vector<uint32_t>> *made,
-                  std::vector<const uint32_t *> &mips, std::vector<std::vector<uint32_t>> &computed)
+    // (nr_core S6) The host's hooks (nr_frame.h FrameHost; null: the whole picture, no recorder, no sun probe, no turn).
+    namespace
     {
-        const auto t0 = std::chrono::steady_clock::now();
-        mips.assign(1, pixels);
-        computed.clear();
-        computed.reserve(16);
-        std::vector<std::pair<uint32_t, uint32_t>> sizes(1, {width, height});
-        if (made && !made->empty())
-            for (const auto &level : *made)
-            {
-                const uint32_t w = std::max(1u, sizes.back().first / 2u), h = std::max(1u, sizes.back().second / 2u);
-                if (level.size() != static_cast<size_t>(w) * h)
-                    break;
-                mips.push_back(level.data());
-                sizes.push_back({w, h});
-            }
-        while (sizes.back().first > 1u || sizes.back().second > 1u)
+        FrameHost g_frameHost;
+        namespace fromHost
         {
-            const uint32_t pw = sizes.back().first, ph = sizes.back().second;
-            const uint32_t w = std::max(1u, pw / 2u), h = std::max(1u, ph / 2u);
-            std::vector<uint32_t> dst(static_cast<size_t>(w) * h);
-            halveLevel(mips.back(), pw, ph, dst.data());
-            computed.push_back(std::move(dst));
-            mips.push_back(computed.back().data());
-            sizes.push_back({w, h});
+            void pictureBand(float &top, float &bottom)
+            {
+                if (g_frameHost.pictureBand)
+                    g_frameHost.pictureBand(top, bottom);
+            }
+            bool recorderOn() { return g_frameHost.recorderOn && g_frameHost.recorderOn(); }
+            void recordFrame(uint64_t tick, uint32_t newTextures, uint32_t putOff, uint32_t standIns, uint32_t draws, uint64_t signature)
+            {
+                if (g_frameHost.recordFrame)
+                    g_frameHost.recordFrame(tick, newTextures, putOff, standIns, draws, signature);
+            }
+            bool probeFor(uint64_t tick, float rect[4]) { return g_frameHost.probeFor && g_frameHost.probeFor(tick, rect); }
+            void deliverProbe(uint64_t tick, const float *depth)
+            {
+                if (g_frameHost.deliverProbe)
+                    g_frameHost.deliverProbe(tick, depth);
+            }
+            void pictureTurn(const view_turn::FrameCamera &fc, int camera, int64_t frameDueNs, int64_t spanNs, int64_t momentNs, float s,
+                             double waitMs, int leadSet, PictureTurn &out)
+            {
+                if (g_frameHost.pictureTurn)
+                    g_frameHost.pictureTurn(fc, camera, frameDueNs, spanNs, momentNs, s, waitMs, leadSet, out);
+            }
+            void notePictureYaw(uint64_t id, bool valid, double yaw, int64_t sampleNs)
+            {
+                if (g_frameHost.notePictureYaw)
+                    g_frameHost.notePictureYaw(id, valid, yaw, sampleNs);
+            }
         }
-        g_mkMs[0] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     }
+    void setFrameHost(const FrameHost &host) { g_frameHost = host; }
 
 
     namespace
@@ -1802,13 +1783,13 @@ namespace nr::frame
                 if (dev.readback(r, rb) && rb.width >= 64u && rb.height >= 64u)
                 {
                     if (rb.rowBytes == 64u * sizeof(float))
-                        occlusion::deliver(g.probeTick[slot], static_cast<const float *>(rb.data));
+                        fromHost::deliverProbe(g.probeTick[slot], static_cast<const float *>(rb.data));
                     else
                     {
                         static std::vector<float> rows(64u * 64u);
                         for (uint32_t y = 0; y < 64u; ++y)
                             std::memcpy(rows.data() + y * 64u, static_cast<const uint8_t *>(rb.data) + static_cast<size_t>(y) * rb.rowBytes, 64u * sizeof(float));
-                        occlusion::deliver(g.probeTick[slot], rows.data());
+                        fromHost::deliverProbe(g.probeTick[slot], rows.data());
                     }
                 }
                 dev.releaseReadback(r);
@@ -2159,12 +2140,12 @@ namespace nr::frame
                              static_cast<unsigned long long>(kTexCap.second >> 20));
             g_deferredSince = (g_deferredSince + 1u) % 300u;
         }
-        if (flight_recorder::enabled()) // (TODO 405: the frame's counts and a signature of its draws for the flight recorder)
+        if (fromHost::recorderOn()) // (TODO 405: the frame's counts and a signature of its draws for the flight recorder)
         {
             uint64_t sig = 1469598103934665603ull;
             for (const Draw &d : input.draws)
                 sig = (sig ^ reinterpret_cast<uintptr_t>(d.mesh.get()) ^ (reinterpret_cast<uintptr_t>(d.texture.get()) << 1)) * 1099511628211ull;
-            flight_recorder::renderFrame(input.tick, static_cast<uint32_t>(g_frameMade), static_cast<uint32_t>(g_frameDeferred),
+            fromHost::recordFrame(input.tick, static_cast<uint32_t>(g_frameMade), static_cast<uint32_t>(g_frameDeferred),
                                          static_cast<uint32_t>(g_frameStandIns), static_cast<uint32_t>(input.draws.size()), sig);
         }
         g_frameMade = g_frameTexels = g_frameDeferred = 0;
@@ -2282,7 +2263,7 @@ namespace nr::frame
         // (TODO 255) A movie shown as a band of the picture's rows (ps2_host_display::setPictureBand): the picture as
         // many lines taller as the band is short of it, so the band itself still has the window's lines.
         float bandTop = 0.0f, bandBottom = 1.0f;
-        ps2_host_display::pictureBand(bandTop, bandBottom);
+        fromHost::pictureBand(bandTop, bandBottom);
         const float bandLines = linesFixed > 0 ? 1.0f : 1.0f / std::max(0.25f, bandBottom - bandTop);
         const float shape = input.displayAspect > 0.5f ? input.displayAspect : 4.0f / 3.0f;
         const float tall = (window > 0 ? window : 1080) * bandLines;
@@ -3586,7 +3567,7 @@ namespace nr::frame
         // into the OcclusionBuffer (a PSMZ24 frame at page 384, left out below) comes in the frame, from the largest target
         // the 3D went into so far - or at the frame's end if no such copy came.
         float probeRect[4] = {};
-        bool probeWanted = occlusion::probeFor(input.tick, probeRect), probeDone = false;
+        bool probeWanted = fromHost::probeFor(input.tick, probeRect), probeDone = false;
         State::Target *probeScene = nullptr;
         static const bool probeLog = std::getenv("TF_NATIVE_OCCLOG") != nullptr;
         auto probe = [&](bool atCopy) {
@@ -5456,14 +5437,14 @@ namespace nr::frame
                     out.beforeSubmit = [cam = input.turnCamera, main = input.turnMain, frameDue = input.dueNs, span = input.periodNs, due = pic.dueNs,
                                         s = pic.s, waits = input.turnWaits, set = input.turnLeadSet](uint8_t *constants, uint64_t id, bool extra) {
                         const double wait = extra && waits ? 25.0 : 0.0;
-                        view_turn::PictureTurn t;
+                        PictureTurn t;
                         const auto t0 = std::chrono::steady_clock::now();
-                        view_turn::pictureTurn(*cam, main, frameDue, span, due, s, wait, set, t);
+                        fromHost::pictureTurn(*cam, main, frameDue, span, due, s, wait, set, t);
                         const double waited =
                             wait > 0.0 ? std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() : 0.0;
                         std::memcpy(constants + offsetof(PictureConstants, turn), t.screen, sizeof(t.screen));
                         std::memcpy(constants + offsetof(PictureConstants, turnClip), t.clip, sizeof(t.clip));
-                        view_turn::notePictureYaw(id, t.valid, t.yawShown, t.sampleNs);
+                        fromHost::notePictureYaw(id, t.valid, t.yawShown, t.sampleNs);
                         return waited;
                     };
                 end.pictures.push_back(std::move(out));

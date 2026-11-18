@@ -53,6 +53,7 @@
 
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
+#include "runtime/ee_scheduler.h" // (TODO 429: the test aid's VBlank)
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_host_input.h"
 #include "runtime/ps2_settings.h"
@@ -296,6 +297,67 @@ namespace camera_mode
             g_setState(rdram, ctx, runtime);
         }
 
+        // (TODO 429) The aiming view's camera left on after the aiming state ended. The player's camera request is the view's
+        // slot 4 (taView, the decomp's taViewScripts: types[] at +0x90, the blend times at +0xA4; taTransformerActor::
+        // SetCameraScript 0x285240 fills slot 4): taTransformerStateLook asks for type 6 (its first-person script) on entering
+        // and for 5 (the third-person one) on every exit it ends itself - but one way out, the ground dropping away under it
+        // (DoPostUpdate's last branch), walks on without it, and so does any state change made from outside. Then the robot
+        // walks with the scope's camera until a state that asks for its own camera (standing still, a jump, a fall, the
+        // car) - bbatts' report: "only a transform fixes it". Type 6 belongs to the aiming state alone (the decomp: no other
+        // caller asks for it), so: the request 6 while the player is in another state for half a second is put back to 5
+        // with the exit's own 0.2 s blend, once, logged. Not with the first-person mode or the Apex mod's aim (they use
+        // the aiming view their own way), not in a cutscene. TF_CAM_HEAL=0: off. TF_CAM_HEAL_TEST=<vblank>: a test aid -
+        // the request set to 6 at that VBlank (the stuck view made on purpose).
+        constexpr uint32_t kRequestSlot4Type = 0x90u + 4u * 4u, kRequestSlot4Blend = 0xA4u + 4u * 4u;
+        constexpr uint32_t kLookCamera = 6u, kWalkCamera = 5u, kStateLook = 9u;
+        void healLookRequest(uint8_t *rdram, uint32_t manager, uint64_t vblank)
+        {
+            static const bool on = [] { const char *e = std::getenv("TF_CAM_HEAL"); return !(e && *e == '0'); }();
+            static const uint64_t testAt = [] { const char *e = std::getenv("TF_CAM_HEAL_TEST"); return e && *e ? std::strtoull(e, nullptr, 10) : 0ull; }();
+            static int64_t since = 0;
+            const auto valid = [](uint32_t a, uint32_t room) { return a >= 0x00100000u && a < PS2_RAM_SIZE - room; };
+            const uint32_t pm = word(rdram, 0x006CF498u), node = valid(pm, 0x20u) ? word(rdram, pm + 8u) : 0u;
+            const uint32_t player = valid(node, 0x20u) && node != pm + 4u ? word(rdram, node + 8u) : 0u;
+            const uint32_t creature = valid(player, 0x20u) ? word(rdram, player + 8u) : 0u;
+            const uint32_t actor = valid(creature, 0x60u) ? word(rdram, creature + 0x54u) : 0u;
+            if (!valid(manager, 0x100u) || !valid(actor, 0x100u))
+            {
+                since = 0;
+                return;
+            }
+            const uint32_t state = word(rdram, actor + 0xF8u);
+            if (testAt != 0u && vblank >= testAt)
+            {
+                static bool done = false;
+                if (!done && state != kStateLook)
+                {
+                    done = true;
+                    setWord(rdram, manager + kRequestSlot4Type, kLookCamera);
+                    std::fprintf(stderr, "[camera] TF_CAM_HEAL_TEST: the aiming view's camera asked for at VBlank %llu in state %u\n",
+                                 static_cast<unsigned long long>(vblank), state);
+                }
+            }
+            if (!on || word(rdram, manager + kRequestSlot4Type) != kLookCamera || state == kStateLook ||
+                g_firstPerson.load(std::memory_order_relaxed) || g_adsOwner.load(std::memory_order_relaxed) ||
+                g_cutscene.load(std::memory_order_relaxed))
+            {
+                since = 0;
+                return;
+            }
+            const int64_t now = nowMs();
+            if (since == 0)
+                since = now;
+            if (now - since < 500)
+                return;
+            since = 0;
+            setWord(rdram, manager + kRequestSlot4Type, kWalkCamera);
+            setFloat(rdram, manager + kRequestSlot4Blend, 0.2f);
+            static int told = 0;
+            if (told++ < 20)
+                std::fprintf(stderr, "[camera] TODO 429: the aiming view's camera was still asked for in state %u: back to the third-person "
+                             "camera (TF_CAM_HEAL=0: off)\n", state);
+        }
+
         void update(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             const uint32_t manager = getRegU32(ctx, 4);
@@ -305,6 +367,7 @@ namespace camera_mode
                 g_wanted = static_cast<int>(word(rdram, manager + kCurrent));
             }
             g_cutscene.store(tf::port::cutscenePlaying(rdram), std::memory_order_relaxed);
+            healLookRequest(rdram, manager, runtime->eeScheduler().currentVSyncTick());
             const bool want = firstPersonNow();
             if (want != g_applied)
             {

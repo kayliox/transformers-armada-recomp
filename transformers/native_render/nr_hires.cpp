@@ -65,6 +65,11 @@ namespace nr
 
         // (TODO 186) The developer's own tree (dev_tree.h): the last place looked in, never a player's.
 
+        // The names left out of the HD set, as setHiresSkip last gave them (in place of TF_HIRES_SKIP from then on).
+        std::mutex g_skipMutex;
+        std::string g_skip;
+        bool g_skipSet = false;
+
         struct Index
         {
             bool ready = false, enabled = false;
@@ -371,8 +376,16 @@ namespace nr
             // names; TF_HIRES_BAD=0: none of the built-in ones.
             {
                 static const bool builtIn = !(std::getenv("TF_HIRES_BAD") && *std::getenv("TF_HIRES_BAD") == '0');
-                const char *skip = std::getenv("TF_HIRES_SKIP");
-                const std::string list = "," + std::string(builtIn ? "PROJ," : "") + (skip ? upper(skip) : std::string()) + ",";
+                std::string skip;
+                {
+                    // (setHiresSkip, once called, takes the place of TF_HIRES_SKIP: a skin switched while the game runs)
+                    std::lock_guard<std::mutex> lock(g_skipMutex);
+                    if (g_skipSet)
+                        skip = g_skip;
+                    else if (const char *env = std::getenv("TF_HIRES_SKIP"))
+                        skip = upper(env);
+                }
+                const std::string list = "," + std::string(builtIn ? "PROJ," : "") + skip + ",";
                 if (list.find("," + upper(name) + ",") != std::string::npos)
                     return nullptr;
             }
@@ -1358,6 +1371,13 @@ namespace nr
                       static_cast<unsigned long long>(g_cacheMade.load()), static_cast<unsigned long long>(g_capped.load()),
                       static_cast<unsigned long long>(g_bcMs.load()), static_cast<unsigned long long>(g_loadMs.load()));
         return line;
+    }
+
+    void setHiresSkip(const std::string &names)
+    {
+        std::lock_guard<std::mutex> lock(g_skipMutex);
+        g_skip = upper(names);
+        g_skipSet = true;
     }
 
     bool replaceWithUpscaled(const std::string &name, Texture &texture)

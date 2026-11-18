@@ -26,6 +26,9 @@ namespace view_turn
     // In place of ps2_host_input::takeMouseTravel (overrides.cpp): the travel since the last take, the take's moment and
     // the travel so far kept for the pictures (a thread reads the window's mouse every 1 ms meanwhile).
     bool takeMouseTravel(float &pixelsX, float &pixelsY);
+    // (TODO 430) Photo mode's free camera: the mouse travel (pixels, after the sensitivity) since its last call, apart from the
+    // game's takes; `reset` drops what came before (photo mode just turned on). False: the mouse is not the game's (not captured).
+    bool takeFreeLookTravel(float &pixelsX, float &pixelsY, bool reset);
     // (TF_TURN_TEST, a measuring aid) A mouse moving at that many pixels a second (after the sensitivity) from now on, as
     // if the hand moved it - overrides.cpp sets it by game time; 0, 0 stops it.
     void setTestMouse(float pixelsPerSecondX, float pixelsPerSecondY);

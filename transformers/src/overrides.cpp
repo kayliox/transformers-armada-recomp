@@ -5015,16 +5015,31 @@ namespace
             const unsigned n = static_cast<unsigned>(std::clamp(frames, 8.0, 1024.0));
             return std::max(nr::drawnFrameMs(0.90, n), nr::gpuFrameMs(0.90, n));
         };
+        // (TODO 420) The drawing's floor: the drawing alone never takes the game under 60 frames a second (or under the cap,
+        // when it is lower). Below that the renderer leaves out the frames it cannot draw and the game keeps its rate, as at a
+        // cap of 60: on Intel laptops (the CPU hand-over) a cap of 120 or Unlimited followed the drawing down to 30-45 - the
+        // game itself at 30 most of the time, swinging 30 -> 45 -> 30 every second (ThinkPad, UHD 620, a 1900x1000 window,
+        // Amazon) - while a cap of 60 kept it at 60 with the same pictures shown. The EE's own work and frames that come late
+        // still lower it as before. TF_RATE_DRAW_FLOOR=<rate>: another floor; 0: none (as before). Not without frames left
+        // out (TF_FRAME_DROPS=0: the drawing holds the game back, so the rate must follow it).
+        static const int drawFloorSet = []()
+        {
+            const char *e = std::getenv("TF_RATE_DRAW_FLOOR");
+            const bool drops = !(std::getenv("TF_FRAME_DROPS") && *std::getenv("TF_FRAME_DROPS") == '0');
+            return !drops ? 0 : (e && *e ? std::max(0, std::atoi(e)) : 60);
+        }();
+        const int drawFloor = nativeDraw && drawFloorSet > 0 && !g_rates.empty() ? std::min(drawFloorSet, g_rates.front()) : 0;
+        const double drawFloorMs = drawFloor > 0 ? periodMs(drawFloor) : 1.0e9; // (the drawing never asks for a longer period)
         double drawMargin = 0.92; // (0.85 after a fall the drawing made: the way up below)
         const auto drawFits = [&](double p, double judgeMs)
         {
-            if (!nativeDraw)
+            if (!nativeDraw || p >= drawFloorMs - 1.0e-6)
                 return true;
             const double d = drawnP90(judgeMs);
             return d <= 0.0 || d < drawMargin * p;
         };
         const auto drawWalled = [&](int rate)
-        { return g_drawWallRate > 0 && now < g_drawWallUntil && rate >= 0.97 * g_drawWallRate; };
+        { return rate > drawFloor && g_drawWallRate > 0 && now < g_drawWallUntil && rate >= 0.97 * g_drawWallRate; };
         // (TODO 160, 2026-11-12: Unlimited is unlimited - "if the user wants, he should frame cap it to 60 manually". With the frame rate cap at
         // Unlimited the rate follows what this PC does, as it does it: no ladder, no bars, no holds. Every quarter second the
         // last second's frames give the rate this PC holds - the EE's work (its mean with 10% to spare, its 90th percentile
@@ -5055,7 +5070,7 @@ namespace
                 eeMean += w;
             eeMean /= static_cast<double>(work.size());
             const double ee90 = percentile(work, 0.90);
-            const double drawMs = nativeDraw ? std::max(0.0, drawnP90(1000.0)) : 0.0;
+            const double drawMs = nativeDraw ? std::min(std::max(0.0, drawnP90(1000.0)), 0.95 * drawFloorMs) : 0.0; // (TODO 420: the floor)
             const double eeMs = std::max(eeMean / 0.90, ee90 / 1.25);
             const double costMs = std::max({eeMs, drawMs / 0.95, 1000.0 / kUnlimitedRate});
             const int top = g_rates.front(), bottom = g_rates.back();
@@ -5174,7 +5189,7 @@ namespace
             return marks.size() < 2u ? 0.0 : (marks.front() - marks.back()) / static_cast<double>(marks.size());
         };
         double drawnShare = 1.0;
-        if (!behind && g_fastGameFallback && nativeOnePicture())
+        if (!behind && g_fastGameFallback && nativeOnePicture() && g_levelRate > drawFloor) // (TODO 420: not under the drawing's floor)
         {
             const double shortShare = leftOutShare(500.0), longShare = leftOutShare(sustainMs);
             if (shortShare > 0.10 && longShare > 0.10)
@@ -5210,9 +5225,9 @@ namespace
                 // one the way up leaves at once. The share drawn overshot: 108 -> 78 on the user's RX 5700 XT.)
                 const double drawn = nativeDraw ? drawnP90(1500.0) : 0.0;
                 if (drawn > 0.0)
-                    needed = std::max(needed, drawn / 0.95);
+                    needed = std::max(needed, std::min(drawn / 0.95, drawFloorMs)); // (TODO 420: the drawing's floor)
                 else if (drawnShare < 1.0) // (TODO 165: the drawing's rate, with 5% to spare)
-                    needed = std::max(needed, 1.05 * periodMs(g_levelRate) / std::max(0.05, drawnShare));
+                    needed = std::max(needed, std::min(1.05 * periodMs(g_levelRate) / std::max(0.05, drawnShare), drawFloorMs));
                 index = g_rateIndex + 1;
                 while (index + 1 < g_rates.size() && periodMs(g_rates[index]) < needed)
                     ++index;

@@ -167,6 +167,17 @@ namespace nr
         virtual double pacerDelayMs() = 0;
     };
 
+    // (nr_core S5) The frame builder the backend runs a frame through (Backend::render / preUpload). S6: the core's own,
+    // nr_frame.cpp (the GS replay; its host's hooks: nr_frame.h FrameHost), unless the host sets another. Set null: a frame
+    // handed to render() is not built, preUpload does nothing.
+    struct FrameBuilderHost
+    {
+        void (*render)(const Frame &frame, const std::string &shotPath) = nullptr;
+        void (*preUpload)(const std::shared_ptr<const Texture> &texture) = nullptr;
+    };
+    void setFrameBuilderHost(const FrameBuilderHost &host);
+    const FrameBuilderHost &frameBuilderHost();
+
     // The backend in use (nr_backend.cpp: Direct3D 12; Vulkan with TF_VULKAN and TF_GFX_API=vulkan).
     Backend &backend();
     // True when the backend this build would use is one of its native ones (Direct3D 12 where it is built, or Vulkan
@@ -174,4 +185,9 @@ namespace nr
     // prepare() may still fail, and the emulated GS then draws. Read it after settings.ini is loaded (the first answer
     // is kept).
     bool nativeBackendChosen();
+    // (nr_core S11, Settings::livePictures) The pictures handed over live (to the window / nr_core::present) as each frame is
+    // drawn: 1 on, 0 off, -1 = the TF_NATIVE_LIVE environment variable (as before). Read when the device is first prepared
+    // (Backend::prepare): set before it.
+    void setLivePictures(int live);
+    int livePictures();
 }

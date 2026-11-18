@@ -1,0 +1,34 @@
+Subject: [PATCH] Runtime: a loaded state's pending DMA completions are handled (TODO 415)
+
+A state saved while VIF1's thread was still scanning a display list holds that list's end-of-list interrupt in the
+queue of DMA completions, not yet handled. The load put the queue back but left the flag the EE's fast path tests
+before it takes the queue as it was at the moment of the load, most often down: the interrupt then waited for the
+next DMA to finish while the game waited for the interrupt (vlPS2Internal_WaitForGPU) until its own 3 s lock-up
+timeout - a 3-6 s freeze right after loading such a state, every time it was loaded. The flag now follows the queue.
+PS2X_STATE_DMAC_FLAG=0: the flag left as it was. A load with completions in the state logs a line either way.
+
+diff --git a/ps2xRuntime/src/lib/ps2_savestate.cpp b/ps2xRuntime/src/lib/ps2_savestate.cpp
+index 2cf6745..a45e779 100644
+--- a/ps2xRuntime/src/lib/ps2_savestate.cpp
++++ b/ps2xRuntime/src/lib/ps2_savestate.cpp
+@@ -371,6 +371,20 @@ struct PS2StateAccess
+         {
+             std::lock_guard<std::mutex> lock(memory.m_completedDmacMutex);
+             in.podVector(memory.m_completedDmacCauses);
++            // (TODO 415) The flag the EE's fast path tests before it takes the causes goes with the causes loaded. A state
++            // saved while VIF1's thread was still scanning a display list holds that list's end-of-list interrupt here, not
++            // yet handled; left with the flag of the moment the load came (most often down), the interrupt waited for the
++            // next DMA to finish while the game waited for the interrupt - until its own 3 s lock-up timeout (a 3-6 s
++            // freeze right after a load). PS2X_STATE_DMAC_FLAG=0: the flag left as it was (as before).
++            static const bool keepFlag = []() { const char *e = std::getenv("PS2X_STATE_DMAC_FLAG"); return e && *e == '0'; }();
++            const bool was = memory.m_completedDmacPending.load(std::memory_order_acquire);
++            if (!keepFlag)
++                memory.m_completedDmacPending.store(!memory.m_completedDmacCauses.empty(), std::memory_order_release);
++            if (!memory.m_completedDmacCauses.empty())
++                std::fprintf(stderr, "[state] %zu DMA completion(s) / interrupt(s) in the state still to be handled (cause %#x first); "
++                                     "the flag was %s, %s\n",
++                             memory.m_completedDmacCauses.size(), memory.m_completedDmacCauses.front(), was ? "up" : "down",
++                             keepFlag ? "left so (PS2X_STATE_DMAC_FLAG=0)" : "now up");
+         }
+         in.pod(memory.m_eeTimers);
+         memory.m_eeTimerCycles = 0u;

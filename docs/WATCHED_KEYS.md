@@ -39,3 +39,20 @@ In the actual native game, the same rapid automated F1 taps that previously had
 no effect opened and closed the existing mod menu after this patch. Mouse input
 and menu interaction remained available. No character-mod behavior is needed
 for that check.
+
+## The port's own keys read once a picture (TODO 433)
+
+The watched keys above are counted by the runtime at every input poll. The port's
+other keys are read by the overlay once a picture: the F1 menu's Esc, photo mode's
+Esc, H, R and mouse wheel, and the flight recorder's F10. Those used raylib's
+`IsKeyPressed` / `GetMouseWheelMove`, which hold only the window's last input poll
+(about a millisecond, the loop polls every millisecond between pictures), so at 30
+or 60 pictures a second most presses and wheel notches were lost: a real Esc did not
+close F1 on a laptop.
+
+They now come from the window's own key and wheel messages, the same hook that
+gives the menus their typed characters and wheel (TODO 170/174):
+`mod_menu::takePictureKeyPresses(key)` returns every press of a key since the last
+picture (and takes them, so one press is not read twice), `mod_menu::pictureWheel()`
+the wheel's notches. Key auto-repeats are left out. `TF_PICTURE_KEYS=0` reads them as
+before. With the SDL3 window host (PS2X_PLATFORM=sdl3) the old reads stay.

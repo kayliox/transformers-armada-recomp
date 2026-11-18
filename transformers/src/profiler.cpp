@@ -1644,6 +1644,8 @@ namespace
     {
         if (key >= GLFW_KEY_A && key <= GLFW_KEY_Z)
             return key; // ('A'..'Z' in both)
+        if (key >= GLFW_KEY_F1 && key <= GLFW_KEY_F12)
+            return 0x70 + (key - GLFW_KEY_F1); // (TODO 433: the port's own F keys, every press - mod_menu::takePictureKeyPresses)
         switch (key)
         {
         case GLFW_KEY_BACKSPACE: return 0x08;

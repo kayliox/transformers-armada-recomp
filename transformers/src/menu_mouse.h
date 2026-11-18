@@ -28,4 +28,7 @@ namespace menu_mouse
     void frame(uint8_t *rdram, bool paused);
     // The pad buttons the mouse presses this frame (mod_menu::padButtons merges them).
     uint16_t padButtons();
+    // The HQ screen of that class (its vtable: one of the screens whose updates are wrapped here) whose update ran in the
+    // last few game frames, 0 when none did. The game's thread (an extension's frame: the custom skins' picker).
+    uint32_t hqScreenUpdated(uint32_t vtable);
 }

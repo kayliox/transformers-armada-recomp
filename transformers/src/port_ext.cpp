@@ -190,6 +190,13 @@ namespace ext
                 e->beforeQuit();
     }
 
+    void screenOverlay(int width, int height)
+    {
+        for (const Extension *e : registry())
+            if (e->screenOverlay)
+                e->screenOverlay(width, height);
+    }
+
     bool presenceCharacter(const uint8_t *rdram, std::string &name, std::string &imageKey)
     {
         for (const Extension *e : registry())

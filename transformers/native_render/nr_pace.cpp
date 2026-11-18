@@ -29,9 +29,27 @@
 
 namespace nr::pace
 {
+    namespace
+    {
+        std::atomic<int> g_modeSet{-1};     // (nr_core S11: Settings::corePacing; -1 = TF_PACING)
+        std::atomic<bool> g_modeFixed{false};
+    }
+
+    bool setMode(int mode)
+    {
+        if (g_modeFixed.load(std::memory_order_acquire))
+            return false;
+        g_modeSet.store(mode >= 0 && mode <= 2 ? mode : -1, std::memory_order_release);
+        return !g_modeFixed.load(std::memory_order_acquire);
+    }
+
     int mode()
     {
         static const int m = [] {
+            g_modeFixed.store(true, std::memory_order_release);
+            const int set = g_modeSet.load(std::memory_order_acquire);
+            if (set >= 0)
+                return set;
             const char *v = std::getenv("TF_PACING");
             if (!v || !*v)
                 return 2;

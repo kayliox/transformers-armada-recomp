@@ -1,5 +1,24 @@
 # What's new
 
+## Unreleased
+
+## 0.8.7
+
+**New**
+- Updates started from the game (F1 > About > Update now): a "Start the game when the update is done" choice, ticked by default, in F1 > About and in the update window. Untick it to leave an update running (overnight, say): it then ends on "Update done" and the game stays closed. The choice is remembered, and works from the update after this one. The setup's own Update button still never starts the game.
+- Updates now say before they start how much of the game they rebuild on your PC, for example "This update rebuilds only a few of the game's files: about 3 min on this PC". Most updates rebuild a few files; now and then one changes a part that all of the game's code uses and rebuilds most of it (0.8.4 was one), and it now says so up front, with the time it should take. Shown in the setup's update window, in F1 > About and in the update's log.
+
+**Fixed**
+- PCs with Intel built-in graphics: levels no longer get stuck at 20 or 30 frames a second while the menus and the HQ run at 60. The game drew pictures the window could not show in time, and they held back the ones it did show; it now draws only what the window can show (on one test laptop: 20 frames a second before, 40 now, in a large window at a limit of 60).
+- A frame rate limit above 60, or Unlimited, no longer makes a slower PC do worse than a limit of 60: the game itself kept dropping to 30 updates a second there. It now stays at 60 and only the pictures the PC cannot draw in time are left out.
+- PCs with Intel built-in graphics (Windows): F1's VSync setting now works there too (VSync stayed on whatever the setting).
+- When the game starts itself again (a setting that needs a restart, the HD textures, or F1's Restart game), the new start no longer keeps the old start's files open.
+- Photo mode (F8): the mouse now turns the camera as far as the same move turns it while playing. On slower PCs it hardly turned (at 30 frames a second about an eighth as far).
+- The scope view: if the camera ever stays in the scope after the robot has left it, it now goes back to the normal view by itself within half a second (before, it could stay there).
+- Esc now closes the F1 menu every time. On slower PCs it often did nothing, because the key was only looked at for about a thousandth of a second each frame.
+- Photo mode (F8): every notch of the mouse wheel now zooms (most were lost), and H (HUD), R (back to the game's view) and Esc (leave) work on every press.
+- Pressing F8 while the F1 menu is open no longer turns photo mode on or off the moment the menu closes.
+
 ## 0.8.6
 
 **Fixed**

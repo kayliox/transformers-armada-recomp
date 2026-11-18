@@ -5,6 +5,7 @@
 // Vulkan has no native renderer: the emulated GS draws, and every call reports it.
 #include "nr_backend.h"
 #include "nr_device.h"
+#include "nr_frame.h" // (nr_core S6: the core's own frame builder, the default)
 
 #include <atomic>
 #include <cstdio>
@@ -129,5 +130,30 @@ namespace nr::gfx
 #else
         return noneDevice();
 #endif
+    }
+}
+
+namespace nr
+{
+    namespace
+    {
+        // (nr_core S5; S6: the core's own frame builder, nr_frame.cpp, unless the host sets another)
+        FrameBuilderHost g_frameBuilderHost{&frame::render, &frame::preUpload};
+    }
+    void setFrameBuilderHost(const FrameBuilderHost &host) { g_frameBuilderHost = host; }
+    const FrameBuilderHost &frameBuilderHost() { return g_frameBuilderHost; }
+
+    namespace
+    {
+        std::atomic<int> g_livePictures{-1}; // (nr_core S11: Settings::livePictures; -1 = TF_NATIVE_LIVE)
+    }
+    void setLivePictures(int live) { g_livePictures.store(live < 0 ? -1 : (live != 0 ? 1 : 0), std::memory_order_release); }
+    int livePictures()
+    {
+        const int set = g_livePictures.load(std::memory_order_acquire);
+        if (set >= 0)
+            return set;
+        const char *v = std::getenv("TF_NATIVE_LIVE");
+        return v && *v == '1' ? 1 : 0;
     }
 }

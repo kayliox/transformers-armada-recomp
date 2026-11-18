@@ -1701,6 +1701,14 @@ float4 smaaBlendPs(SmaaBlendOut i) : SV_Target
             int64_t lastNs = 0;          // when the newest was
             uint32_t pending = 0u;       // (N9) shared textures given to the pacer, not handed over yet (pickShared leaves them)
         } g_published;
+#if !defined(__linux__)
+        // (TODO 420) The CPU hand-over's pictures given to the copier (each its number, 1 on) and the newest the window has
+        // taken, with when: d3d::windowBehind.
+        std::atomic<uint64_t> g_cpuGiven{0u}, g_cpuTaken{0u};
+        std::atomic<int64_t> g_cpuTakenNs{0};
+        std::atomic<int64_t> g_cpuReplacedNs{0}; // (the last time a published picture was replaced before the window took it)
+        uint64_t g_cpuPublishedSeq = 0u; // (the newest published picture's number; under g_published.mutex)
+#endif
 #if defined(__linux__)
         uint64_t g_handoverSkips = 0; // (N9: CPU pictures not read back - every readback the window's; a profile window)
 #endif
@@ -4750,6 +4758,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                 D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
                 bool has3D = false;
                 int64_t dueNs = 0;
+                uint64_t seq = 0; // (TODO 420: its number, g_cpuGiven)
             };
             std::mutex mutex;
             std::condition_variable work, copied;
@@ -4800,12 +4809,17 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                 UINT w = 0, h = 0;
                 bool has3D = false;
                 int64_t dueNs = 0;
+                uint64_t seq = 0;
             };
 
-            void publishPixels(std::vector<uint32_t> &pixels, UINT w, UINT h, bool has3D, int64_t dueNs)
+            void publishPixels(std::vector<uint32_t> &pixels, UINT w, UINT h, bool has3D, int64_t dueNs, uint64_t seq)
             {
                 {
                     std::lock_guard<std::mutex> lock(g_published.mutex);
+                    if (g_cpuPublishedSeq != 0u && g_cpuTaken.load(std::memory_order_relaxed) < g_cpuPublishedSeq) // (TODO 420)
+                        g_cpuReplacedNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+                                              std::memory_order_relaxed);
+                    g_cpuPublishedSeq = seq; // (TODO 420)
                     g_published.pixels.swap(pixels);
                     g_published.shared.index = -1;
                     g_published.has3D = has3D;
@@ -4828,7 +4842,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                 int heldCount = 0;
                 // (only once capTryTake(t) has let it go)
                 const auto showOldest = [&held, &heldCount]() {
-                    publishPixels(held[0].pixels, held[0].w, held[0].h, held[0].has3D, held[0].dueNs);
+                    publishPixels(held[0].pixels, held[0].w, held[0].h, held[0].has3D, held[0].dueNs, held[0].seq);
                     if (heldCount == 2)
                         std::swap(held[0], held[1]); // (the published one's buffer - now the window's old one - kept for reuse)
                     --heldCount;
@@ -4894,7 +4908,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                         if (pace::pictureCap() <= 0)
                         {
                             heldCount = 0; // (the cap just turned off: the newest goes, what was held is old)
-                            publishPixels(spare, it.w, it.h, it.has3D, it.dueNs);
+                            publishPixels(spare, it.w, it.h, it.has3D, it.dueNs, it.seq);
                         }
                         else
                         {
@@ -4910,7 +4924,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                                 heldCount = 1;
                             }
                             if (heldCount == 0 && pace::capTryTake(t, it.dueNs))
-                                publishPixels(spare, it.w, it.h, it.has3D, it.dueNs);
+                                publishPixels(spare, it.w, it.h, it.has3D, it.dueNs, it.seq);
                             else
                             {
                                 Held &h = held[heldCount++];
@@ -4919,6 +4933,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                                 h.h = it.h;
                                 h.has3D = it.has3D;
                                 h.dueNs = it.dueNs;
+                                h.seq = it.seq;
                             }
                         }
                     }
@@ -6978,6 +6993,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                         it.h = g.slotReadbackH[g.slot];
                         it.has3D = g.slotHas3D[g.slot];
                         it.dueNs = g.slotCpuDueNs[g.slot];
+                        it.seq = g_cpuGiven.fetch_add(1u, std::memory_order_relaxed) + 1u; // (TODO 420)
                         cpucopy::submit(it);
                     }
 #endif
@@ -7722,7 +7738,11 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
     }
 
     // The device's video memory in use (or its budget), from its adapter.
-    void preUploadImpl(const std::shared_ptr<const Texture> &texture) { frame::preUpload(texture); }
+    void preUploadImpl(const std::shared_ptr<const Texture> &texture)
+    {
+        if (const auto fn = frameBuilderHost().preUpload) // (nr_core S5: the host's frame builder)
+            fn(texture);
+    }
 
 #if defined(_WIN32)
     uint64_t videoMemory(bool budget)
@@ -7997,7 +8017,46 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
         width = g_published.width;
         height = g_published.height;
         serial = g_published.serial;
+        if (g_cpuPublishedSeq != 0u) // (TODO 420: the copier's picture taken - and every one before it, shown or replaced)
+        {
+            g_cpuTaken.store(g_cpuPublishedSeq, std::memory_order_relaxed);
+            g_cpuTakenNs.store(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+                               std::memory_order_relaxed);
+        }
         return true;
+    }
+
+    // (TODO 420) The window behind the CPU hand-over: two of its pictures given to the copier that the window has not taken
+    // yet (being copied, held for the cap or published), while it is taking them (one taken within the last 250 ms). The
+    // renderer then leaves the frame out (nr_queue.cpp, the host's windowBehind): with Intel's drivers the window's own work
+    // - the upload, its drawing and GL's swap - shares the GPU with the renderer's, and every picture drawn that the window
+    // could not take held it back further. Measured on the Vostro (Iris Xe, a 1900x1000 window, Amazon): the renderer drew
+    // all 60 frames a second (11 ms each), the window showed 20 (each up three refreshes, 40 never shown); at a cap of 30,
+    // 30. A window that takes nothing (hidden, minimised, a movie) never holds the renderer back.
+    // How many pictures not taken yet hold the next frame back: 2 (one picture drawn ahead while the window takes the one
+    // before - a GPU-bound PC keeps its overlap), 1 for 5 s after a published picture was replaced before the window took it
+    // (the window is the limit: nothing drawn that it cannot show). Measured, a 1900x1000 window in Amazon at a cap of 60:
+    // the Vostro (window-bound) 20 -> 30 pictures a second with 2, 40 with 1 (a 1000x560 window: 30 -> 60 only with 1); the
+    // ThinkPad (GPU-bound, UHD 620) 33 either way with 2, 29 with 1. TF_NATIVE_WINDOW_PACE=<n>: always n; 0: every frame
+    // drawn, as before.
+    bool windowBehind()
+    {
+        static const int fixed = []()
+        {
+            const char *e = std::getenv("TF_NATIVE_WINDOW_PACE");
+            return e && *e ? std::max(0, std::atoi(e)) : -1;
+        }();
+        if (fixed == 0)
+            return false;
+        const uint64_t taken = g_cpuTaken.load(std::memory_order_relaxed);
+        if (taken == 0u)
+            return false;
+        const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (now - g_cpuTakenNs.load(std::memory_order_relaxed) >= 250000000ll)
+            return false;
+        const int64_t replaced = g_cpuReplacedNs.load(std::memory_order_relaxed);
+        const uint64_t ahead = fixed > 0 ? static_cast<uint64_t>(fixed) : (replaced != 0 && now - replaced < 5000000000ll ? 1u : 2u);
+        return g_cpuGiven.load(std::memory_order_relaxed) >= taken + ahead;
     }
 #endif
 
@@ -8041,6 +8100,20 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
         holdShown(index);
     }
 
+    // (nr_core S9b, nr_swapchain.cpp: the core's own present) The device and its queue (null: not started), and a shared
+    // picture's texture (R8G8B8A8_UNORM, COMMON between uses; the caller holds it - latestShared / sharedHeld) with its size.
+    ID3D12Device *presentDevice() { return g.device; }
+    ID3D12CommandQueue *presentQueue() { return g.device ? g.queue : nullptr; }
+    ID3D12Resource *sharedTexture(int index, uint32_t &width, uint32_t &height)
+    {
+        width = height = 0u;
+        if (index < 0 || index >= State::kShared || !g.shared[index].resource)
+            return nullptr;
+        width = g.shared[index].w;
+        height = g.shared[index].h;
+        return g.shared[index].resource;
+    }
+
     namespace
     {
         std::atomic<int> g_starting{0}; // 0 not begun, 1 on its thread, 2 done
@@ -8051,7 +8124,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
         int expected = 0;
         if (!g_starting.compare_exchange_strong(expected, 1))
             return;
-        g.live = std::getenv("TF_NATIVE_LIVE") && *std::getenv("TF_NATIVE_LIVE") == '1';
+        g.live = livePictures() == 1; // (TF_NATIVE_LIVE; nr_core S11: Settings::livePictures when the host set it)
         std::thread([] {
             const auto t0 = std::chrono::steady_clock::now();
             start();
@@ -8228,7 +8301,8 @@ namespace nr::d3d
             noteRemoved(removed, 0u);
             return;
         }
-        frame::render(input, shotPath);
+        if (const auto fn = frameBuilderHost().render) // (nr_core S5: the host's frame builder - the recomp's nr_frame.cpp)
+            fn(input, shotPath);
     }
 
     // --bake-shaders <file> (build.ps1, after linking): every shader this file compiles - the same sources, entry

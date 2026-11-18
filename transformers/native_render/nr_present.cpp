@@ -12,9 +12,12 @@
 #include "nr_backend.h"
 #include "nr_glshare.h"
 #include "nr_pacelog.h"
+#include "nr_devswap.h" // (nr_core S9c: TF_NATIVE_SWAPCHAIN)
+#include "nr_overlay_host.h" // (nr_core S12: the ImGui overlays through the core too)
 
 #include "runtime/gs/gs_gpu.h"
 #include "runtime/ps2_host_display.h"
+#include "runtime/ps2_host_present.h"
 
 #include "raylib.h"
 #include "rlgl.h"
@@ -131,8 +134,14 @@ namespace nr
             }
         }
 
+        // (nr_core S9c, TF_NATIVE_SWAPCHAIN) The shared picture the window shows this frame (-1: none - another picture or none)
+        // and its frame's tick, for the developer switch's drawer.
+        int g_swapPicture = -1;
+        uint64_t g_swapTick = 0;
+
         bool provide(unsigned int &texture, int &width, int &height)
         {
+            g_swapPicture = -1;
             static Texture2D shown{};
             static uint64_t serial = 0;
             static bool asked = false;
@@ -188,6 +197,7 @@ namespace nr
             };
             static Imported imported[d3d::kSharedPictures]; // (every one the renderer may make: TODO 98)
             static int sharedShown = -1;
+            static uint64_t sharedTick = 0; // (S9c: its frame's tick)
             static uint32_t sharedW = 0, sharedH = 0;
             d3d::SharedPicture sp;
 #if defined(__linux__)
@@ -246,6 +256,7 @@ namespace nr
                 if (im.texture)
                 {
                     sharedShown = sp.index;
+                    sharedTick = sp.tick;
                     sharedW = sp.width;
                     sharedH = sp.height;
                     has3D = sp.has3D;
@@ -535,6 +546,8 @@ namespace nr
                     pacelog::noteRepeat();
                 g_pacedLive.store(true, std::memory_order_relaxed);
                 g_cpuPictures = false;
+                g_swapPicture = sharedShown;
+                g_swapTick = sharedTick;
                 texture = imported[sharedShown].texture;
                 width = static_cast<int>(sharedW);
                 height = static_cast<int>(sharedH);
@@ -774,13 +787,82 @@ void main()
         }
     }
 
+    // (nr_core S9c) The picture drawer under the developer switch TF_NATIVE_SWAPCHAIN=1 (nr_devswap.cpp): the GL window draws the
+    // picture as without the switch (fsr::draw, or the plain stretch the runtime would make), then, when it is one of the
+    // renderer's shared pictures, the core presents the same picture at the same rects through its own swap chain into a child
+    // window over this one (FSR 1 by the same choice, the vsync as the runtime's present: ps2_host_present::sync, by the screen when
+    // not forced). TF_NATIVE_SWAPCHAIN_SHOT=<tick>,...: both saved for that picture - the core's back buffer
+    // (runs/swap_<tick>.bmp) and this window's drawing of it so far, read back here (runs/swapgl_<tick>.png). nr_core S12: with the
+    // debug UI built in, the window's ImGui overlays are drawn into the core's picture too (nr_overlay_host.cpp, set up here at the
+    // first picture): the picture is then presented by overlaysDrawn() once they are drawn, and both shots are taken there. S13a:
+    // the window's raylib overlays too (drawn into layers the core draws as well - nr_overlay_host.cpp).
+    bool devDraw(unsigned int texture, int width, int height, float srcX, float srcY, float srcW, float srcH, float dstX, float dstY, float dstW,
+                 float dstH)
+    {
+        if (!fsr::draw(texture, width, height, srcX, srcY, srcW, srcH, dstX, dstY, dstW, dstH))
+        {
+            const Texture2D picture{texture, width, height, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+            DrawTexturePro(picture, Rectangle{srcX, srcY, srcW, srcH}, Rectangle{dstX, dstY, dstW, dstH}, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+        }
+        const float src[4] = {srcX, srcY, srcW, srcH}, dst[4] = {dstX, dstY, dstW, dstH};
+        const uint64_t due = g_swapPicture >= 0 ? devswap::shotDue(g_swapTick) : 0u;
+        const std::string shot = due ? "runs/swap_" + std::to_string(due) + ".bmp" : std::string();
+        static const float stops = std::getenv("TF_NATIVE_FSR_SHARPNESS") ? static_cast<float>(std::atof(std::getenv("TF_NATIVE_FSR_SHARPNESS"))) : 0.2f;
+        const int forced = ps2_host_present::sync();
+        const int sync = forced >= 0 ? forced : (ps2_host_display::screenVariable() ? 0 : 1);
+        static const bool overlaysToo = overlay_host::install(); // (S12, once, on this thread)
+        devswap::show(GetWindowHandle(), g_swapPicture, src, dst, frame::fsrOn() ? 1 : 0, stops, sync, due ? shot.c_str() : nullptr);
+        if (due && !overlaysToo)
+        {
+            rlDrawRenderBatchActive(); // (what is drawn so far, out of raylib's batch)
+            Image gl = LoadImageFromScreen();
+            const std::string file = "runs/swapgl_" + std::to_string(due) + ".png";
+            ExportImage(gl, file.c_str());
+            UnloadImage(gl);
+            std::fprintf(stderr, "[native render] TF_NATIVE_SWAPCHAIN_SHOT %llu: %s and %s (picture %d, tick %llu)\n",
+                         static_cast<unsigned long long>(due), shot.c_str(), file.c_str(), g_swapPicture, static_cast<unsigned long long>(g_swapTick));
+        }
+        return true;
+    }
+
+    void overlaysDrawn()
+    {
+        // (nr_core S12) Nothing at all without the developer switch: the window's present as before.
+        if (!devswap::on())
+            return;
+        // (S13a) The window's last raylib overlay layer closed (drawn into the window, handed to the core), and GL done with the
+        // layers before the core's present reads them.
+        ps2_host_present::overlayLayerEnd();
+        if (overlay_host::takeLayersDrawn())
+            nr::glshare::finish();
+        if (const uint64_t due = devswap::keptShotTick())
+        {
+            // (the GL twin of the core's shot: this window's picture with its overlays, as the core's will be)
+            rlDrawRenderBatchActive();
+            Image gl = LoadImageFromScreen();
+            const std::string file = "runs/swapgl_" + std::to_string(due) + ".png";
+            ExportImage(gl, file.c_str());
+            UnloadImage(gl);
+            std::fprintf(stderr, "[native render] TF_NATIVE_SWAPCHAIN_SHOT %llu: runs/swap_%llu.bmp and %s (with the overlays)\n",
+                         static_cast<unsigned long long>(due), static_cast<unsigned long long>(due), file.c_str());
+        }
+        devswap::flush();
+    }
+
+    void overlayShotNext(const char *path)
+    {
+        if (devswap::on())
+            devswap::shotNext(path);
+    }
+
     void startLivePicture()
     {
         const char *live = std::getenv("TF_NATIVE_LIVE");
         if (!live || *live != '1')
             return;
         ps2_host_display::setPictureProvider(&provide);
-        ps2_host_display::setPictureDrawer(&fsr::draw); // (TODO 295: FSR 1 when enlarged and chosen)
+        // (TODO 295: FSR 1 when enlarged and chosen; nr_core S9c: TF_NATIVE_SWAPCHAIN=1, the core's swap chain - a developer switch)
+        ps2_host_display::setPictureDrawer(devswap::on() ? &devDraw : &fsr::draw);
         std::fprintf(stderr, "[native render] the native picture is shown live\n");
         // (N9) Shown as it is handed over (TF_PACING, nr_d3d.cpp): paced by default; TF_PACING=0 at the VBlanks, as before.
         if (backend().pacingMode() != 0)

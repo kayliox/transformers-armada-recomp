@@ -51,8 +51,10 @@ endif()
 # sources that build with NO runtime - the include path below cannot see src/, decomp/ or ps2_runtime, so a stray include of
 # the runtime, raylib, view_turn or ps2_settings in these files fails at compile time. The recomp's exe takes the objects
 # (as before: the same code, the same flags), and nr_core is the same objects as a static library for hosts that link
-# only the core. Grows step by step (S0: the backends' base, the passes, the upscaler, the policy).
-set(TF_NR_CORE_REGEX "/nr_(d3d|backend|passes|taa|policy|core_hooks|core_api|pacelog|queue|pictures|texture|hires)\\.cpp$")
+# only the core. Grows step by step (S0: the backends' base, the passes, the upscaler, the policy; S9a: the window, S9b: its swap chain). Its
+# compile flags are the game target's own, set together below (nr_core S7a: S0-S5's files had lost /Ob2 and /GS- when they
+# left the game).
+set(TF_NR_CORE_REGEX "/(nr_(d3d|backend|passes|taa|policy|core_hooks|core_api|pacelog|pace|queue|pictures|movie_core|mips|texture|hires|frame|draw|window|swapchain|submit)|ext/bc7enc/bc7(enc|decomp))\\.cpp$")
 set(TF_NR_CORE_SOURCES ${TF_NATIVE_RENDER_SOURCES})
 list(FILTER TF_NR_CORE_SOURCES INCLUDE REGEX "${TF_NR_CORE_REGEX}")
 list(FILTER TF_NATIVE_RENDER_SOURCES EXCLUDE REGEX "${TF_NR_CORE_REGEX}")
@@ -66,6 +68,15 @@ set_target_properties(nr_core PROPERTIES LINKER_LANGUAGE CXX)
 add_executable(nr_gs_decode_test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_SOURCE_DIR}/native_render/tests/nr_gs_decode_test.cpp")
 target_include_directories(nr_gs_decode_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/native_render" "${PS2RECOMP_DIR}/ps2xRuntime/include")
 target_compile_features(nr_gs_decode_test PRIVATE cxx_std_20)
+# (nr_core S5) The core's smoke test: a program of the core's objects alone (every one linked, so any symbol the core still takes
+# from the recomp fails the link) and the system's graphics libraries; not built by default, never part of the player build:
+# `cmake --build . --config RelWithDebInfo --target nr_core_smoke` (native_render/README.md).
+if(WIN32)
+    add_executable(nr_core_smoke EXCLUDE_FROM_ALL "${CMAKE_CURRENT_SOURCE_DIR}/native_render/tests/nr_core_smoke.cpp" $<TARGET_OBJECTS:nr_core_objects>)
+    target_include_directories(nr_core_smoke PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/native_render")
+    target_compile_features(nr_core_smoke PRIVATE cxx_std_20)
+    target_link_libraries(nr_core_smoke PRIVATE d3d12 dxgi d3dcompiler)
+endif()
 
 # The version the build is made from (TODO 104, updates.h): tf_version.h, written at every build by
 # version.cmake (only when it changes: the commit, its branch and date, a copy of the home repository
@@ -403,7 +414,8 @@ set_source_files_properties(${TF_GAME_SOURCES} ${TF_DECOMP_SOURCES} ${TF_NATIVE_
 
 # /Zi funnels every compiler process through one PDB server, which serializes
 # a build this wide; /Z7 keeps the debug info in each object file instead.
-set_target_properties(TransformersRecomp PROPERTIES
+# (nr_core S7a: the core's objects as well, the game's flags.)
+set_target_properties(TransformersRecomp nr_core_objects PROPERTIES
     MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>")
 
 # Only the fixed runtime headers: the generated all-functions headers change
@@ -423,22 +435,53 @@ if(PS2X_ENABLE_DEBUG_UI)
         PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
     target_link_libraries(TransformersRecomp PRIVATE rlImGui imgui)
     target_compile_definitions(TransformersRecomp PRIVATE PS2X_ENABLE_DEBUG_UI=1)
+    # (nr_core S12) The core's optional ImGui module (native_render/overlay/, outside the native_render/*.cpp glob): ImGui frames
+    # drawn as the core's present overlay by a small Direct3D 12 renderer of its own, and (a separate file, linked only by the
+    # hosts that use it) a whole ImGui host on ImGui's Win32 input from the core window's messages. The recomp links it for the
+    # renderer alone (nr_overlay_host.cpp, under TF_NATIVE_SWAPCHAIN=1); a native host links the same library. Its include
+    # folders stay on its own files (PRIVATE): the game's command lines do not change.
+    if(WIN32)
+        FetchContent_GetProperties(imgui)
+        add_library(nr_core_imgui STATIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/native_render/overlay/nr_core_imgui.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/native_render/overlay/nr_core_imgui_win32.cpp"
+            "${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp")
+        target_include_directories(nr_core_imgui PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/native_render" "${imgui_SOURCE_DIR}")
+        target_compile_features(nr_core_imgui PRIVATE cxx_std_20)
+        target_link_libraries(nr_core_imgui PRIVATE imgui d3d12 d3dcompiler)
+        target_link_libraries(TransformersRecomp PRIVATE nr_core_imgui)
+        # The module's smoke test (not built by default, never part of the player build): `cmake --build . --config
+        # RelWithDebInfo --target nr_core_imgui_smoke` - the core's objects, the module, ImGui and (for the A/B only) ImGui's
+        # own Direct3D 12 renderer (native_render/README.md).
+        add_executable(nr_core_imgui_smoke EXCLUDE_FROM_ALL
+            "${CMAKE_CURRENT_SOURCE_DIR}/native_render/tests/nr_core_imgui_smoke.cpp"
+            "${imgui_SOURCE_DIR}/backends/imgui_impl_dx12.cpp"
+            $<TARGET_OBJECTS:nr_core_objects>)
+        target_include_directories(nr_core_imgui_smoke PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/native_render" "${imgui_SOURCE_DIR}")
+        target_compile_features(nr_core_imgui_smoke PRIVATE cxx_std_20)
+        target_link_libraries(nr_core_imgui_smoke PRIVATE nr_core_imgui imgui d3d12 dxgi d3dcompiler)
+    endif()
 endif()
 
 if(MSVC)
-    target_compile_options(TransformersRecomp PRIVATE /FS /bigobj)
-    # No stack cookies in the generated code: nearly every one of its functions inlines a load
-    # with a small local array (the wrapped read at the end of RAM), and each got a check.
-    target_compile_options(TransformersRecomp PRIVATE $<$<CONFIG:RelWithDebInfo>:/GS->)
-    # (FPS round 4) Inline like Release does (/Ob2), as the runtime libraries already are (top CMakeLists): with
-    # RelWithDebInfo's /Ob1 only functions marked inline are expanded, and the standard library's small helpers are
-    # not - every std::atomic load in the generated code's inline paths (the scratchpad's pointer behind each inline
-    # scratchpad access, the EE checkpoint's flags) was a call to std::_Atomic_address_as. Same build time.
-    # -DTF_GENERATED_OB1=ON: /Ob1 as before (A/B).
+    # (nr_core S7a) Every compile flag of the game target goes to the native renderer's core objects too (they are linked
+    # into the game, and a host that links only the core gets the code the game runs): here, in EnableFastReleaseMode and
+    # in TF_LTCG below.
     option(TF_GENERATED_OB1 "Compile the game target with RelWithDebInfo's /Ob1 instead of /Ob2" OFF)
-    if(NOT TF_GENERATED_OB1)
-        target_compile_options(TransformersRecomp PRIVATE $<$<CONFIG:RelWithDebInfo>:/Ob2>)
-    endif()
+    foreach(target TransformersRecomp nr_core_objects)
+        target_compile_options(${target} PRIVATE /FS /bigobj)
+        # No stack cookies in the generated code: nearly every one of its functions inlines a load
+        # with a small local array (the wrapped read at the end of RAM), and each got a check.
+        target_compile_options(${target} PRIVATE $<$<CONFIG:RelWithDebInfo>:/GS->)
+        # (FPS round 4) Inline like Release does (/Ob2), as the runtime libraries already are (top CMakeLists): with
+        # RelWithDebInfo's /Ob1 only functions marked inline are expanded, and the standard library's small helpers are
+        # not - every std::atomic load in the generated code's inline paths (the scratchpad's pointer behind each inline
+        # scratchpad access, the EE checkpoint's flags) was a call to std::_Atomic_address_as. Same build time.
+        # -DTF_GENERATED_OB1=ON: /Ob1 as before (A/B).
+        if(NOT TF_GENERATED_OB1)
+            target_compile_options(${target} PRIVATE $<$<CONFIG:RelWithDebInfo>:/Ob2>)
+        endif()
+    endforeach()
     # WinAPI and raylib both define CloseWindow and friends.
     target_link_options(TransformersRecomp PRIVATE /FORCE:MULTIPLE)
 endif()
@@ -462,12 +505,13 @@ if(NOT TF_MEMORY_MIRROR_INLINE)
 endif()
 
 EnableFastReleaseMode(TransformersRecomp)
+EnableFastReleaseMode(nr_core_objects)
 # Whole-program optimisation for the build that is played (RelWithDebInfo): /GL for the game and the runtime,
 # /LTCG for the link (EnableFastReleaseMode's are Release-only). Floating point as before (/fp:precise), no /arch.
 # -DTF_LTCG=ON (an A/B: the measurement in docs/RUNTIME.md).
 option(TF_LTCG "Whole-program optimisation (/GL + /LTCG) for RelWithDebInfo" OFF)
 if(MSVC AND TF_LTCG)
-    foreach(target TransformersRecomp ps2_runtime)
+    foreach(target TransformersRecomp nr_core_objects ps2_runtime)
         if(TARGET ${target})
             target_compile_options(${target} PRIVATE $<$<CONFIG:RelWithDebInfo>:/GL>)
         endif()
@@ -477,6 +521,14 @@ if(MSVC AND TF_LTCG)
     target_link_options(TransformersRecomp PRIVATE $<$<CONFIG:RelWithDebInfo>:/LTCG /INCREMENTAL:NO>)
     if(TARGET ps2_runtime)
         set_property(TARGET ps2_runtime APPEND PROPERTY STATIC_LIBRARY_OPTIONS $<$<CONFIG:RelWithDebInfo>:/LTCG>)
+    endif()
+    # (the core's /GL objects: its library and its smoke test link them as the game does)
+    set_property(TARGET nr_core APPEND PROPERTY STATIC_LIBRARY_OPTIONS $<$<CONFIG:RelWithDebInfo>:/LTCG>)
+    if(TARGET nr_core_smoke)
+        target_link_options(nr_core_smoke PRIVATE $<$<CONFIG:RelWithDebInfo>:/LTCG>)
+    endif()
+    if(TARGET nr_core_imgui_smoke)
+        target_link_options(nr_core_imgui_smoke PRIVATE $<$<CONFIG:RelWithDebInfo>:/LTCG>)
     endif()
 endif()
 # (linkflags, 2026-11-15, the Shinobi study's B6) The game itself (not the launcher) linked with /OPT:REF: RelWithDebInfo's

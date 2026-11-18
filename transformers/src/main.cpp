@@ -581,6 +581,7 @@ int main(int argc, char *argv[])
                 // (TODO 290 (6): F1 > Controls > Mouse in the game Off - never taken, so no turning or buttons from it)
                 ps2_host_input::setMouseCaptureAllowed(!panel->isVisible() && !mod_menu::isOpen() && !menu_mouse::wantsCursor() &&
                                                        menu_mouse::gameMouseOn());
+                nr::overlaysDrawn(); // (nr_core S12: only under TF_NATIVE_SWAPCHAIN=1 - the core presents this picture with the overlays)
             },
             [](PS2Runtime &, void *userData)
             { static_cast<PS2DebugPanel *>(userData)->shutdown(); },

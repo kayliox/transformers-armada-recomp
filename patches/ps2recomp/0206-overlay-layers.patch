@@ -1,0 +1,217 @@
+Subject: [PATCH] Runtime: the window's overlays drawn into layers when a host asks for it
+
+ps2_host_present::setOverlayLayers: a host (the native renderer's core swap chain, a developer switch) gets everything the
+window draws after its picture - the frame counter, the notices, the settings panel, the game's debug-UI callback - drawn
+into transparent textures it gives (slices: premultiplied alpha, the colour blended as raylib does and the alpha as
+coverage). Each slice, as it closes, is drawn into the window with premultiplied alpha, so the window looks as before, and
+handed to the host. ImGui frames close one slice and open the next (overlayLayerBreak / overlayLayerResume), so a host that
+shows the same slices between the same ImGui frames keeps the window's order. The window loop opens the first slice after
+the picture and closes the last before the present. Without a host every call returns at once: nothing changes.
+
+diff --git a/ps2xRuntime/include/runtime/ps2_host_present.h b/ps2xRuntime/include/runtime/ps2_host_present.h
+index d5bc05d..29e576d 100644
+--- a/ps2xRuntime/include/runtime/ps2_host_present.h
++++ b/ps2xRuntime/include/runtime/ps2_host_present.h
+@@ -39,6 +39,33 @@ namespace ps2_host_present
+     void setSync(int mode);
+     int sync();
+ 
++    // The window's overlays drawn into layers (only when a host asks for it - setOverlayLayers; without one every call
++    // below returns at once and the window's drawing is as before). Everything the window draws after its picture - the
++    // frame counter, the notices, the settings panel, the game's own overlays in its debug-UI callback - goes into a
++    // transparent texture (a "slice": premultiplied alpha, GL's rows bottom up) in place of the window, and each slice,
++    // when it closes, is drawn into the window with premultiplied alpha (so the window looks as before) and handed to the
++    // host (which may show the same slice elsewhere, e.g. another API's swap chain). A picture's ImGui frames are drawn
++    // between slices (overlayLayerBreak / overlayLayerResume around each), so the slices keep the window's order.
++    struct OverlayLayers
++    {
++        // The GL texture slice `slice` (0, 1, ... in a picture) is drawn into, width x height RGBA8; 0: none - that
++        // picture's overlays drawn straight into the window, as without a host.
++        unsigned int (*texture)(int slice, int width, int height) = nullptr;
++        // Slice `slice` closed (drawn into it and into the window): for the host to hand on.
++        void (*closed)(int slice) = nullptr;
++    };
++    // On the window's thread. A host without `texture` is none.
++    void setOverlayLayers(const OverlayLayers &layers);
++    // The window's loop, after the picture: the first slice of this picture opened (with a host).
++    void overlayLayerBegin();
++    // The open slice closed; the window's drawing goes into the window itself until overlayLayerResume() (an ImGui frame's
++    // drawing, between the two).
++    void overlayLayerBreak();
++    // After overlayLayerBreak(): the picture's next slice opened.
++    void overlayLayerResume();
++    // The open slice closed, and no more this picture (before the picture is presented; again later: nothing).
++    void overlayLayerEnd();
++
+     // The Direct3D side (ps2_host_present_dxgi.cpp; Windows only).
+     namespace dxgi
+     {
+diff --git a/ps2xRuntime/src/lib/ps2_host_present.cpp b/ps2xRuntime/src/lib/ps2_host_present.cpp
+index f735deb..737dde6 100644
+--- a/ps2xRuntime/src/lib/ps2_host_present.cpp
++++ b/ps2xRuntime/src/lib/ps2_host_present.cpp
+@@ -5,6 +5,7 @@
+ #include "runtime/ps2_platform.h"
+ 
+ #include "raylib.h"
++#include "rlgl.h" // (the overlay layers' framebuffers and blending)
+ #if defined(_WIN32)
+ #include "glad.h" // (TODO 362: the picture check's few points - raylib's GL loader, as the Direct3D side)
+ #endif
+@@ -83,6 +84,134 @@ namespace ps2_host_present
+         return mode;
+     }
+ 
++    namespace
++    {
++        // (setOverlayLayers) The host, and this picture's slices: the open one's index and framebuffer (one per slice index,
++        // its texture attached again at each open - the host's texture may be another one each time).
++        OverlayLayers g_layers;
++        constexpr int kSlices = 8;
++        unsigned int g_sliceFbo[kSlices] = {}, g_sliceTexture[kSlices] = {};
++        int g_slice = -1;     // the open slice (-1: none)
++        int g_nextSlice = -1; // the picture's next slice (-1: no layers this picture)
++        int g_sliceW = 0, g_sliceH = 0;
++
++        // The window's own drawing target again (the DXGI path's render texture, or the window).
++        void windowTarget()
++        {
++            if (g_active && g_drawing)
++                BeginTextureMode(g_targets[g_target]);
++            else
++                EndTextureMode();
++        }
++
++        void openSlice()
++        {
++            if (g_nextSlice < 0 || g_nextSlice >= kSlices || !g_layers.texture)
++            {
++                g_nextSlice = -1;
++                return;
++            }
++            const int slice = g_nextSlice++;
++            // What raylib has batched so far drawn now, into the window's target: the framebuffer calls below bind
++            // framebuffer 0 behind raylib's back, and a later flush would put the batch there (the picture lost from
++            // the DXGI path's render texture).
++            rlDrawRenderBatchActive();
++            const unsigned int texture = g_layers.texture(slice, g_sliceW, g_sliceH);
++            if (texture == 0u)
++            {
++                g_nextSlice = -1; // (the rest of this picture straight into the window)
++                return;
++            }
++            if (g_sliceFbo[slice] == 0u)
++                g_sliceFbo[slice] = rlLoadFramebuffer();
++            if (g_sliceFbo[slice] == 0u)
++            {
++                g_nextSlice = -1;
++                windowTarget(); // (framebuffer 0 may be bound now)
++                return;
++            }
++            if (g_sliceTexture[slice] != texture)
++            {
++                rlFramebufferAttach(g_sliceFbo[slice], texture, RL_ATTACHMENT_COLOR_CHANNEL0, RL_ATTACHMENT_TEXTURE2D, 0);
++                g_sliceTexture[slice] = texture;
++                if (!rlFramebufferComplete(g_sliceFbo[slice]))
++                {
++                    std::fprintf(stderr, "[present] overlay layer %d: its framebuffer is not complete - drawn into the window\n", slice);
++                    g_sliceTexture[slice] = 0u;
++                    g_nextSlice = -1;
++                    windowTarget(); // (the window's target again: the calls above left framebuffer 0 bound)
++                    return;
++                }
++            }
++            RenderTexture2D target{};
++            target.id = g_sliceFbo[slice];
++            target.texture = Texture2D{texture, g_sliceW, g_sliceH, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
++            BeginTextureMode(target);
++            ClearBackground(BLANK);
++            // Premultiplied alpha in the slice: the colour blended as raylib does (src * a + dst * (1 - a)), the alpha as
++            // coverage (a + dst * (1 - a)) - the slice drawn over the window then gives what drawing into it would have.
++            rlSetBlendFactorsSeparate(RL_SRC_ALPHA, RL_ONE_MINUS_SRC_ALPHA, RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD, RL_FUNC_ADD);
++            rlSetBlendMode(RL_BLEND_CUSTOM_SEPARATE);
++            g_slice = slice;
++        }
++
++        void closeSlice()
++        {
++            if (g_slice < 0)
++                return;
++            const int slice = g_slice;
++            g_slice = -1;
++            rlDrawRenderBatchActive();
++            rlSetBlendMode(RL_BLEND_ALPHA);
++            windowTarget();
++            const Texture2D texture{g_sliceTexture[slice], g_sliceW, g_sliceH, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
++            BeginBlendMode(BLEND_ALPHA_PREMULTIPLY);
++            // (a render texture's rows are upside down: read it flipped; one texel a pixel)
++            DrawTexturePro(texture, Rectangle{0.0f, 0.0f, static_cast<float>(g_sliceW), -static_cast<float>(g_sliceH)},
++                           Rectangle{0.0f, 0.0f, static_cast<float>(g_sliceW), static_cast<float>(g_sliceH)}, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
++            EndBlendMode();
++            if (g_layers.closed)
++                g_layers.closed(slice);
++        }
++    }
++
++    void setOverlayLayers(const OverlayLayers &layers)
++    {
++        g_layers = layers.texture ? layers : OverlayLayers{};
++        std::fprintf(stderr, "[present] the window's overlays drawn into layers: %s\n", g_layers.texture ? "on" : "off");
++    }
++
++    void overlayLayerBegin()
++    {
++        closeSlice();
++        g_nextSlice = -1;
++        if (!g_layers.texture)
++            return;
++        g_sliceW = GetScreenWidth();
++        g_sliceH = GetScreenHeight();
++        if (g_sliceW <= 0 || g_sliceH <= 0) // (minimised)
++            return;
++        g_nextSlice = 0;
++        openSlice();
++    }
++
++    void overlayLayerBreak()
++    {
++        closeSlice();
++    }
++
++    void overlayLayerResume()
++    {
++        if (g_slice < 0 && g_nextSlice >= 0)
++            openSlice();
++    }
++
++    void overlayLayerEnd()
++    {
++        closeSlice();
++        g_nextSlice = -1;
++    }
++
+     bool start(void *nativeWindow)
+     {
+         if (g_active || !requested())
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 7ea8961..b49ffc2 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -3885,6 +3885,9 @@ void PS2Runtime::run()
+             {
+                 DrawTexturePro(frameTex, srcRect, dstRect, Vector2{0.0f, 0.0f}, 0.0f, WHITE);
+             }
++            // (only when a host asks for it - ps2_host_present::setOverlayLayers: everything drawn from here on, over the
++            // picture, goes into the overlay layers)
++            ps2_host_present::overlayLayerBegin();
+             if (fpsCounter.shown)
+                 fpsCounter.draw();
+             stateNotice.draw(*m_eeScheduler);
+@@ -3893,6 +3896,7 @@ void PS2Runtime::run()
+             {
+                 m_debugUiDrawCallback(*this, m_debugUiUserData);
+             }
++            ps2_host_present::overlayLayerEnd();
+             ps2_host_present::end(); // (raylib's EndDrawing, or the swap chain's present) also reads the input
+             if (newPicture && paced == 1)
+             {

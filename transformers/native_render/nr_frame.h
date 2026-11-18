@@ -15,6 +15,11 @@
 #include "nr_draw.h" // draw::Constants
 #include "nr_taa.h"  // (TODO 299) taa::upscalerOn: FSR 3 / 4's anti-aliasing and sharpening in place of ours
 
+namespace view_turn
+{
+    struct FrameCamera; // (the host's: nr_types.h's Frame::turnCamera)
+}
+
 namespace nr
 {
     struct Frame;
@@ -28,6 +33,34 @@ namespace nr::frame
     void render(const Frame &input, const std::string &shotPath);
     // A game texture the capture made ahead (d3d::preUploadImpl): handed to the device's uploader at the next frame's start.
     void preUpload(const std::shared_ptr<const Texture> &texture);
+
+    // (nr_core S6) What the frame builder (in the core) needs of its host, set once before the first frame. A hook left null:
+    // the whole picture (no movie band), no flight recorder line, no sun probe, no camera turn. The recomp's glue sets them
+    // (nr_core_glue.cpp: ps2_host_display, flight_recorder, nr_occlusion.cpp, view_turn).
+    struct PictureTurn // (N9) a picture's camera turn, as view_turn::PictureTurn
+    {
+        float screen[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}; // the turn in GS screen space (row vectors)
+        float clip[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};   // and in the clipping matrix's
+        bool valid = false;     // the shown yaw known
+        double yawShown = 0.0;  // (radians, unwrapped: the pacing log's steps)
+        int64_t sampleNs = 0;   // (the moment of the input it shows)
+    };
+    struct FrameHost
+    {
+        // (TODO 255) A movie shown as a band of the picture's rows, top and bottom in 0..1 (ps2_host_display::pictureBand).
+        void (*pictureBand)(float &top, float &bottom) = nullptr;
+        // (TODO 405) The flight recorder: on, and each frame drawn - its counts and a signature of its draws.
+        bool (*recorderOn)() = nullptr;
+        void (*recordFrame)(uint64_t tick, uint32_t newTextures, uint32_t putOff, uint32_t standIns, uint32_t draws, uint64_t signature) = nullptr;
+        // (Roadmap N3a) The sun's occlusion probe (nr_occlusion.cpp): the rect wanted for the frame `tick`, and its depth once read.
+        bool (*probeFor)(uint64_t tick, float rect[4]) = nullptr;
+        void (*deliverProbe)(uint64_t tick, const float *depth) = nullptr;
+        // (N9) The camera's turn of a picture (view_turn::pictureTurn) and its shown yaw noted (view_turn::notePictureYaw).
+        void (*pictureTurn)(const view_turn::FrameCamera &fc, int camera, int64_t frameDueNs, int64_t spanNs, int64_t momentNs, float s,
+                            double waitMs, int leadSet, PictureTurn &out) = nullptr;
+        void (*notePictureYaw)(uint64_t id, bool valid, double yaw, int64_t sampleNs) = nullptr;
+    };
+    void setFrameHost(const FrameHost &host);
 
     // ---- The layout of the per-draw data the frame builder writes into the device's rings ----
     inline constexpr uint32_t kConstantStride = (sizeof(draw::Constants) + 255u) & ~255u; // a draw's constants (CBV alignment)

@@ -1,0 +1,39 @@
+Subject: [PATCH] Windows: VSync for GL's own swap (TODO 420)
+
+Where the DXGI swap chain is not used (Intel's drivers, where GL cannot draw into Direct3D's textures), GL's own swap
+shows the window's pictures, and on Windows the VSync setting never reached it: the swap kept WGL's default interval
+of 1, VSync on whatever the setting. A level whose frames took a little more than a refresh was shown at every second
+(or third) refresh: exactly 30 (ThinkPad, UHD 620) or 20 (Vostro, Iris Xe) pictures a second at a cap of 60, with the
+frame-rate cap and the VSync setting changing nothing. The setting is now the swap interval there as on Linux: Off 0,
+else 1 (raylib's window flag, set and then cleared for Off: ClearWindowState changes the interval only for a flag it
+holds). PS2X_GL_SWAP_SYNC=0: the interval left as before.
+
+diff --git a/ps2xRuntime/src/lib/ps2_host_present.cpp b/ps2xRuntime/src/lib/ps2_host_present.cpp
+--- a/ps2xRuntime/src/lib/ps2_host_present.cpp
++++ b/ps2xRuntime/src/lib/ps2_host_present.cpp
+@@ -166,6 +166,25 @@
+                 else
+                     ClearWindowState(FLAG_VSYNC_HINT);
+             }
++#else
++            // (TODO 420) Windows: GL's swap is the present where the DXGI swap chain is not used (Intel's drivers: GL cannot
++            // draw into Direct3D's textures there) - the VSync setting as its swap interval too: Off 0, else 1. Never set
++            // before, the swap kept WGL's default interval of 1: VSync on whatever the setting, so a frame a little over a
++            // refresh waited for the next one - a level at exactly 30 (ThinkPad, UHD 620) or 20 (Vostro, Iris Xe) pictures a
++            // second at a cap of 60 where the GPU's work was 11-25 ms a frame. raylib changes the interval only for a flag
++            // it holds (SetWindowState sets 1, ClearWindowState sets 0 only when the flag is set): both, for Off.
++            // PS2X_GL_SWAP_SYNC=0: the interval left as it was (WGL's 1).
++            static const bool glSwapSync = !(std::getenv("PS2X_GL_SWAP_SYNC") && *std::getenv("PS2X_GL_SWAP_SYNC") == '0');
++            static int applied = -1;
++            const int wanted = sync() == 0 ? 0 : 1;
++            if (glSwapSync && wanted != applied)
++            {
++                applied = wanted;
++                SetWindowState(FLAG_VSYNC_HINT);
++                if (!wanted)
++                    ClearWindowState(FLAG_VSYNC_HINT);
++                std::fprintf(stderr, "[present] GL's own swap: VSync %s (swap interval %d)\n", wanted ? "on" : "off", wanted);
++            }
+ #endif
+             EndDrawing();
+             return;

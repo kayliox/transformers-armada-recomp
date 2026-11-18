@@ -20,6 +20,7 @@
 //    height check (0x2C9F10) found under it.
 
 #include "flight_recorder.h"
+#include "mod_menu.h" // (TODO 433: F10, every press)
 
 #include "ps2_runtime.h"
 #include "runtime/ee_scheduler.h"
@@ -407,7 +408,9 @@ namespace flight_recorder
 
     void windowFrame()
     {
-        if (g_on && IsKeyPressed(KEY_F10))
+        // (TODO 433: every F10 press since the last picture - raylib's IsKeyPressed, read once a picture, saw only the
+        // window's last ~1 ms input poll)
+        if (g_on && mod_menu::takePictureKeyPresses(KEY_F10) > 0)
             g_keyAsked.store(true, std::memory_order_release);
     }
 }

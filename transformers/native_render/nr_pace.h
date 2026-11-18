@@ -23,6 +23,9 @@ namespace nr::pace
     // soon as the GPU is done with it; 0 ("0" or "old") - no pacer: the backend's own hand-over (D3D12: at the next
     // frame's start, as before N9). Fixed at its first use.
     int mode();
+    // (nr_core S11, Settings::corePacing) The mode chosen by the host instead of TF_PACING (0, 1 or 2; anything else: TF_PACING,
+    // as before). Before mode()'s first use only: false once it is fixed (the call then changes nothing).
+    bool setMode(int mode);
 
     // The steady clock in ns (the frames' moments are on it).
     int64_t now();

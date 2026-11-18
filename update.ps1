@@ -27,6 +27,9 @@
     The game's own "Update now" (the F1 menu, About) runs this with -WaitForPid (the game closes
     first) and -Play (the game starts again afterwards, where it was: TODO 104). Everything it prints
     also goes to update.log in this folder.
+    -Play starts the game only while "Start the game when the update is done" is ticked (TODO 426: the
+    setup's update window and F1 > About; kept in states\update_options.json, read when the update
+    ends, so a change made while it runs counts). Unticked, the update ends on "Update done".
 
 .EXAMPLE
     .\update.ps1
@@ -89,8 +92,22 @@ function Get-SmartAppBlockMessage([string]$What) {
     "Security > App & browser control > Smart App Control settings > Off (on some Windows 11 versions it cannot be turned " +
     "back on without resetting Windows)."
 }
-function Start-Game {
+# (TODO 426) "Start the game when the update is done" (states\update_options.json: the setup's update window and F1 > About
+# write it). Missing or unreadable: ticked, as before the choice existed.
+function Test-StartGameChoice {
+    try {
+        $o = Get-Content -LiteralPath (Join-Path $States "update_options.json") -Raw -ErrorAction Stop | ConvertFrom-Json
+        if ($o.PSObject.Properties["start_game"] -and $o.start_game -eq $false) { return $false }
+    } catch {}
+    return $true
+}
+function Start-Game([switch]$AfterFailure) {
     if (-not $Play) { return }
+    if (-not (Test-StartGameChoice)) {
+        Write-Host "`n$(if ($AfterFailure) { '' } else { 'Update done. ' })The game is not started (""Start the game when the update is done"" is unticked)." -ForegroundColor $(if ($AfterFailure) { 'Yellow' } else { 'Green' })
+        if (Get-Command Write-StepLog -ErrorAction SilentlyContinue) { Write-StepLog "update: the game not started (the player's choice)" }
+        return
+    }
     Step "Starting the game"
     $exe = Join-Path $Port "out\build\transformers\RelWithDebInfo\TransformersRecomp.exe"
     if (-not (Test-Path $exe)) { Write-Host "update: the game's exe is missing ($exe)" -ForegroundColor Red; return }
@@ -227,7 +244,7 @@ function Fail($msg) {
     Write-Host "`nupdate: $msg" -ForegroundColor Red
     if (Get-Command Write-StepLog -ErrorAction SilentlyContinue) { Write-StepLog "update: stopped: $msg" }
     Result "failed $msg"
-    Start-Game
+    Start-Game -AfterFailure
     # (the console window the game opened: a moment to read why; not in tfa-setup's hidden run)
     if ($Play -and -not $env:TF_UPDATE_HIDDEN -and -not $env:TFA_UPDATE_NO_PAUSE) { Write-Host "`n(This window closes in 30 seconds.)"; Start-Sleep -Seconds 30 }
     try { Stop-Transcript | Out-Null } catch {}
@@ -305,6 +322,18 @@ if ($old -ne $new) {
     Write-Host "New commits:"
     & git -C $Repo log --oneline "$old..$new"
 }
+# (TODO 425) How much of the game the update rebuilds, said before it starts (tools\update_forecast.ps1: from git and the
+# record of earlier builds, nothing built). The setup's update window shows this line as it is.
+$forecastPs1 = Join-Path $Port "tools\update_forecast.ps1"
+if (-not $Force -and -not $Binaries -and (Test-Path -LiteralPath $forecastPs1)) {
+    $from = if ($built) { $built } else { $old }
+    $said = $null
+    try { $said = (& $forecastPs1 -From $from -To $new -Port $Port -Repo $Repo -Text 2>$null | Select-Object -First 1) } catch {}
+    if ($said) {
+        Write-Host "`n$said" -ForegroundColor $(if ("$said" -like "This update rebuilds most*") { "Yellow" } else { "Cyan" })
+        if (Get-Command Write-StepLog -ErrorAction SilentlyContinue) { Write-StepLog "update: $said" }
+    }
+}
 $kept = ""   # (the branch your own work was kept on, Save-LocalWork)
 if ($CheckOnly) { exit 0 }
 
@@ -322,8 +351,10 @@ if ($old -ne $new) {
 $since = if ($built) { $built } else { $old }
 $changed = if ($Force) { @("${pre}build.ps1", "${pre}tools/hd_textures/") } else { @(& git -C $Repo diff --name-only $since HEAD) }
 # (what never needs the game rebuilt: documents, the setup program, the setup scripts, GitHub's files)
+# (TODO 425: the scripts' own tests and the Linux scripts too - a release that changed only them ran a whole build check)
 $noBuild = @("docs/*", "*.md", "installer/*", ".github/*", ".githooks/*", "setup.ps1", "update.ps1", "Play.bat",
-    "tools/setup_common.ps1", "tools/step_log.ps1", "tools/check_no_game_data.py", "tools/check_publishable.py", "LICENSE", ".gitignore", ".gitattributes")
+    "tools/setup_common.ps1", "tools/step_log.ps1", "tools/check_no_game_data.py", "tools/check_publishable.py", "LICENSE", ".gitignore", ".gitattributes",
+    "tests/*", "tools/update_forecast.ps1", "setup.sh", "update.sh", "play.sh")
 $needBuild = @($changed | Where-Object {
     $path = $_
     $path.StartsWith($pre) -and -not ($noBuild | Where-Object { $path.Substring($pre.Length) -like $_ })

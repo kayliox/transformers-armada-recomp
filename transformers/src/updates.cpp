@@ -29,6 +29,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -157,6 +158,41 @@ namespace updates
         // The branch the player's own changes were committed to before an update (update.ps1 or
         // tfa-setup.exe write it: TODO 111), read and deleted at the next start.
         fs::path updateKept() { return statesDir() / "update_kept.txt"; }
+        // (TODO 426) "Start the game when the update is done": {"start_game": false} when unticked. The setup's update
+        // window writes it too; update.ps1 / update.sh read it when the update ends. Missing or unreadable: ticked.
+        fs::path updateOptions() { return statesDir() / "update_options.json"; }
+
+        bool readStartGameAfterUpdate()
+        {
+            std::ifstream in(updateOptions(), std::ios::binary);
+            if (!in)
+                return true;
+            std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            text.erase(std::remove_if(text.begin(), text.end(), [](unsigned char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }),
+                       text.end());
+            return text.find("\"start_game\":false") == std::string::npos;
+        }
+
+        // "" when saved, else why not.
+        std::string writeStartGameAfterUpdate(bool on)
+        {
+            std::error_code ec;
+            fs::create_directories(statesDir(), ec);
+            const fs::path file = updateOptions(), tmp = statesDir() / "update_options.json.tmp";
+            {
+                std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+                out << "{\n    \"start_game\":  " << (on ? "true" : "false") << "\n}\n";
+                if (!out)
+                    return "Could not save the choice (" + file.string() + ")";
+            }
+            fs::rename(tmp, file, ec);
+            if (ec)
+            {
+                fs::remove(tmp, ec);
+                return "Could not save the choice (" + file.string() + ")";
+            }
+            return {};
+        }
 
         // (transformers/version.cmake: "install" once setup.ps1 / setup.sh wrote .setup.json; a development checkout
         // never checks for updates)
@@ -594,6 +630,7 @@ namespace updates
             std::string latestName;           // its number (port/VERSION), "" before the file
             int count = 0;                    // commits the build does not have
             std::vector<std::string> changes; // "hash subject", newest first
+            std::string forecast;             // (TODO 425) "This update rebuilds ...": how much, on this PC ("" not known)
             std::string error;
             std::time_t at = 0;
         };
@@ -687,6 +724,26 @@ namespace updates
                     continue;
                 c.changes.push_back(line.substr(0, tab) + "  " + subject);
             }
+#if defined(_WIN32)
+            // (TODO 425) How much of the game the update rebuilds here, said before it starts (tools\update_forecast.ps1:
+            // from git and the record of earlier builds; an install from before the tool says nothing)
+            const fs::path forecast = portRoot() / "tools" / "update_forecast.ps1";
+            std::error_code ec;
+            if (known && fs::exists(forecast, ec))
+            {
+                const Ran f = runHidden(L"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File " + quoted(forecast) +
+                                            L" -From " + widen(built) + L" -To " + widen(c.latest) + L" -Port " + quoted(portRoot()) + L" -Repo " +
+                                            quoted(repoRoot()) + L" -Text",
+                                        currentEnvironment(), std::chrono::seconds(60));
+                std::istringstream said(f.out);
+                for (std::string l; f.code == 0 && std::getline(said, l);)
+                    if (trimmed(l).rfind("This update ", 0) == 0)
+                    {
+                        c.forecast = trimmed(l);
+                        break;
+                    }
+            }
+#endif
             return c;
         }
 
@@ -787,6 +844,9 @@ namespace updates
         uint64_t g_savedBefore = 0u, g_failedBefore = 0u;
         Clock::time_point g_savingSince;
         std::string g_phaseMessage;
+        // (TODO 426) "Start the game when the update is done" as the About shows it (states/update_options.json)
+        bool g_startGame = true, g_startGameLoaded = false;
+        std::string g_startGameNote;
         std::atomic<int> g_request{0}; // 1: update and resume, 2: update without resuming
 
         std::mutex g_messageLock;
@@ -1040,18 +1100,52 @@ namespace updates
         const std::wstring commandLine = GetCommandLineW();
         std::vector<wchar_t> command(commandLine.begin(), commandLine.end());
         command.push_back(L'\0');
-        STARTUPINFOW startup{};
-        startup.cb = sizeof(startup);
-        startup.dwFlags = STARTF_USESTDHANDLES;
-        startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-        startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-        startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        STARTUPINFOEXW startup{};
+        startup.StartupInfo.cb = sizeof(startup);
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        startup.StartupInfo.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+        startup.StartupInfo.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        // (TODO 414) Only the three standard handles go to the game started again, as in the restart (ps2_settings.cpp
+        // startAgain, patch 0205): every inheritable handle would hand it this one's open disc files for its whole life.
+        std::vector<HANDLE> inherit;
+        for (HANDLE h : {startup.StartupInfo.hStdInput, startup.StartupInfo.hStdOutput, startup.StartupInfo.hStdError})
+        {
+            DWORD flags = 0;
+            if (h && h != INVALID_HANDLE_VALUE && GetHandleInformation(h, &flags) && (flags & HANDLE_FLAG_INHERIT) &&
+                std::find(inherit.begin(), inherit.end(), h) == inherit.end())
+                inherit.push_back(h);
+        }
+        std::vector<unsigned char> attributes;
+        bool withList = false;
+        if (!inherit.empty())
+        {
+            SIZE_T size = 0;
+            InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+            attributes.resize(size);
+            auto *list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributes.data());
+            if (size && InitializeProcThreadAttributeList(list, 1, 0, &size))
+            {
+                if (UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit.data(), inherit.size() * sizeof(HANDLE),
+                                              nullptr, nullptr))
+                {
+                    startup.lpAttributeList = list;
+                    withList = true;
+                }
+                else
+                    DeleteProcThreadAttributeList(list);
+            }
+        }
         PROCESS_INFORMATION process{};
         std::fprintf(stderr, "[updates] the saved moment did not load: the game starts again, normally\n");
         std::fflush(stdout);
         std::fflush(stderr);
-        if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_UNICODE_ENVIRONMENT, block.data(), nullptr, &startup,
-                            &process))
+        const BOOL started = CreateProcessW(nullptr, command.data(), nullptr, nullptr, inherit.empty() ? FALSE : TRUE,
+                                            CREATE_UNICODE_ENVIRONMENT | (withList ? EXTENDED_STARTUPINFO_PRESENT : 0u), block.data(),
+                                            nullptr, &startup.StartupInfo, &process);
+        if (withList)
+            DeleteProcThreadAttributeList(startup.lpAttributeList);
+        if (!started)
             return false;
         CloseHandle(process.hThread);
         CloseHandle(process.hProcess);
@@ -1267,6 +1361,9 @@ namespace updates
                                c.count > 0 ? (", " + std::to_string(c.count) + (c.count == 1 ? " change" : " changes")).c_str() : "", when);
             if (!c.latestName.empty())
                 ImGui::TextDisabled("(commit %s)", shortHash(c.latest).c_str());
+            if (!c.forecast.empty()) // (TODO 425: an update that rebuilds most of the game says so before it starts)
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(menu_style::colour(c.forecast.find(" most of the game") != std::string::npos ? "amber" : "blue")),
+                                   "%s", c.forecast.c_str());
             break;
         case Status::Failed:
             ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(menu_style::colour("red")), "Could not check (at %s): %s", when, c.error.c_str());
@@ -1275,6 +1372,11 @@ namespace updates
             break;
         }
         ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        if (!g_startGameLoaded) // (TODO 426: read once, written by the checkbox below)
+        {
+            g_startGame = readStartGameAfterUpdate();
+            g_startGameLoaded = true;
+        }
         const bool busy = c.status == Status::Checking || g_phase == Phase::Saving || g_phase == Phase::Quitting;
         ImGui::BeginDisabled(busy);
         if (menu_style::button("Check now"))
@@ -1288,8 +1390,10 @@ namespace updates
             if (menu_style::button("Update now", true))
                 g_request.store(1);
             if (ImGui::IsItemHovered())
-                menu_style::setHelp("The game saves this moment, closes, updates (it is rebuilt on this PC: a few minutes) and starts "
-                                    "again right here. Your mods, their choices and your settings stay as they are.");
+                menu_style::setHelp(g_startGame ? "The game saves this moment, closes, updates (it is rebuilt on this PC: a few minutes) and starts "
+                                                  "again right here. Your mods, their choices and your settings stay as they are."
+                                                : "The game saves this moment, closes and updates (it is rebuilt on this PC: a few minutes). It is "
+                                                  "not started afterwards (the choice below). Your mods, their choices and your settings stay as they are.");
             if (g_phase == Phase::Failed && g_phaseResume)
             {
                 ImGui::SameLine();
@@ -1298,6 +1402,15 @@ namespace updates
             }
         }
         ImGui::EndDisabled();
+        // (TODO 426) Whether the game starts again when the update is done (an update left overnight: unticked, it ends on
+        // "Update done"). Saved at once; the setup's update window shows the same choice.
+        if (ImGui::Checkbox("Start the game when the update is done", &g_startGame))
+            g_startGameNote = writeStartGameAfterUpdate(g_startGame);
+        if (ImGui::IsItemHovered())
+            menu_style::setHelp("Untick it to leave an update running (overnight, say) without the game starting again at its end. "
+                                "Remembered for the next updates; the setup's update window shows the same choice.");
+        if (!g_startGameNote.empty())
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(menu_style::colour("red")), "%s", g_startGameNote.c_str());
         if (g_phase == Phase::Saving)
             ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(menu_style::colour("amber")), "Saving this moment...");
         else if (g_phase == Phase::Quitting)

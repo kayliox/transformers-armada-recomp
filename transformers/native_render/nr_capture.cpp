@@ -919,22 +919,40 @@ namespace nr
         std::unordered_map<uint64_t, uint64_t> g_ticketContent; // a ticket's contentKey
         uint64_t g_largeShares = 0, g_largeEvicted = 0;
 
-        uint64_t contentKey(const std::string &name, const Texture &t)
+        // (nr_core S7: the key is the core's, hdContentKey in nr_texture.cpp - a host of the core alone makes the same)
+        uint64_t contentKey(const std::string &name, const Texture &t) { return hdContentKey(name, t); }
+
+        // (nr_core S7, TF_NATIVE_HDKEYS=1) Each texture converted is converted a second time for the log: from copies of its
+        // levels' bytes in host memory (captureTextureInputs) through the core's host-memory entry, beside the draw's
+        // conversion from guest memory, and the HD pack's content key of both printed with its name: the two must be the same
+        // ("same"; "DIFF" else). A level read from GS memory alone (the light maps) has no copy: "host -". Debug only - the
+        // draw's own texture is the one it had.
+        void logHdKeys(const uint8_t *rdram, const TextureKey &key, uint64_t tex0)
         {
-            uint64_t h = 1469598103934665603ull;
-            auto mix = [&h](const void *p, size_t n) {
-                const auto *b = static_cast<const uint8_t *>(p);
-                for (size_t i = 0; i < n; ++i)
-                    h = (h ^ b[i]) * 1099511628211ull;
-            };
-            mix(name.data(), name.size());
-            const uint32_t dims[3] = {t.width, t.height, t.gameMips};
-            mix(dims, sizeof dims);
-            // (TODO 164: the texels' hash, 8 bytes at a time - made on the conversion worker, where it was converted
-            // there; the bytes one at a time were a sixth of an HQ conversion's time)
-            const uint64_t texels = t.pixelHash ? t.pixelHash : pixelHash(t);
-            mix(&texels, sizeof texels);
-            return h;
+            static const bool on = std::getenv("TF_NATIVE_HDKEYS") && *std::getenv("TF_NATIVE_HDKEYS") == '1';
+            if (!on || !key.texture)
+                return;
+            static uint64_t seen = 0, same = 0, differ = 0, noCopy = 0, none = 0;
+            const std::string name = guestString(rdram, key.texture + 0x18u);
+            const std::shared_ptr<const Texture> guest = convertTexture(rdram, key, 0u);
+            const std::shared_ptr<TextureInputs> inputs = captureTextureInputs(rdram, key);
+            const std::shared_ptr<const Texture> host = inputs ? convertTextureFrom(*inputs, key, 0u) : nullptr;
+            ++seen;
+            if (!guest)
+            {
+                ++none;
+                return;
+            }
+            const uint64_t g = contentKey(name, *guest), h = host ? contentKey(name, *host) : 0u;
+            const char *verdict = !host ? "host -" : g == h ? "same" : "DIFF";
+            ++(!host ? noCopy : g == h ? same : differ);
+            std::fprintf(stderr, "[native render] hdkey '%s' %ux%u mips %u psm %x tex0 %016llx: guest %016llx host %016llx %s\n", name.c_str(),
+                         guest->width, guest->height, guest->gameMips, key.psm, static_cast<unsigned long long>(tex0),
+                         static_cast<unsigned long long>(g), static_cast<unsigned long long>(h), verdict);
+            if (seen % 100u == 0u)
+                std::fprintf(stderr, "[native render] hdkeys: %llu converted, %llu same, %llu differ, %llu without a host copy, %llu not converted\n",
+                             static_cast<unsigned long long>(seen), static_cast<unsigned long long>(same), static_cast<unsigned long long>(differ),
+                             static_cast<unsigned long long>(noCopy), static_cast<unsigned long long>(none));
         }
 
         // (TODO 177) The large images by content for the conversion workers (g_shared is the game thread's, under
@@ -2098,6 +2116,7 @@ namespace nr
                     e.texture = movie::texture(rdram, key, data, g_nextId++);
                 if (!moviePicture || !e.texture)
                 {
+                    logHdKeys(rdram, key, tex0); // (nr_core S7, TF_NATIVE_HDKEYS=1: the HD keys of both entries)
                     // (TODO 164) On a conversion worker: the key's guest memory copied now (headers, texels, palette), the
                     // draw given the texture to come - the renderer waits for its pixels (expandFrame), the rest of this
                     // (the prefetch's twin, the large image asked for, the counters) done when it is back (takeConverted).
@@ -8101,5 +8120,14 @@ namespace nr
             }
         }
         return true;
+    }
+}
+
+namespace nr
+{
+    void texelsRewritten(const uint8_t *rdram, uint32_t level)
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_texMutex); // (as the upload hook, uploadLevel)
+        rememberRewrite(rdram, level);
     }
 }

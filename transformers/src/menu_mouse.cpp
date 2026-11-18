@@ -191,6 +191,8 @@ namespace menu_mouse
         };
         constexpr uint64_t kOwnStale = 6u; // game frames an update may be missed (it can yield inside 0x1A0C20)
         uint32_t g_ownScreen = 0u;         // the HQ screen whose update ran last
+        uint32_t g_ownSelf[std::size(g_own)] = {};    // each kind's screen whose update ran last (hqScreenUpdated)
+        uint64_t g_ownSelfFrame[std::size(g_own)] = {}; // the game frame that was
         int g_ownIndex = -1;               // its g_own entry
         uint64_t g_ownFrame = 0u;          // the game frame that was
         float g_lastU = -2.0f, g_lastV = -2.0f;
@@ -250,6 +252,8 @@ namespace menu_mouse
                         g_ownScreen = self;
                         g_ownIndex = i;
                         g_ownFrame = g_frames;
+                        g_ownSelf[i] = self;
+                        g_ownSelfFrame[i] = g_frames;
                         break;
                     }
                 // (TF_MENU_TRACE: each other screen class the base update sees, once)
@@ -479,6 +483,14 @@ namespace menu_mouse
     uint16_t padButtons()
     {
         return g_buttons;
+    }
+
+    uint32_t hqScreenUpdated(uint32_t vtable)
+    {
+        for (size_t i = 0; i < std::size(g_own); ++i)
+            if (g_own[i].vtable == vtable)
+                return g_ownSelf[i] != 0u && g_frames - g_ownSelfFrame[i] <= kOwnStale ? g_ownSelf[i] : 0u;
+        return 0u;
     }
 
     void frame(uint8_t *rdram, bool paused)

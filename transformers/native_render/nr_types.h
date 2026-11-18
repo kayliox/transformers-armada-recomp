@@ -383,6 +383,8 @@ namespace nr
     // A level's texels kept as they were uploaded (the game frees the copy in main memory of some
     // once they are in GS memory: the light maps kept in a buffer's top byte, say).
     void rememberLevel(const uint8_t *rdram, uint32_t level);
+    // The same for texels the host rewrote with no upload (nr_install.h texelsRewritten): stale whatever was seen before.
+    void rememberRewrite(const uint8_t *rdram, uint32_t level);
     // How many times a level was uploaded again with other texels (a movie's frames, an animated
     // palette): the converted textures of it are stale when it moves (nr_capture.cpp convertKey).
     uint32_t levelGeneration(uint32_t level);
@@ -460,6 +462,11 @@ namespace nr
         double replayWaitMs();
         // (N9 stage 3) The render thread's time waiting for a frame slot so far (ms, all of it): the GPU behind the frames.
         double slotWaitMs();
+#if !defined(__linux__)
+        // (TODO 420) The window has not taken two of the CPU hand-over's pictures yet, while it is taking them: the next frame
+        // is left out (nr_d3d.cpp). False on the shared and DXGI paths, and with TF_NATIVE_WINDOW_PACE=0.
+        bool windowBehind();
+#endif
         // (N9 stage 3) The pacer's delay after a picture's moment (ms): how late the GPU's pictures are ready.
         double pacerDelayMs();
 
@@ -532,6 +539,8 @@ namespace nr
     // The native picture shown live in the window (nr_present.cpp): TF_NATIVE_LIVE=1.
     void startLivePicture();
 
+    // (nr_core S7) The recomp's entry, a vlTexturePS2's levels read from guest memory (nr_texture_guest.cpp, glue): into a
+    // HostTexture, converted by the core's convertHostTexture.
     std::shared_ptr<const Texture> convertTexture(const uint8_t *rdram, const TextureKey &key, uint64_t id);
     // (TODO 164) What convertTexture reads of guest memory for a key - the levels' headers, texels and palette -
     // copied, so a worker converts it while the game goes on (convertTextureFrom). Null: not to be copied (a level
@@ -541,6 +550,42 @@ namespace nr
     std::shared_ptr<const Texture> convertTextureFrom(const TextureInputs &inputs, const TextureKey &key, uint64_t id);
     // (TODO 164) A hash of a texture's texels and its game mips (8 bytes at a time): the large images' contentKey.
     uint64_t pixelHash(const Texture &t);
+
+    // (nr_core S7) A texture from host memory - the core's own entry, no guest addresses: what a vlTexturePS2 holds, as values
+    // and pointers its host owns (a native build's own heap; the recomp's guest memory through convertTexture). How the GS
+    // samples it (TEX0), its image level as the game uploads it, its palette level and up to three game mip levels, converted
+    // as the GS stores and samples them (nr_texture.cpp): the same pixels, so the same HD-pack keys (pixelHash, hdContentKey).
+    struct HostTexture
+    {
+        // A level as the game uploads it: its own format, size, bits per pixel (4, 8, 16, 24, 32) and the column width its
+        // upload sends it in (0: its width), and its texels - (width * height * bpp + 7) / 8 bytes, or null: none.
+        struct Level
+        {
+            uint32_t psm = 0, width = 0, height = 0, bpp = 0, tile = 0;
+            const uint8_t *texels = nullptr;
+            size_t bytes = 0;
+        };
+        uint32_t psm = 0, width = 0, height = 0; // TEX0: the format the GS samples it in and its size (2048 at most)
+        uint32_t tbw = 0;                        // TEX0's buffer width, 64 pixels a unit (0: the format's own for the width)
+        uint32_t csa = 0;                        // a 4-bit palette's offset in the palette level (CSA, 16 entries a unit)
+        Level image;
+        // The palette level (indexed formats): clutEntries 32-bit entries as uploaded (256: in the GS's CSM1 order). Null: none.
+        const uint8_t *clut = nullptr;
+        uint32_t clutEntries = 0;
+        // The game's own levels below the image (TEX1's), each read at half the size of the one above; the first mipCount.
+        Level mips[3];
+        uint32_t mipCount = 0;
+        uint32_t source = 0; // into Texture::source (an identity the host chooses: the recomp's, the vlTexturePS2's address)
+        // (the recomp's light maps) No texels: a top-byte format read from GS memory (setGsMemory) at TEX0's block `tbp`.
+        bool gsMemory = false;
+        uint32_t tbp = 0;
+    };
+    std::shared_ptr<const Texture> convertHostTexture(const HostTexture &in, uint64_t id);
+    // A palette level alone as a 256 x 1 texture in the order the indices read it (convertPalette's); null under 256 entries.
+    std::shared_ptr<const Texture> convertHostPalette(const uint8_t *clut, uint32_t clutEntries, uint64_t id);
+    // (nr_core S7) The HD pack's content key of a game texture - its name, size, game mips and texels' hash: the large images
+    // are shared by it (nr_capture.cpp askLarge).
+    uint64_t hdContentKey(const std::string &name, const Texture &t);
 
     // The texture's upscaled image in place of its pixels, found by its name and confirmed by its
     // content (nr_hires.cpp); false when there is none (the texture is left as it is).

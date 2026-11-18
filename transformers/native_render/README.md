@@ -1038,7 +1038,7 @@ and interfaces (their names and addresses are the game's).
    (realesrgan-ncnn-vulkan, any Vulkan GPU), blended 60/40 with a plain Lanczos 4x (x4plus alone invents ragged spikes on
    fine silhouettes - Greenland's pines; the blend keeps the detail without them; animevideov3 was smoother but lost the
    rock and snow detail), H.264 CRF 16 - the 8 previews in ~35 min on the 7900 XTX, 314 MB. At run time the copy's frame
-   N is drawn for the game's picture N (nr_movie.cpp previewTexture): an ffmpeg of its own decodes it (hd_movies_decoder
+   N is drawn for the game's picture N (nr_movie_core.cpp previewTexture): an ffmpeg of its own decodes it (hd_movies_decoder
    Decoder, started on a thread of its own - again at each loop), the frame moved into a large texture with the game-size
    one as its fallback; a picture whose frame is not there yet is drawn from the game's. On a GTX 1080 test PC, Antarctica's preview:
    86 pictures from the copy, 4 from the game's (its start), 0.07 ms a picture on the game's thread; the copy against the
@@ -1183,7 +1183,9 @@ read-back from GS memory again instead of the native depth - nr_occlusion.cpp).
   the real clock on a thread of its own, its sparks moved by the GPU (nr_d3d.cpp drawCloud).
 - `nr_particles.cpp`: the particle pipelines' VU1 programs run on the renderer's thread (stage 14), and the pipelines'
   field headers' upload (func_002516C0) written by our own code.
-- `nr_movie.cpp`: the movies' pictures from the decoder (stage 15, roadmap N6).
+- `nr_movie.cpp`: the movies' pictures from the decoder (stage 15, roadmap N6): the recomp's glue (the runtime's decoder, the
+  sound blocks counted, the game's buffer addresses, the preview's ffmpeg); `nr_movie_core.cpp` (in the core): the pictures
+  kept by buffer id and made into textures, the preview's bookkeeping, the movie log (nr::MovieHost).
 - `nr_rain.cpp`: the rain's batches (taShader_Rain's routine) made into their GIF packets in C++ (stage 18).
 - `nr_n5.cpp`: roadmap N5 (stage 19): the display list's census (`TF_N5_CENSUS`) and VIF1's lite transfers while the
   native renderer draws alone, with its check mode.
@@ -1197,3 +1199,134 @@ read-back from GS memory again instead of the native depth - nr_occlusion.cpp).
   as before).
 - `nr_passes.cpp`, `nr_grass.cpp`, `nr_texture.cpp`, `nr_hires.cpp`: the routines as passes, the grass
   blades, texture conversion, the remaster's large images (loaded on a thread of their own).
+- (nr_core S7) The core's texture entry takes the texture from host memory: `nr::convertHostTexture(HostTexture)` in
+  `nr_texture.cpp` - TEX0's format, size, buffer width and CSA, the image level as the game uploads it (its format, size, bits
+  per pixel, column width, texels), the palette level's entries and up to three game mip levels, as values and pointers the
+  host owns; with `nr::hdContentKey(name, texture)` (the HD pack's content key, moved from nr_capture.cpp) and `pixelHash`, a
+  host of the core alone gets the same pixels and the same HD-pack keys. The recomp's entry from guest memory (`convertTexture`:
+  a vlTexturePS2's levels read through TextureHost::guestPtr, the uploads' snapshots, the conversion workers' copies) is glue in
+  `nr_texture_guest.cpp`, filling a HostTexture. `TF_NATIVE_HDKEYS=1`: every texture converted is converted again from copies of
+  its bytes in host memory, and both HD-pack keys printed (`hdkey ... same`).
+- `nr_frame.cpp` (in the core since nr_core S6): the frame builder - a frame's draw list (nr::Frame) turned into calls on
+  gfx::Device (the GS replay: targets, passes, the draw loop, the glow, the anti-aliasing, the pictures' constants); with
+  `nr_draw.cpp` (in the core), the GS state as neutral values. What it needs of its host (a movie's band of rows, the flight
+  recorder, the sun's occlusion probe, the camera turn of each picture) comes through `nr_frame.h` FrameHost, set by the
+  recomp's glue (`nr_core_glue.cpp`); a host that fills an nr::Frame gets the whole renderer.
+- `nr_mips.cpp` (in the core): the game textures' mip chains (moved from `nr_frame.cpp`, nr_core S5). The core's sources (the
+  list in CMakeLists.txt, `TF_NR_CORE_REGEX`) build with no runtime include; what they need of the recomp comes through the
+  hooks in `nr_core.h` (TextureHost, HiresHost, PresentHost), `nr_backend.h` (FrameBuilderHost: the core's own frame builder
+  unless the host sets another), `nr_frame.h` (FrameHost), `nr_queue.h`, `nr_pictures.h` and `nr_movie_core.h`.
+- `tests/nr_core_smoke.cpp`: the core's smoke test (nr_core S5), a program of the core's objects alone - not part of the player
+  build, never built by setup or build.ps1. In a build folder (Windows): `cmake --build . --config RelWithDebInfo --target
+  nr_core_smoke`, then run `nr_core_smoke.exe` from a folder it may write to. It links every core object (any symbol the core
+  still takes from the recomp fails the link), opens the core, starts the device, records a known draw stream through
+  gfx::Device (a cleared picture, a pattern copied into its left half by the tone pass at strength 0), lets the device save the
+  picture and compares it pixel for pixel with the expected one, whose hash must equal the stored reference
+  (`tests/nr_core_smoke_ref.py` makes it). Since nr_core S7 it also converts a PS2-format texture (8-bit, 256 x 256, a CSM1
+  palette, from its own memory) through the host-memory entry, checks every texel, its pixelHash and its HD-pack key against
+  the stored ones, and draws it into the picture's right half. Exit 0 and `SMOKE OK`: passed.
+  `nr_core_smoke.exe --window` (nr_core S9a, Windows) also opens the core with a window of its own (hidden; `--show` shows it)
+  and checks every event the core forwards (resize, focus, DPI, raw key / mouse reports through the core's translation, the
+  close request) and a window the test makes itself, passed in by its handle (watched without taking its message loop, let go,
+  also opened from another thread, raw input on request). Exit 6: a window check failed.
+- `nr_window.cpp` (in the core, nr_core S9a): the core's window (`nr_core.h`: `open(Settings, WindowSpec)`, `window`,
+  `windowSize`, `pumpEvents`, `closeWindow`). Either the core's own Win32 window (its messages pumped by the host's
+  `pumpEvents` on the thread that opened it; Alt+F4 / the X only report `closed` - the host decides) or a window the host made,
+  passed in by its HWND: the host keeps its message loop and the core watches the window's messages through two message hooks
+  (sent and posted messages; observation only), set by a thread of the core's own so they last until `closeWindow` whichever
+  thread opens or closes. Both send the size, focus, close request, DPI and raw keyboard / mouse input (WM_INPUT, registered for
+  the core's own window; for a host's window only on request from its own thread) out through `nr_core::WindowEvents`, on the
+  window's thread; the core reads no input itself. No swap chain yet (S9b): pictures leave as before, and the recomp's player
+  build never opens a window through the core (`open(Settings)` alone, as before).
+- `nr_swapchain.cpp` (in the core, nr_core S9b): the core presents into that window (`nr_core.h`: `present(PresentRequest)`,
+  `releasePresent`). A DXGI flip-model swap chain of its own (three buffers; tearing allowed without vsync where the system
+  has it - the unlimited cap, VRR), made at the first present and resized with the window's client area, on the renderer's
+  device and queue. The picture (a shared texture the host holds: latestShared / sharedHeld) is drawn into the back buffer the
+  way the recomp's GL window draws it today: the bars cleared, then a bilinear stretch of its source rect into the destination
+  rect (raylib's DrawTexturePro), or - enlarged by more than 1 % with FSR 1 asked for - EASU into a texture of the destination's
+  size and RCAS from it (nr_present.cpp's two GLSL passes ported line for line to HLSL; FXAA and CAS already run inside the
+  picture). A shot saves the back buffer as drawn. `nr_core_smoke.exe --present` presents its test picture (or `--input <bmp>`)
+  1:1 (an exact copy, the bars exact), at render scales 75 % and 50 % and letterboxed 16:9 in a 21:9 window, bilinear and FSR 1,
+  saving each (`present_<case>.bmp`, and the input as `present_input.bmp` for an offline compare with the GL side). Not used by
+  the player build: nothing presents through the core yet.
+- `nr_devswap.cpp` (glue, nr_core S9c): `TF_NATIVE_SWAPCHAIN=1`, a developer switch (default off, never in settings.ini or the
+  F1 menu) that shows the native pictures through the core's swap chain. The game window already presents through the
+  runtime's own DXGI swap chain (one flip-model chain a window), so the core presents into a child window over its client
+  area (no frame, transparent to the mouse, never activated, following its size); the game window keeps its input, its loop
+  and its own present beneath. nr_present.cpp's picture drawer still draws the picture with GL as before, then hands the same
+  shared picture and rects (FSR 1 by the same choice, vsync as the runtime's present) to `nr_core::present`; the child shows
+  only while the window's picture is a shared picture (else it hides: the start's black, a movie from GS memory, the CPU
+  hand-over and the emulated drawing show through as before). The other GL overlays are drawn in the game window under the
+  child: not shown while the switch is on (S12: the ImGui ones - the F1 menu, the debugger - are, and S13a raylib's own, see
+  nr_overlay_host.cpp). `TF_NATIVE_SWAPCHAIN_SHOT=<tick>,...` saves, for the first picture
+  of each tick, the core's back buffer (`runs/swap_<tick>.bmp`) and the GL window's drawing of the same picture
+  (`runs/swapgl_<tick>.png`).
+- `nr_submit.cpp` (in the core, nr_core S10): a frame the host records itself, beside the recomp's `nr::queueFrame(Frame)`
+  (`nr_core.h`: `submit(Record, FrameInfo)`, `flushSubmitted`, `endSubmits`, `ready`). The recording is a callback of device
+  calls (`gfx::Device`); the core runs it on its frame queue's drawing thread (nr_queue.cpp - one thread records in a process,
+  whichever host feeds it) between the frame's start and end: the device started when it gets there (open()'s preparing waited
+  for), prepareFrame + beginFrame at FrameInfo's picture size, the core's own picture target (RGBA8, shared, made again at a
+  new size, not cleared) handed to the recording in `Recording` with its `FrameEnd` (target, shown rect, shape - a recording may
+  name its own), endFrame with one picture (the identity's constants), the frame's picture saved when `FrameInfo::shot` asks,
+  then presented into the core's window when one is in use (`FrameInfo::present`: letterboxed to the frame's shape, vsync /
+  FSR 1 / bars / a window shot as `PresentRequest`'s), then `FrameInfo::done(drawn, presented)`. Presenting needs the pictures
+  handed over as shared textures at once: open() with `Settings::sharedPictures = 1`, `livePictures = 1` and `corePacing = 0`
+  (the host paces; nr_core S11 - left at -1 the environment's `TF_NATIVE_LIVE` / `TF_PACING` decide, as before, so the recomp
+  is unchanged; both are read once, when the device is first prepared). submit() waits while two submitted frames wait to be
+  drawn (the back-pressure) and refuses a frame when the device failed or was lost. A submitted frame is never left out and
+  is not read: S11 queues it in line with the recomp's frames (the read thread passes it on unread), so a process that uses
+  both keeps their order. The recomp's frames are untouched: their jobs carry no recording and take the queue's paths as
+  before. `nr_core_smoke.exe` (step 7) records step 2's stream through submit (the same picture, the stored hash), checks the
+  back-pressure and the order of queueFrame and submit frames mixed (a slow read in front of a submit), and with `--present`
+  (opened with `Settings::livePictures = 1`, `corePacing = 0` and no `TF_NATIVE_LIVE` / `TF_PACING` in its environment)
+  presents a submitted frame into its window (1:1, letterboxed, exact).
+- Overlays in the core (nr_core S12): `nr_core.h` `Overlay` / `OverlayTarget` - `PresentRequest::overlay` and
+  `FrameInfo::overlay` (a submitted frame's) are called inside `nr_core::present` (nr_swapchain.cpp) after the picture is drawn
+  into the back buffer and before the shot and the present, handed the device, its queue, the open command list, the back
+  buffer and its render target view, its size and format, and the buffer's index (what an overlay used for buffer b is free
+  when it is called for b again: the core waited for it). The core knows nothing of ImGui. `WindowEvents::message` forwards
+  every message of the window in use as it comes (a host's window: watched, its handler always runs; the core's own window
+  returns 1 for a message the callback says it handled - WM_SETCURSOR).
+- `overlay/nr_core_imgui.cpp`, `overlay/nr_core_imgui_win32.cpp` (nr_core S12, an OPTIONAL module beside the core, the library
+  `nr_core_imgui`, built with the debug UI's ImGui on Windows): ImGui frames as the core's overlay. `capture(drawData,
+  Textures)` after `ImGui::Render()` copies the frame (its draw lists cloned, each command's texture turned into the module's
+  own number, ImGui's texture changes copied as pixels); `take()` hands the frames captured since over as one overlay, drawn in
+  order by the module's own small Direct3D 12 renderer (not imgui_impl_dx12: the overlay may run on the core's drawing thread
+  while the ImGui context is in use elsewhere, and in the recomp rlImGui's GL owns ImGui's textures - `Textures::Shared`, the
+  module keeps copies; `Textures::Owned`: the module answers the requests). It draws as rlImGui does: colour times texture,
+  sampled nearest (raylib's point filter; `setLinearSampling` for bilinear), source-alpha blending, the scissor rounded as
+  rlImGui's EnableScissor. Its second file is a whole ImGui host for a window whose messages the core forwards (`setup` /
+  `begin` / `end`; the native decomp build's case): ImGui's own Win32 input (imgui_impl_win32) fed with the forwarded messages,
+  queued and handed over at the next `begin()` on the ImGui thread (mouse, wheel, keys, WM_CHAR text with surrogate pairs,
+  focus, XInput pads, the IME's composition window at the text cursor), WM_SETCURSOR answered with ImGui's cursor.
+  `nr_core_imgui_smoke.exe` (`--target nr_core_imgui_smoke`): a fixed scene drawn by the module over a picture of one colour
+  (exact where it must be), the same scene by imgui_impl_dx12 and by the module bilinear (the pixels that differ counted and
+  boxed), then the module's host on the core's window driven by window messages (a click, the wheel, typed text with a
+  surrogate pair, Backspace, the IME's position, the I-beam cursor) and presented. `nr_core_smoke.exe --present` (step 8)
+  draws a known quad through `PresentRequest::overlay` and through a submitted frame's (on the drawing thread), read back exact.
+- `nr_overlay_host.cpp` (glue, nr_core S12): under `TF_NATIVE_SWAPCHAIN=1` the window's ImGui overlays (the F1 menu, the
+  debugger) drawn into the core's picture too. The recomp's core window is the child over the GL window, which keeps all the
+  input, so the overlay host stays rlImGui's (its setup, fonts, raylib input; feedsInput false - the F1 menu's own input
+  workarounds as before) and rlImGui still draws into GL (shown whenever the child hides); its end() also captures the frame
+  for the module (`Textures::Shared`). nr_devswap.cpp then keeps each picture and presents it from `nr::overlaysDrawn()`
+  (main.cpp, the end of the debug UI's draw callback; nothing without the switch) with the frames captured since: the same
+  picture's menu. `TF_NATIVE_SWAPCHAIN_SHOT`'s GL twin is read there too (with the overlays), and `TF_MENU_SHOT` saves
+  `runs/menu_shot*_core.bmp` beside its PNG (the core's picture of the same moment).
+- Layers (nr_core S13a): raylib's own overlays in the core's picture too - the frame counter, the state notices, the settings
+  panel, the small crosshair, the distance meter, the objective arrow, the REC mark, HD movies over the picture, whatever the
+  window draws after its picture. Core: `nr_core::layer(index, w, h)` - a shared RGBA8 texture of the core's (an NT handle,
+  made again at a new size: a new generation), returned once the GPU is done with the presents that drew it - and
+  `layerOverlay(index, bottomUp)`, an overlay that draws it over the back buffer with premultiplied alpha, one texel a pixel
+  (nr_swapchain.cpp, `psLayer`). Module: `nr_core_imgui::insert(overlay)` puts such an overlay between the captured frames, in
+  their order. Runtime (patch 0206, `ps2_host_present::setOverlayLayers`; nothing without a host): the window's loop draws
+  everything after the picture into a slice - a GL texture the host gives, cleared transparent, the colour blended as raylib
+  does and the alpha as coverage (premultiplied) - and each slice, as it closes, is drawn into the window with premultiplied
+  alpha (so the GL window looks as before, within a level of rounding); the ImGui frames close one slice and open the next
+  (`overlayLayerBreak` / `overlayLayerResume`). Glue (nr_overlay_host.cpp, only under the switch with the debug UI built in):
+  each slice is one of the core's layers imported into GL (nr_glshare, three in turn per slice), handed to the module at its
+  place as it closes; `nr::overlaysDrawn()` closes the last one and waits for GL (`glFinish`) before the present reads the
+  layers. So the core's picture is the GL window's order: picture, the raylib overlays before the F1 menu, the menu, the ones
+  after it (the REC mark), the debugger. `TF_NATIVE_SWAPCHAIN_LAYERS=0`: no layers (S12's state). `nr_core_smoke.exe --present`
+  (step 9) fills a layer through its handle (an opaque and a half-covered rect) and checks it presented exact (rows mirrored,
+  premultiplied within a level), two layers in order, and a new generation at a new size; `nr_core_imgui_smoke.exe` checks an
+  overlay inserted between two frames and one alone.

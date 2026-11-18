@@ -6,6 +6,7 @@
 // recomp's display-list read, grass and pictures between frames stay in nr_thread.cpp).
 #include "nr_queue.h"
 #include "nr_pictures.h"
+#include "nr_submit.h"
 #include "nr_backend.h"
 #include "nr_core.h"
 
@@ -93,6 +94,9 @@ namespace nr
         bool g_started = false;
         bool g_busy = false;
         bool g_reading = false; // a frame's display list being read from guest memory
+        // (nr_core S10) Submitted frames (nr_core::submit) waiting to be drawn, and those not yet drawn to the end (waiting or
+        // being drawn); under g_mutex, waited on with g_room.
+        unsigned g_submitWaiting = 0, g_submitInFlight = 0;
         std::atomic<uint64_t> g_gameWaitNs{0}; // (TODO 112) the game's thread's waits in queueFrame, all of them
         // (TODO 94) Frames' draws and lists given back by the renderer, for the game's next frames (recycleFrameBuffers).
         std::mutex g_spareMutex;
@@ -115,7 +119,7 @@ namespace nr
         std::condition_variable g_readyCv;
         struct Drops
         {
-            uint64_t drawn = 0, behind = 0, capped = 0, tested = 0, keptDraws = 0;
+            uint64_t drawn = 0, behind = 0, capped = 0, tested = 0, keptDraws = 0, window = 0;
         } g_drops;
         std::atomic<uint64_t> g_behindTotal{0}; // (nr::framesLeftOutBehind)
         // (TODO 290 fps) The drawing's time for each frame it drew - the slower of its two stages, the reading (its own
@@ -258,7 +262,9 @@ namespace nr
         {
             const int64_t drawStartNs = latLogSeconds() ? nowNs() : 0;
             const auto start = std::chrono::steady_clock::now();
-            if (g_host.draw)
+            if (job.submitted)
+                drawSubmitted(job); // (nr_core S10: the host's own recording, nr_submit.cpp)
+            else if (g_host.draw)
                 g_host.draw(job);
             if (latLogSeconds())
                 latNote(job, drawStartNs, nowNs());
@@ -307,6 +313,15 @@ namespace nr
                     g_cv.wait(lock, [] { return !g_jobs.empty(); });
                     job = std::move(g_jobs.front());
                     g_jobs.pop_front();
+                    // (nr_core S11) A submitted frame: nothing to read - passed on to the drawing in its place in line.
+                    if (job.submitted)
+                    {
+                        g_ready.push_back(std::move(job));
+                        lock.unlock();
+                        g_room.notify_all();
+                        g_readyCv.notify_one();
+                        continue;
+                    }
                     g_reading = true;
                 }
                 g_room.notify_all();
@@ -375,6 +390,15 @@ namespace nr
                 for (size_t i = 0; i < batch.size(); ++i)
                 {
                     Job &job = batch[i];
+                    const bool submitted = job.submitted != nullptr; // (nr_core S10: never left out - droppable() is false)
+                    if (submitted)
+                    {
+                        {
+                            std::lock_guard<std::mutex> lock(g_mutex);
+                            --g_submitWaiting; // (taken: the host may hand over one more)
+                        }
+                        g_room.notify_all();
+                    }
                     const bool newer = i + 1 < batch.size();
                     const bool can = framesDropped() && droppable(job);
                     const int cap = g_host.pictureCap ? g_host.pictureCap() : 0;
@@ -384,9 +408,13 @@ namespace nr
                     const bool overCap = can && capNs > periodNs && lastShownDue != 0 && job.frame.dueNs > lastShownDue &&
                                          job.frame.dueNs - lastShownDue < capNs - periodNs / 2;
                     const bool tested = can && test > 0 && ++testCount % test == 0;
-                    if (can && (newer || overCap || tested))
+                    // (TODO 420) The window has not taken the pictures before this one (the host's answer; null: never): left
+                    // out, so the GPU's time goes to the pictures it shows. Not counted as the renderer behind - the rate's
+                    // governor reads that.
+                    const bool windowBehind = can && !newer && !overCap && !tested && g_host.windowBehind && g_host.windowBehind();
+                    if (can && (newer || overCap || tested || windowBehind))
                     {
-                        (newer ? g_drops.behind : overCap ? g_drops.capped : g_drops.tested) += 1;
+                        (newer ? g_drops.behind : overCap ? g_drops.capped : tested ? g_drops.tested : g_drops.window) += 1;
                         if (newer)
                             g_behindTotal.fetch_add(1u, std::memory_order_relaxed);
                         dropFrame(job, newer ? targetsOf(batch[i + 1].frame) : std::vector<uint32_t>(lastTargets));
@@ -402,6 +430,14 @@ namespace nr
                     }
                     recycleFrameBuffers(job.frame); // (its draws' meshes and textures let go of here, their memory kept)
                     job = Job{}; // (the frame's meshes and textures let go of here, not under the lock)
+                    if (submitted)
+                    {
+                        {
+                            std::lock_guard<std::mutex> lock(g_mutex);
+                            --g_submitInFlight; // (drawn, its recording's captures let go of: flushSubmitted may return)
+                        }
+                        g_room.notify_all();
+                    }
                 }
                 {
                     std::lock_guard<std::mutex> lock(g_mutex);
@@ -411,12 +447,12 @@ namespace nr
                 if (std::chrono::steady_clock::now() - saidAt >= std::chrono::seconds(10))
                 {
                     saidAt = std::chrono::steady_clock::now();
-                    if (g_drops.behind || g_drops.capped || g_drops.tested)
-                        std::fprintf(stderr, "[native render] frames in 10 s: %llu drawn, left out %llu (renderer behind), %llu (the cap), %llu (TF_DROP_TEST); "
-                                             "%llu draws of theirs kept (a render-to-texture of their own)\n",
+                    if (g_drops.behind || g_drops.capped || g_drops.tested || g_drops.window)
+                        std::fprintf(stderr, "[native render] frames in 10 s: %llu drawn, left out %llu (renderer behind), %llu (the cap), %llu (TF_DROP_TEST), "
+                                             "%llu (the window behind); %llu draws of theirs kept (a render-to-texture of their own)\n",
                                      static_cast<unsigned long long>(g_drops.drawn), static_cast<unsigned long long>(g_drops.behind),
                                      static_cast<unsigned long long>(g_drops.capped), static_cast<unsigned long long>(g_drops.tested),
-                                     static_cast<unsigned long long>(g_drops.keptDraws));
+                                     static_cast<unsigned long long>(g_drops.window), static_cast<unsigned long long>(g_drops.keptDraws));
                     g_drops = Drops{};
                 }
             }
@@ -508,16 +544,24 @@ namespace nr
 
     double gameWaitMs() { return static_cast<double>(g_gameWaitNs.load(std::memory_order_relaxed)) / 1e6; }
 
-    void queueFrame(Frame &&frame, const std::string &shot)
+    namespace
     {
-        const int64_t handedNs = latLogSeconds() ? nowNs() : 0; // (TODO 169: TF_NATIVE_LATLOG)
-        std::unique_lock<std::mutex> lock(g_mutex);
-        if (!g_started)
+        // The queue's two threads, started by the first frame (under g_mutex).
+        void startThreads()
         {
+            if (g_started)
+                return;
             g_started = true;
             std::thread(readLoop).detach();
             std::thread(drawLoop).detach();
         }
+    }
+
+    void queueFrame(Frame &&frame, const std::string &shot)
+    {
+        const int64_t handedNs = latLogSeconds() ? nowNs() : 0; // (TODO 169: TF_NATIVE_LATLOG)
+        std::unique_lock<std::mutex> lock(g_mutex);
+        startThreads();
         // The frame before read from guest memory first: its packet buffer is the one the game
         // builds the next frame in (double buffered). Then two frames waiting at most.
         // (TODO 161 a: and, every frame drawn - TF_FRAME_DROPS=0 or the rate following the PC - the frame before taken to be drawn,
@@ -537,6 +581,34 @@ namespace nr
             job.submitNs = handedNs, job.inputNs = g_host.inputNs ? g_host.inputNs() : 0;
         g_jobs.push_back(std::move(job));
         g_cv.notify_one();
+    }
+
+    // (nr_core S10) A submitted frame: in line behind every frame handed over before it (S11: through g_jobs - the read thread
+    // passes it on unread, so it cannot overtake a frame still being read; S10 put it straight into g_ready). The game's thread
+    // waits while `waiting` submitted frames already wait to be drawn.
+    void queueSubmitted(Job &&job, unsigned waiting)
+    {
+        std::unique_lock<std::mutex> lock(g_mutex);
+        startThreads();
+        if (g_submitWaiting >= waiting)
+        {
+            const auto since = std::chrono::steady_clock::now();
+            g_room.wait(lock, [waiting] { return g_submitWaiting < waiting; });
+            g_gameWaitNs.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       std::chrono::steady_clock::now() - since).count()),
+                                   std::memory_order_relaxed);
+        }
+        ++g_submitWaiting;
+        ++g_submitInFlight;
+        g_jobs.push_back(std::move(job));
+        lock.unlock();
+        g_cv.notify_one();
+    }
+
+    void waitSubmittedDrawn()
+    {
+        std::unique_lock<std::mutex> lock(g_mutex);
+        g_room.wait(lock, [] { return g_submitInFlight == 0u; });
     }
 
     unsigned long long framesLeftOutBehind() { return g_behindTotal.load(std::memory_order_relaxed); }

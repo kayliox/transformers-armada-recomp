@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -196,14 +197,41 @@ namespace hd_movies_decoder
         if (!CreatePipe(&readEnd, &writeEnd, &sa, 1u << 22))
             return false;
         SetHandleInformation(readEnd, HANDLE_FLAG_INHERIT, 0);
-        STARTUPINFOA si{};
-        si.cb = sizeof(si);
-        si.dwFlags = STARTF_USESTDHANDLES;
-        si.hStdOutput = writeEnd;
-        si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        STARTUPINFOEXA si{};
+        si.StartupInfo.cb = sizeof(si);
+        si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        si.StartupInfo.hStdOutput = writeEnd;
+        si.StartupInfo.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        // (TODO 414) ffmpeg gets exactly its pipe and the log (stderr), not every inheritable handle of the game: the C
+        // library opens files inheritable, so it was handed the game's open disc files too (and, as a child that can
+        // outlive a moment of the game, kept them open with it).
+        HANDLE inherit[2] = {writeEnd, nullptr};
+        DWORD count = 1, flags = 0;
+        if (HANDLE err = si.StartupInfo.hStdError; err && err != INVALID_HANDLE_VALUE && err != writeEnd &&
+                                                   GetHandleInformation(err, &flags) && (flags & HANDLE_FLAG_INHERIT))
+            inherit[count++] = err;
+        SIZE_T size = 0;
+        InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+        std::vector<unsigned char> attributes(size);
+        auto *list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributes.data());
+        bool withList = false;
+        if (size && InitializeProcThreadAttributeList(list, 1, 0, &size))
+        {
+            if (UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit, count * sizeof(HANDLE), nullptr, nullptr))
+            {
+                si.lpAttributeList = list;
+                withList = true;
+            }
+            else
+                DeleteProcThreadAttributeList(list);
+        }
         PROCESS_INFORMATION pi{};
         std::string line = cmd;
-        const BOOL ok = CreateProcessA(nullptr, line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+        const BOOL ok = CreateProcessA(nullptr, line.data(), nullptr, nullptr, TRUE,
+                                       CREATE_NO_WINDOW | (withList ? EXTENDED_STARTUPINFO_PRESENT : 0u), nullptr, nullptr,
+                                       &si.StartupInfo, &pi);
+        if (withList)
+            DeleteProcThreadAttributeList(list);
         CloseHandle(writeEnd);
         if (!ok)
         {

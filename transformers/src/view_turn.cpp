@@ -425,6 +425,37 @@ namespace view_turn
         return m.captured;
     }
 
+    // (TODO 430) Photo mode's free camera: the travel since its own last take, from the same 1 ms readings the game's camera
+    // turns by (sensitivity and inverted Y already in), kept apart from the game's takes. raylib's GetMouseDelta, which the
+    // free camera read once a picture before, holds only the window's last poll (the loop polls every 1 ms between
+    // pictures): at 30 pictures a second about 1/30 of the hand's travel reached it - the "hardly moves" on a laptop.
+    bool takeFreeLookTravel(float &pixelsX, float &pixelsY, bool reset)
+    {
+        Mouse &m = g_mouse;
+        static double markX = 0.0, markY = 0.0;
+        static const bool passThrough = std::getenv("PS2X_MOUSE_TEST") != nullptr; // (the game's takes add its travel: no thread)
+        std::lock_guard<std::mutex> lock(m.mutex);
+        if (!passThrough)
+        {
+            if (!m.started)
+            {
+                m.started = true;
+                std::thread(mouseThread).detach();
+            }
+            pullLocked(nowNs());
+        }
+        if (reset)
+        {
+            markX = m.x;
+            markY = m.y;
+        }
+        pixelsX = static_cast<float>(m.x - markX);
+        pixelsY = static_cast<float>(m.y - markY);
+        markX = m.x;
+        markY = m.y;
+        return m.captured;
+    }
+
     void setTestMouse(float x, float y)
     {
         std::lock_guard<std::mutex> lock(g_mouse.mutex);

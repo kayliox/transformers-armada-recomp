@@ -26,6 +26,8 @@ mod winapi;
 #[path = "linux.rs"]
 mod winapi;
 mod launcher;
+#[cfg(windows)]
+mod frame_watch;
 #[cfg(not(windows))]
 use winapi::{desktop_shortcut_once, start_hd_maker};
 
@@ -64,6 +66,7 @@ const ACCENT: Color32 = Color32::from_rgb(0xF0, 0x8A, 0x24);
 const GOOD: Color32 = Color32::from_rgb(0x4C, 0xC3, 0x6A);
 const BAD: Color32 = Color32::from_rgb(0xE5, 0x48, 0x48);
 const DIM: Color32 = Color32::from_rgb(0x8A, 0x8F, 0x98);
+const WARN: Color32 = Color32::from_rgb(240, 180, 0); // (an update that rebuilds most of the game, said up front: TODO 425)
 
 #[derive(Clone, Copy, PartialEq)]
 enum Status {
@@ -88,6 +91,7 @@ enum Msg {
     Progress(f32),             // overall, 0..1
     Finished(Result<(), String>),
     Kept(String), // the player's own changes were committed to this branch before the update
+    Forecast(String), // (TODO 425) update.ps1's "This update rebuilds ...": how much the update rebuilds
 }
 
 #[derive(PartialEq)]
@@ -110,6 +114,7 @@ struct Check {
     latest_name: String,
     count: usize,
     changes: Vec<String>, // "hash  subject", newest first
+    forecast: String,     // (TODO 425) how much the update rebuilds on this PC, in plain words ("" not known)
     error: String,
 }
 
@@ -136,7 +141,11 @@ struct App {
     rx: Option<Receiver<Msg>>,
     child: Arc<Mutex<Option<Arc<winapi::ProcessTree>>>>, // the running step's process tree (Cancel ends it)
     update: bool,  // the job updates an installed copy (update.ps1) instead of setting up
-    play: bool,    // the game started again after the update (the game's own "Update now")
+    play: bool,    // the game asked for the update (its own "Update now"): it is started again afterwards
+    start_game: bool,    // (TODO 426) "Start the game when the update is done" (states\update_options.json, remembered)
+    choice_note: String, // why that choice could not be saved ("" saved)
+    play_started: bool,  // the update ended with the game being started (the window says so and closes)
+    forecast: String,    // (TODO 425) the running update's "This update rebuilds ..." line ("" none yet)
     wait_pid: u32, // the game that asked for the update: the update waits for it to close
     kept: String,  // the branch the player's own changes were kept on ("" none)
     check: Check,
@@ -192,6 +201,10 @@ impl App {
             child: Arc::new(Mutex::new(None)),
             update: false,
             play: false,
+            start_game: true,
+            choice_note: String::new(),
+            play_started: false,
+            forecast: String::new(),
             wait_pid: 0,
             kept: String::new(),
             check: Check::default(),
@@ -300,6 +313,7 @@ impl App {
         self.rx = Some(rx);
         self.phase = Phase::Running;
         self.kept.clear();
+        self.forecast.clear();
         self.progress = 0.0;
         self.hd_playable = false;
         if !self.hd && !self.update {
@@ -321,6 +335,9 @@ impl App {
             hd_gentle: self.hd_gentle,
             child: self.child.clone(),
             update: self.update,
+            // (TODO 426, the user 2026-11-18: option 1) the update script starts the game when it ends only when the game
+            // asked for the update (its own "Update now"); there the script reads the choice again at its end, so
+            // unticking it while the update runs counts. The setup's own Update button never starts the game (as before).
             play: self.play,
             wait_pid: self.wait_pid,
             source_ref: None,
@@ -427,6 +444,7 @@ impl App {
                 Msg::Step(_) | Msg::Detail(..) => {} // (a step this flavour does not show)
                 Msg::Progress(p) => self.progress = self.progress.max(p),
                 Msg::Kept(branch) => self.kept = branch,
+                Msg::Forecast(text) => self.forecast = text,
                 Msg::Finished(Ok(())) => {
                     for s in &mut self.steps {
                         if s.status == Status::Active || s.status == Status::Pending {
@@ -436,6 +454,11 @@ impl App {
                     self.progress = 1.0;
                     self.phase = Phase::Done(true);
                     self.done_at = Some(Instant::now());
+                    // (TODO 426) whether the update started the game (an update script from before the choice starts it
+                    // whenever it was told to)
+                    let repo = self.repo();
+                    self.play_started = self.update && self.play
+                        && (start_game_after_update(&repo) || !update_script_reads_choice(&repo));
                 }
                 Msg::Finished(Err(e)) => {
                     for s in &mut self.steps {
@@ -445,6 +468,10 @@ impl App {
                     }
                     self.error = e;
                     self.phase = Phase::Done(false);
+                    // (the update script starts the game as it was after a failure too, when it starts it at all)
+                    let repo = self.repo();
+                    self.play_started = self.update && self.play
+                        && (start_game_after_update(&repo) || !update_script_reads_choice(&repo));
                 }
             }
         }
@@ -502,6 +529,33 @@ fn repo_name(url: &str) -> String {
 fn game_folder(repo: &Path) -> PathBuf {
     let port = repo.join("port");
     if port.is_dir() { port } else { repo.to_path_buf() }
+}
+
+/// (TODO 426) "Start the game when the update is done": the choice, kept in the checkout's states\update_options.json
+/// (git-ignored; the updater's own files are there). This window and the game's F1 > About write it at once; update.ps1 /
+/// update.sh read it when the update ends, so a change made while the update runs counts. Missing or unreadable: ticked.
+fn update_options_file(repo: &Path) -> PathBuf {
+    game_folder(repo).join("states").join("update_options.json")
+}
+
+fn start_game_after_update(repo: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(update_options_file(repo)) else { return true };
+    let t: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    !t.contains("\"start_game\":false")
+}
+
+fn set_start_game_after_update(repo: &Path, on: bool) -> Result<(), String> {
+    let file = update_options_file(repo);
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("could not save the choice ({}): {e}", file.display()))?;
+    }
+    std::fs::write(&file, format!("{{\n    \"start_game\":  {on}\n}}\n")).map_err(|e| format!("could not save the choice ({}): {e}", file.display()))
+}
+
+/// Whether the checkout's update script reads that choice (one from before it starts the game whenever it is told to).
+fn update_script_reads_choice(repo: &Path) -> bool {
+    let script = game_folder(repo).join(if cfg!(windows) { "update.ps1" } else { "update.sh" });
+    std::fs::read_to_string(script).is_ok_and(|t| t.contains("update_options.json"))
 }
 
 trait NoWindow {
@@ -588,6 +642,13 @@ impl Job {
         // (Linux: setup.sh / update.sh, in the build container on SteamOS and Bazzite - linux.rs)
         #[cfg(not(windows))]
         return self.run_linux(tx, &log, &log_path, &path_env);
+        // (TODO 421, a testing aid) TF_SETUP_TEST_STEP=<PowerShell command>: that command as the "Disc and game" step
+        // in place of setup.ps1 - the window over a long step of your choosing (a CPU burner, the tools' cmake build).
+        if let Some(command) = std::env::var("TF_SETUP_TEST_STEP").ok().filter(|c| !c.is_empty()) {
+            let _ = tx.send(Msg::Step(STEP_GAME));
+            return self.exec("powershell", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &command], None, &path_env, tx,
+                             STEP_GAME, &log);
+        }
 
         if self.update {
             // update.ps1 does it all (and, for the game's own update, starts it again: -Play).
@@ -941,6 +1002,10 @@ fn show_line(line: &str, current: &mut usize, tx: &Sender<Msg>, tail: &Arc<Mutex
     let text = without_colours(line).trim().to_string();
     if text.is_empty() {
         return;
+    }
+    // (TODO 425) update.ps1's "This update rebuilds ...", said before the pull: kept on the window for the whole update
+    if text.starts_with("This update ") {
+        let _ = tx.send(Msg::Forecast(text.clone()));
     }
     #[cfg(windows)]
     let step_title = text.strip_prefix("==> ");
@@ -1660,7 +1725,42 @@ fn check_updates(repo: &Path) -> Check {
             }
         }
     }
+    c.forecast = update_forecast(repo, &built, &latest);
     c
+}
+
+/// (TODO 425) How much of the game the update rebuilds on this PC, as the install's tools\update_forecast.ps1 says it
+/// ("This update rebuilds most of the game, because ...: about 25 min on this PC."); "" when it cannot tell (an install
+/// from before the tool, Linux).
+fn update_forecast(repo: &Path, from: &str, to: &str) -> String {
+    #[cfg(windows)]
+    {
+        let port = game_folder(repo);
+        let script = port.join("tools").join("update_forecast.ps1");
+        if !script.exists() {
+            return String::new();
+        }
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned", "-File"])
+            .arg(&script)
+            .args(["-From", from, "-To", to, "-Text", "-Port"])
+            .arg(&port)
+            .arg("-Repo")
+            .arg(repo)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags_no_window()
+            .output();
+        return match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).lines().map(str::trim).find(|l| l.starts_with("This update ")).unwrap_or("").to_string(),
+            _ => String::new(),
+        };
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (repo, from, to);
+        String::new()
+    }
 }
 
 /// A picture as a 24-bit BMP (tests: --shot).
@@ -1977,12 +2077,14 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        frame_watch::frame(); // (TODO 421: TF_SETUP_FRAMELOG)
         self.poll();
         if self.phase == Phase::Running || self.check_rx.is_some() {
             ui.ctx().request_repaint_after(TICK); // (TODO 303: was every 100 ms, and every frame for the Spinner)
         }
-        // (the game's own update, done: the game is starting - this window goes after a moment)
-        if self.play && self.phase == Phase::Done(true) {
+        // (the update done and the game starting - this window goes after a moment)
+        if self.play_started && self.phase == Phase::Done(true) {
             if self.done_at.is_some_and(|t| t.elapsed().as_secs() >= 5) {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -2019,6 +2121,22 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// (TODO 426) "Start the game when the update is done", saved at once (the update script reads it when it ends).
+    fn start_game_checkbox(&mut self, ui: &mut egui::Ui) {
+        if ui.checkbox(&mut self.start_game, "Start the game when the update is done")
+            .on_hover_text("Untick it to leave the update running (overnight, say): it ends on \"Update done\" and the game stays closed. Remembered for the next updates.")
+            .changed()
+        {
+            self.choice_note = match set_start_game_after_update(&self.repo(), self.start_game) {
+                Ok(()) => String::new(),
+                Err(e) => e,
+            };
+        }
+        if !self.choice_note.is_empty() {
+            ui.label(RichText::new(&self.choice_note).color(BAD).small());
+        }
+    }
+
     fn installed_view(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Transformers Armada - PC version").size(26.0).color(Color32::WHITE));
         ui.add_space(4.0);
@@ -2069,7 +2187,19 @@ impl App {
             });
             ui.add_space(6.0);
             let kept = if self.mods { "Your mods, their on / off choices, your settings and saves are kept." } else { "Your settings and saves are kept." };
-            ui.label(RichText::new(format!("Updating rebuilds the game on this PC (a few minutes). {kept}")).color(DIM).small());
+            // (TODO 425) how much the update rebuilds here, when the install's tools can say it (update_forecast.ps1)
+            if c.forecast.is_empty() {
+                ui.label(RichText::new(format!("Updating rebuilds the game on this PC (a few minutes). {kept}")).color(DIM).small());
+            } else {
+                let colour = if c.forecast.contains(" most of the game") { WARN } else { DIM };
+                ui.label(RichText::new(&c.forecast).color(colour));
+                ui.label(RichText::new(kept).color(DIM).small());
+            }
+            // (TODO 426) the choice only matters when the game asked for the update (option 1: the setup's own button never starts it)
+            if self.play {
+                ui.add_space(4.0);
+                self.start_game_checkbox(ui);
+            }
         } else if c.done {
             ui.label(RichText::new("Up to date.").size(17.0).color(GOOD));
         }
@@ -2247,9 +2377,10 @@ impl App {
         let (updated, ready, ready_mods) = (format!("{PLAY_WITH} (or Play below)."), format!("{PLAY_WITH}. F5 = settings."),
                                             format!("{PLAY_WITH}. F5 = settings, F1 = mods and cheats."));
         let (title, sub) = match (&self.phase, self.update) {
-            (Phase::Done(true), true) if self.play => ("Updated", "The game is starting again, where you were."),
-            (Phase::Done(true), true) => ("Updated", updated.as_str()),
-            (Phase::Done(false), true) if self.play => ("The update stopped", "The game starts again as it was; try the update later (the log says why)."),
+            (Phase::Done(true), true) if self.play_started && self.play => ("Updated", "The game is starting again, where you were."),
+            (Phase::Done(true), true) if self.play_started => ("Updated", "The game is starting."),
+            (Phase::Done(true), true) => ("Update done", updated.as_str()),
+            (Phase::Done(false), true) if self.play_started => ("The update stopped", "The game starts again as it was; try the update later (the log says why)."),
             (Phase::Done(false), true) => ("The update stopped", "Try again: finished steps are kept."),
             (Phase::Done(true), false) if self.mods => ("Ready to play", ready_mods.as_str()),
             (Phase::Done(true), false) => ("Ready to play", ready.as_str()),
@@ -2261,9 +2392,18 @@ impl App {
         ui.label(RichText::new(title).size(26.0).color(Color32::WHITE));
         ui.add_space(4.0);
         ui.label(RichText::new(sub).color(DIM));
+        if !self.forecast.is_empty() && self.update {
+            ui.add_space(4.0);
+            ui.label(RichText::new(&self.forecast).color(if self.forecast.contains(" most of the game") { WARN } else { DIM }));
+        }
         if !self.kept.is_empty() {
             ui.add_space(6.0);
             ui.label(RichText::new(kept_text(&self.kept)).color(GOOD));
+        }
+        // (TODO 426) While the update runs: whether the game starts when it is done (an update left overnight)
+        if self.update && self.play && self.phase == Phase::Running {
+            ui.add_space(6.0);
+            self.start_game_checkbox(ui);
         }
         // (Linux: what adding the game to Steam did)
         #[cfg(not(windows))]
@@ -2357,6 +2497,8 @@ fn main() -> eframe::Result {
     if args.iter().any(|a| a == "--prepare" || a == "--launch") {
         std::process::exit(launcher::run(&args));
     }
+    #[cfg(windows)]
+    frame_watch::start(); // (TODO 421: TF_SETUP_FRAMELOG, a testing aid)
     let mut viewport = egui::ViewportBuilder::default().with_inner_size([760.0, 560.0]).with_min_inner_size([640.0, 520.0]).with_title("Transformers Armada - Setup");
     // (Linux: the window's name to the desktop - its taskbar entry, KDE's window rules)
     #[cfg(not(windows))]
@@ -2397,6 +2539,7 @@ fn main() -> eframe::Result {
         }
     }
     app.load_hd_options();
+    app.start_game = start_game_after_update(&app.repo());
     // (Linux: --add-to-steam [--folder <dir>] adds the installed game to Steam now and prints what was done)
     #[cfg(not(windows))]
     if all.iter().any(|a| a == "--add-to-steam") {
@@ -2457,6 +2600,9 @@ fn main() -> eframe::Result {
             text += &format!("update available: {} ({} commits) [{}]\n", c.latest_text(), c.count, c.latest);
             for l in &c.changes {
                 text += &format!("  {l}\n");
+            }
+            if !c.forecast.is_empty() {
+                text += &format!("{}\n", c.forecast);
             }
         } else {
             text += "up to date\n";

@@ -43,6 +43,7 @@ namespace nr::glshare
             void(APIENTRY *texStorageMem2D)(GLenum, GLsizei, GLenum, GLsizei, GLsizei, GLuint, GLuint64) = nullptr;
             void(APIENTRY *getTexImage)(GLenum, GLint, GLenum, GLenum, void *) = nullptr;
             void(APIENTRY *pixelStorei)(GLenum, GLint) = nullptr;
+            void(APIENTRY *finish)() = nullptr;
         } gl;
 
         bool g_checked = false, g_available = false;
@@ -97,6 +98,7 @@ namespace nr::glshare
                   load(gl.bindTexture, "glBindTexture") && load(gl.texParameteri, "glTexParameteri");
         load(gl.getTexImage, "glGetTexImage"); // (the read-back check: readBack)
         load(gl.pixelStorei, "glPixelStorei");
+        load(gl.finish, "glFinish"); // (S13a: before Direct3D reads what GL drew)
         const bool memory = ok && hasExtension("GL_EXT_memory_object") && hasExtension("GL_EXT_memory_object_win32");
         ok = memory && load(gl.createMemoryObjects, "glCreateMemoryObjectsEXT") && load(gl.deleteMemoryObjects, "glDeleteMemoryObjectsEXT") &&
              load(gl.memoryObjectParameteriv, "glMemoryObjectParameterivEXT") &&
@@ -166,6 +168,12 @@ namespace nr::glshare
             maxAlpha = std::max<unsigned>(maxAlpha, pixels[i + 3]);
         }
         return true;
+    }
+
+    void finish()
+    {
+        if (available() && gl.finish)
+            gl.finish();
     }
 
     void release(unsigned texture, unsigned memory)

@@ -3,6 +3,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 class PS2Runtime;
 
@@ -12,6 +13,12 @@ namespace nr
     // (Milestone 3) Before the window is made, on the main thread: with TF_GFX_API=vulkan under SDL3's window
     // (PS2X_PLATFORM=sdl3) the Vulkan backend presents the game's window itself (nr_backend.cpp).
     void beforeWindow();
+    // (nr_core S12) Once the window's overlays of a picture are drawn (main.cpp, the end of the debug UI's draw callback; the
+    // window's thread): under the developer switch TF_NATIVE_SWAPCHAIN=1 the picture presented through the core's swap chain with
+    // the ImGui overlays drawn into it (nr_present.cpp, nr_devswap.cpp). Without the switch: nothing.
+    void overlaysDrawn();
+    // (nr_core S12, tests) Under TF_NATIVE_SWAPCHAIN=1 the core's next present saved to `path` (BMP): TF_MENU_SHOT's twin.
+    void overlayShotNext(const char *path);
     // Registered before capture starts. Sampled on the EE thread for each new
     // frame; queued frames retain their own choice. Null/failed proofs use normal policy.
     void setFrameTexturePolicy(bool (*policy)(const uint8_t *, size_t));
@@ -34,6 +41,14 @@ namespace nr
     // Issue #17: a texture magnified on screen filtered by the draw's MMAG even where the GS's distance rule picks MMIN
     // (true, the default), or the PS2's choice (false; nr_d3d.cpp). From any thread.
     void setTextureSmoothing(bool on);
+    // The texture names (comma-separated) the HD set leaves as the game holds them, in place of TF_HIRES_SKIP from now
+    // on (nr_hires.cpp): a custom skin switched while the game runs (the mod loader). Textures converted again after
+    // this - a skin's, whose texels change - are matched with the new list. From any thread.
+    void setHiresSkip(const std::string &names);
+    // A texture level's texels (or palette) rewritten in main memory by the host, with no upload to show it: its
+    // conversions are stale, as after an upload with other texels (nr_texture.cpp rememberLevel). `level` is the level
+    // object (data pointer at +0). From the game's thread, between frames (the mod loader's custom skins).
+    void texelsRewritten(const uint8_t *rdram, uint32_t level);
     // (TODO 165 / 161) The frames the drawing left out because it was behind, since the start (nr_thread.cpp): the rate
     // governor (overrides.cpp) takes a lasting share of them as the PC unable to hold the rate.
     unsigned long long framesLeftOutBehind();

@@ -29,6 +29,7 @@
 #include "save_io.h"
 #include "state_manager.h"
 #include "updates.h"
+#include "nr_install.h" // (nr_core S12: the menu shot's twin of the core's window)
 
 #include "ps2_runtime.h"
 #include "runtime/ee_scheduler.h"
@@ -61,6 +62,7 @@
 #include "imgui.h"
 #include "raylib.h"
 #include "rlgl.h"
+#include "runtime/ps2_host_present.h" // (nr_core S13a: the overlay layers around the test shots)
 #include "runtime/ps2_overlay.h"
 #include "runtime/ps2_sony_pad.h"
 #include "ps2_runtime.h"
@@ -233,12 +235,42 @@ namespace mod_menu
         std::vector<int> g_keys; // (the text-editing keys' downs and ups: rlImGui sees a key's press or release only when it
                                  // falls in the last poll before a picture - Backspace, the arrows, Ctrl+C... were lost too)
         float g_wheelX = 0.0f, g_wheelY = 0.0f;
+        // (TODO 433) This picture's key presses by virtual key, counted from g_keys (takePictureKeyPresses); live once the
+        // window's messages are watched (the hook in place), else the old raylib reads stand in.
+        int g_pictureKeys[256] = {};
+        bool g_pictureKeysLive = false;
         void takeOverlayInput()
         {
-            tfOverlayInputHook();
+            g_pictureKeysLive = tfOverlayInputHook();
             g_typed.clear();
             g_keys.clear();
             tfOverlayTakeInput(g_typed, g_keys, g_wheelX, g_wheelY);
+            std::fill(std::begin(g_pictureKeys), std::end(g_pictureKeys), 0);
+            for (const int k : g_keys)
+                if (k > 0 && k < 256)
+                    ++g_pictureKeys[k];
+        }
+        // A raylib key as the window's virtual key (the ones the port's own keys use): -1 for another.
+        int virtualKeyOfRaylib(int key)
+        {
+            if (key >= KEY_A && key <= KEY_Z)
+                return key; // ('A'..'Z' in both)
+            if (key >= KEY_F1 && key <= KEY_F12)
+                return 0x70 + (key - KEY_F1);
+            switch (key)
+            {
+            case KEY_ESCAPE: return 0x1B;
+            case KEY_ENTER: return 0x0D;
+            case KEY_BACKSPACE: return 0x08;
+            case KEY_TAB: return 0x09;
+            default: return -1;
+            }
+        }
+        // TF_PICTURE_KEYS=0: the port's own keys read as before (raylib's IsKeyPressed / GetMouseWheelMove once a picture).
+        bool pictureKeysOn()
+        {
+            static const bool on = [] { const char *e = std::getenv("TF_PICTURE_KEYS"); return !(e && *e == '0'); }();
+            return on && g_pictureKeysLive && !ps2_overlay::hostFeedsInput();
         }
         ImGuiKey imguiKeyOf(int vk)
         {
@@ -386,6 +418,9 @@ namespace mod_menu
         bool g_open = std::getenv("TF_MOD_MENU") != nullptr; // TF_MOD_MENU=1: open from the start
         std::atomic<bool> g_openRequest{false}; // (requestOpen: asked from the game thread, taken by draw)
         std::atomic<uint32_t> g_closeCount{0};  // (closeCount: the menu was open, and is not any more)
+        // (TODO 431) What closed the menu last, logged with how long it was open ("[mod menu] closed by ..."): a player's log
+        // shows which input shut it at once.
+        const char *g_closeWhy = nullptr;
         bool g_modRestarting = false;
         std::string g_modRestartError;
 
@@ -1257,7 +1292,7 @@ namespace mod_menu
                 const int held = padHeld(any);
                 if (!any)
                     g_padArmed = true;
-                if (IsKeyPressed(KEY_ESCAPE) || ImGui::GetTime() - g_padCaptureAt > 8.0)
+                if (takePictureKeyPresses(KEY_ESCAPE) > 0 || ImGui::GetTime() - g_padCaptureAt > 8.0) // (TODO 433: every Esc press)
                     g_padCapturing = -1;
                 else if (g_padArmed && held >= 0)
                 {
@@ -2281,6 +2316,7 @@ namespace mod_menu
                 {
                     photo_mode::toggle();
                     g_open = false;
+                    g_closeWhy = "Photo mode";
                 }
                 if (ImGui::IsItemHovered())
                     menu_style::setHelp("Freeze the game and fly the camera (mouse to look, WASD to move, F8 or Esc to leave).");
@@ -2436,7 +2472,11 @@ namespace mod_menu
 
         // Debug (the last page, TODO 73 (b)): for testing - the emulated GPU's own switches, turbo loading, the
         // developers' test options, and anything not placed elsewhere.
-        void closeMenu() { g_open = false; }
+        void closeMenu()
+        {
+            g_open = false;
+            g_closeWhy = "a Debug page action";
+        }
 
         void pageOther()
         {
@@ -2847,6 +2887,7 @@ namespace mod_menu
                     else if (in.back)
                     {
                         g_open = false;
+                        g_closeWhy = "the controller's Circle / B";
                         g_holdBlock = true;
                     }
                     return;
@@ -2866,6 +2907,7 @@ namespace mod_menu
                     else if (in.back)
                     {
                         g_open = false;
+                        g_closeWhy = "the controller's Circle / B";
                         g_holdBlock = true;
                     }
                     return;
@@ -2887,6 +2929,7 @@ namespace mod_menu
                 else if (in.back)
                 {
                     g_open = false;
+                    g_closeWhy = "the controller's Circle / B";
                     g_holdBlock = true; // (Circle is still down: the game must not take it)
                 }
                 return;
@@ -3204,7 +3247,10 @@ namespace mod_menu
                 ImGui::SetCursorScreenPos(ImVec2(w - pad - rightWidth, bottom + size * 0.8f));
                 ImGui::PushFont(f.text, size);
                 if (button("Back to game", false))
+                {
                     g_open = false; // (a click is a release: the game gets no press from it)
+                    g_closeWhy = "Back to game";
+                }
                 ImGui::PopFont();
             }
             {
@@ -3403,6 +3449,30 @@ namespace mod_menu
 #endif
     }
 
+    int takePictureKeyPresses(int key)
+    {
+#if defined(PS2X_ENABLE_DEBUG_UI)
+        const int vk = virtualKeyOfRaylib(key);
+        if (vk < 0 || !pictureKeysOn())
+            return IsKeyPressed(key) ? 1 : 0;
+        const int n = g_pictureKeys[vk];
+        g_pictureKeys[vk] = 0;
+        return n;
+#else
+        (void)key;
+        return 0;
+#endif
+    }
+
+    float pictureWheel()
+    {
+#if defined(PS2X_ENABLE_DEBUG_UI)
+        return pictureKeysOn() ? g_wheelY : GetMouseWheelMove();
+#else
+        return 0.0f;
+#endif
+    }
+
     std::vector<MergedOption> mergedOptions(const std::string &id)
     {
         std::vector<MergedOption> out;
@@ -3442,12 +3512,30 @@ namespace mod_menu
         (void)watching;
         // (closed since the last frame: counted for the Options pages, which read their values again, closeCount)
         static bool closeWatch = false;
+        static uint64_t openPictures = 0u;
         if (closeWatch && !g_open)
+        {
             g_closeCount.fetch_add(1u);
+            std::fprintf(stderr, "[mod menu] closed by %s after %llu picture%s\n", g_closeWhy ? g_closeWhy : "something else",
+                         static_cast<unsigned long long>(openPictures), openPictures == 1u ? "" : "s");
+        }
+        openPictures = g_open ? openPictures + 1u : 0u;
+        g_closeWhy = nullptr;
         closeWatch = g_open;
+        // (TODO 170 / 174: every character and wheel notch since the last picture; TODO 433: taken first, so that Esc and the
+        // other keys this picture reads are the window's every press - takePictureKeyPresses)
+        // (A window host that hands ImGui every input event itself - SDL3's, ps2_overlay.h - needs none of it.)
+        if (!ps2_overlay::hostFeedsInput())
+            takeOverlayInput();
         const bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
-        if ((ps2_host_input::takeKeyPresses(KEY_F1) % 2) == 1 && !ctrl)
+        if (const int f1 = ps2_host_input::takeKeyPresses(KEY_F1); f1 % 2 == 1 && !ctrl)
+        {
             g_open = !g_open;
+            if (!g_open)
+                g_closeWhy = "F1";
+            else if (openPictures == 0u)
+                std::fprintf(stderr, "[mod menu] opened by F1 (%d press%s this picture)\n", f1, f1 == 1 ? "" : "es");
+        }
         pc_settings_row::pump(); // the settings the Options pages asked for (pc_settings_row.h)
         // (TODO 395, tests) TF_TEST_TREES=<vblank>:<step>[,<vblank>:<step>...]: the Trees row's step chosen at those
         // VBlanks exactly as the row does it (Console, Near 3D, Far 3D, Very far 3D, Full 3D) - the live change the
@@ -3503,15 +3591,25 @@ namespace mod_menu
                                IsGamepadButtonDown(i, GAMEPAD_BUTTON_MIDDLE_RIGHT);
             shortcut = shortcut && IsWindowFocused();
             if (shortcut && !shortcutWas && g_capturing < 0)
+            {
                 g_open = !g_open;
+                if (!g_open)
+                    g_closeWhy = sony ? "the controller's PlayStation button" : "the controller's View + Menu";
+            }
             shortcutWas = shortcut;
         }
         // One menu: F5's panel no longer opens (its settings are this menu's pages).
         static const bool noPanel = (ps2_settings::setPanelKeyEnabled(false), true);
         (void)noPanel;
-        if (g_open && IsKeyPressed(KEY_ESCAPE) && g_capturing < 0 && ImGui::GetCurrentContext() &&
-            !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
+        // (TODO 433) Esc's presses since the last picture: raylib's IsKeyPressed saw only the window's last ~1 ms input poll, and
+        // a real Esc did not close the menu on a laptop at 30 pictures a second. Taken only when it closes the menu (a key or
+        // controller button being chosen, or an ImGui popup, takes it itself); taken, it does not also leave photo mode.
+        if (g_open && g_capturing < 0 && g_padCapturing < 0 && ImGui::GetCurrentContext() &&
+            !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) && takePictureKeyPresses(KEY_ESCAPE) > 0)
+        {
             g_open = false;
+            g_closeWhy = "Esc";
+        }
         // (TODO 212) The controller in the menu: the tabs' presses now (Circle at the tabs closes it), the page's in
         // drawMenu. Closed: at the tabs again next time.
         if (g_open)
@@ -3548,10 +3646,7 @@ namespace mod_menu
         state_manager::frame(runtime); // (a save or load asked for in the Debug page: its answer - state_manager.h)
         // (A window host that hands ImGui every input event itself - SDL3's, ps2_overlay.h - needs none of the two.)
         if (!ps2_overlay::hostFeedsInput())
-        {
-            syncInputState(); // (also for the runtime's debugger, drawn after this with the same ImGui)
-            takeOverlayInput(); // (TODO 170 / 174: every character and wheel notch since the last picture)
-        }
+            syncInputState(); // (also for the runtime's debugger, drawn after this with the same ImGui; the input: above)
         typeTestFrame(runtime.eeScheduler().currentVSyncTick());
         clickTestFrame(runtime.eeScheduler().currentVSyncTick(), g_open);
         loadControls(); // (controls.txt, once)
@@ -3560,6 +3655,10 @@ namespace mod_menu
         updateCarKeys(); // (W / S drive the car)
         if (!g_open)
             photo_mode::windowFrame(); // (its keys, and its hint: photo_mode.h)
+        else if (const int f8 = ps2_host_input::takeKeyPresses(KEY_F8); f8 > 0)
+            // (TODO 433) F8 pressed while this menu is open does nothing: before, its presses waited in the count and photo mode
+            // went on or off the moment the menu closed.
+            std::fprintf(stderr, "[mod menu] F8 while the menu is open: left out (%d press%s)\n", f8, f8 == 1 ? "" : "es");
         const bool clean = photo_mode::active(); // (photo mode: no overlay text over the picture)
         small_crosshair::draw(runtime); // (the small crosshair, when chosen: small_crosshair.h)
         if (!clean)
@@ -3610,6 +3709,8 @@ namespace mod_menu
             DrawText(level.c_str(), x, size / 2, size, v.inLevel ? Color{255, 255, 255, 235} : Color{170, 170, 170, 200});
             DrawText(total.c_str(), x, size / 2 + size + 4, size * 2 / 3, Color{200, 230, 255, 220});
         }
+        if (!clean && !g_open)
+            ext::screenOverlay(GetScreenWidth(), GetScreenHeight()); // (an extension's own drawing: port_ext.h)
         if (!clean && !g_open)
         {
             // Updates (TODO 104): a message after a start (back where you were, an update that failed)
@@ -3682,10 +3783,14 @@ namespace mod_menu
             {
                 const std::string file = "runs/hd_shot_" + std::to_string(hdShots.front()) + ".png";
                 hdShots.erase(hdShots.begin());
+                // (nr_core S13a, TF_NATIVE_SWAPCHAIN=1 alone: the overlays' open layer closed into the window first - read
+                // from it, then a new one; nothing without the switch)
+                ps2_host_present::overlayLayerBreak();
                 rlDrawRenderBatchActive(); // (what is drawn so far, out of raylib's batch)
                 Image shot = LoadImageFromScreen();
                 ExportImage(shot, file.c_str());
                 UnloadImage(shot);
+                ps2_host_present::overlayLayerResume();
                 std::fprintf(stderr, "[mod menu] TF_HD_SHOT: %s (%dx%d), corner '%s'\n", file.c_str(), shot.width, shot.height,
                              hd_progress::cornerLine().c_str());
             }
@@ -3861,10 +3966,14 @@ namespace mod_menu
                             name.push_back(*c);
                     file = "runs/menu_shot_" + name + ".png";
                 }
+                ps2_host_present::overlayLayerBreak(); // (S13a: as TF_HD_SHOT's)
                 Image shot = LoadImageFromScreen();
                 ExportImage(shot, file.c_str());
                 UnloadImage(shot);
+                ps2_host_present::overlayLayerResume();
                 std::fprintf(stderr, "[mod menu] TF_MENU_SHOT: %s (%dx%d)\n", file.c_str(), shot.width, shot.height);
+                // (nr_core S12, under TF_NATIVE_SWAPCHAIN=1 alone: the core's picture of the same moment beside it, .bmp)
+                nr::overlayShotNext((file.substr(0, file.size() - 4u) + "_core.bmp").c_str());
                 openFrames = 0;
                 done = pages.empty() || ++next >= pages.size();
             }

@@ -33,6 +33,7 @@
 #include "crosshair_row.h" // (TODO 358: the crosshair's size)
 #include "game_config.h"
 #include "menu_mouse.h"
+#include "mod_menu.h" // (TODO 433: the keys and the wheel, every press since the last picture)
 #include "native_sound_mixer.h" // (TODO 369: the voices held while the game stands still)
 #include "port_ext.h"
 #include "tuning.h"
@@ -68,6 +69,7 @@ namespace photo_mode
         constexpr uint32_t kCrosshairCodeBegin = 0x002FF640u, kCrosshairCodeEnd = 0x00300000u;
         constexpr float kPi = 3.14159265358979f;
         constexpr float kPitchLimit = 1.53f; // (just short of straight up or down)
+        constexpr float kLookRadiansPerPixel = 2.35619f / 1200.0f; // (TODO 430: overrides.cpp's mouse look - the game's camera on foot)
 
         PS2Runtime::RecompiledFunction g_setPosition = nullptr, g_setRotation = nullptr, g_setFov = nullptr, g_setScale = nullptr,
                                        g_getScale = nullptr;
@@ -658,8 +660,13 @@ namespace photo_mode
     {
         static const bool watching = (ps2_host_input::watchKey(KEY_F8), true);
         (void)watching;
-        if ((ps2_host_input::takeKeyPresses(KEY_F8) % 2) == 1)
-            toggle();
+        if (const int f8 = ps2_host_input::takeKeyPresses(KEY_F8); f8 > 0)
+        {
+            if (std::getenv("TF_PHOTO_LOG"))
+                std::fprintf(stderr, "[photo] F8 (%d press%s this picture)\n", f8, f8 == 1 ? "" : "es");
+            if (f8 % 2 == 1)
+                toggle();
+        }
         static bool wasOn = false;
         static double hintUntil = 0.0;
         const bool on = g_on.load(std::memory_order_relaxed);
@@ -678,20 +685,33 @@ namespace photo_mode
             DrawText(text, x, y, size, Color{230, 240, 255, 230});
         }
         static double clockAt = -1.0; // (TODO 403: the free camera's own clock - see dt below)
+        static bool lookReset = true;  // (TODO 430: the mouse's travel from before photo mode left out)
         if (!on)
         {
             clockAt = -1.0;
+            lookReset = true;
             return;
         }
         if (GetTime() < hintUntil)
             drawHint();
-        if (IsKeyPressed(KEY_ESCAPE))
+        // (TODO 433) Esc, H, R and the wheel: every press and notch since the last picture (mod_menu::takePictureKeyPresses).
+        // raylib's IsKeyPressed / GetMouseWheelMove, read once a picture, held only the window's last ~1 ms input poll: most
+        // presses and wheel notches were lost at 30 or 60 pictures a second. TF_PICTURE_KEYS=0: as before.
+        static const bool keyLog = std::getenv("TF_PHOTO_LOG") != nullptr; // (TF_PHOTO_LOG: each key and wheel notch taken, too)
+        if (const int esc = mod_menu::takePictureKeyPresses(KEY_ESCAPE); esc > 0)
         {
+            if (keyLog)
+                std::fprintf(stderr, "[photo] Esc (%d): leaving\n", esc);
             g_want.store(false);
             return;
         }
-        if (IsKeyPressed(KEY_H))
-            g_hudOn.store(!g_hudOn.load());
+        if (const int h = mod_menu::takePictureKeyPresses(KEY_H); h > 0)
+        {
+            if (h % 2 == 1)
+                g_hudOn.store(!g_hudOn.load());
+            if (keyLog)
+                std::fprintf(stderr, "[photo] H (%d): HUD %s\n", h, g_hudOn.load() ? "on" : "off");
+        }
 
         // (TODO 403: 0.8.0's photo mode could turn but not move: the platform's GetFrameTime() read 0 here - it is the time between two
         // beginPicture() calls and one now follows the other within the same picture - and the keys move by dt. The time since this
@@ -705,11 +725,29 @@ namespace photo_mode
         const float turn = 1.6f * (slow ? 0.3f : 1.0f);                         // radians a second (arrow keys)
         // (TODO 290 (6): F1 > Controls > Mouse in the game Off - not the mouse either)
         const bool mouseOn = menu_mouse::gameMouseOn();
-        const Vector2 mouse = IsWindowFocused() && mouseOn ? GetMouseDelta() : Vector2{0.0f, 0.0f};
-        const float wheel = mouseOn ? GetMouseWheelMove() : 0.0f;
+        // (TODO 430) The mouse turns the free camera as far as it turns the game's camera on foot: the same travel (every 1 ms
+        // reading, after F1's mouse sensitivity and inverted Y) and the same angle a pixel. Before, raylib's GetMouseDelta read
+        // once a picture held only the window's last 1 ms poll - at 30 pictures a second the camera hardly turned.
+        // TF_PHOTO_TRAVEL=0: as before (GetMouseDelta, 0.0025 radians a pixel).
+        static const bool travel = [] { const char *e = std::getenv("TF_PHOTO_TRAVEL"); return !(e && *e == '0'); }();
+        Vector2 mouse{0.0f, 0.0f};
+        float lookRadians = 0.0025f;
+        if (travel)
+        {
+            float tx = 0.0f, ty = 0.0f;
+            const bool captured = view_turn::takeFreeLookTravel(tx, ty, lookReset);
+            lookReset = false;
+            if (captured && IsWindowFocused() && mouseOn)
+                mouse = Vector2{tx, ty};
+            lookRadians = kLookRadiansPerPixel;
+        }
+        else if (IsWindowFocused() && mouseOn)
+            mouse = GetMouseDelta();
+        const float wheel = mouseOn ? mod_menu::pictureWheel() : 0.0f;
+        const bool reset = mod_menu::takePictureKeyPresses(KEY_R) > 0;
 
         std::lock_guard<std::mutex> guard(g_lock);
-        if (IsKeyPressed(KEY_R))
+        if (reset)
         {
             g_pose.havePosition = g_pose.haveTurn = false; // (the game's view again, from its next frame)
             g_pose.fovScale = 1.0f;
@@ -724,14 +762,14 @@ namespace photo_mode
             if (log && GetTime() - lastLog > 1.0)
             {
                 lastLog = GetTime();
-                std::fprintf(stderr, "[photo] probe: dt %.5f (raw %.5f) keys W%d A%d S%d D%d Space%d Left%d Right%d, mouse %.1f,%.1f focused %d mouseOn %d, at (%.2f, %.2f, %.2f) yaw %.1f\n", dt,
+                std::fprintf(stderr, "[photo] probe: dt %.5f (raw %.5f) keys W%d A%d S%d D%d Space%d Left%d Right%d, mouse %.1f,%.1f focused %d mouseOn %d, at (%.2f, %.2f, %.2f) yaw %.1f fov x%.4f hud %d\n", dt,
                              GetFrameTime(), IsKeyDown(KEY_W), IsKeyDown(KEY_A), IsKeyDown(KEY_S), IsKeyDown(KEY_D), IsKeyDown(KEY_SPACE),
                              IsKeyDown(KEY_LEFT), IsKeyDown(KEY_RIGHT), mouse.x, mouse.y, IsWindowFocused(), mouseOn, g_pose.position[0],
-                             g_pose.position[1], g_pose.position[2], g_pose.yaw * 180.0f / kPi);
+                             g_pose.position[1], g_pose.position[2], g_pose.yaw * 180.0f / kPi, g_pose.fovScale, g_hudOn.load() ? 1 : 0);
             }
         }
-        g_pose.yaw -= mouse.x * 0.0025f * (slow ? 0.3f : 1.0f);
-        g_pose.pitch -= mouse.y * 0.0025f * (slow ? 0.3f : 1.0f);
+        g_pose.yaw -= mouse.x * lookRadians * (slow ? 0.3f : 1.0f);
+        g_pose.pitch -= mouse.y * lookRadians * (slow ? 0.3f : 1.0f);
         if (IsKeyDown(KEY_LEFT))
             g_pose.yaw += turn * dt;
         if (IsKeyDown(KEY_RIGHT))
@@ -751,6 +789,8 @@ namespace photo_mode
         if (IsKeyDown(KEY_MINUS) || IsKeyDown(KEY_KP_SUBTRACT))
             zoom += 0.8f * dt;
         g_pose.fovScale = std::clamp(g_pose.fovScale * std::exp(zoom), 0.2f, 2.0f);
+        if (keyLog && wheel != 0.0f)
+            std::fprintf(stderr, "[photo] wheel %+.2f notch%s: field of view x%.4f\n", wheel, wheel == 1.0f || wheel == -1.0f ? "" : "es", g_pose.fovScale);
 
         const float cy = std::cos(g_pose.yaw), sy = std::sin(g_pose.yaw);
         const float cp = std::cos(g_pose.pitch), sp = std::sin(g_pose.pitch);

@@ -121,6 +121,9 @@ namespace ext
         bool (*stateLoaded)(PS2Runtime &runtime) = nullptr;
         // A movie (its key, hd_movies::movieKey) skipped as the player would skip it: true skips it.
         bool (*skipMovie)(std::string_view movieKey) = nullptr;
+        // Its own drawing over the game's picture, each window frame, with or without the F1 menu (raylib, the window
+        // loop's thread: hand it what to draw from the game thread). The window's size in pixels.
+        void (*screenOverlay)(int width, int height) = nullptr;
     };
 
     // Registers an extension (kept by pointer: give it static storage).
@@ -163,6 +166,8 @@ namespace ext
     // The renderer's hooks (RenderHooks above): set once; null = none.
     void setRenderHooks(const RenderHooks *hooks);
     const RenderHooks *renderHooks();
+    // Every extension's drawing over the game's picture (screenOverlay above), in order.
+    void screenOverlay(int width, int height);
 }
 
 #define TF_EXT_CAT2(a, b) a##b

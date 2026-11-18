@@ -7,6 +7,7 @@
 // (or TF_FRAME_DROPS=0) a faster game waits for the drawing rather than piling frames up, as before. TF_NATIVE_THREAD=0
 // draws on the game's thread as before.
 #include "nr_types.h"
+#include "nr_movie.h" // (nr_core S5: the texture host's movie question)
 #include "nr_frame.h" // (frame::g_bloom: TF_NATIVE_SHOTGLOW, TODO 108)
 #include "nr_backend.h"
 #include "nr_shader.h"
@@ -77,6 +78,8 @@ namespace
         host.staleAt = [](uint32_t address, bool topByte) { return gsupload::staleAt(address, topByte); };
         host.reportRead = [](const char *what, uint32_t tbp, uint32_t psm, uint32_t staleBytes, uint32_t bytes)
         { gsupload::reportRead(what, tbp, psm, staleBytes, bytes); };
+        host.skipsSnapshot = [](uint32_t data) { return nr::movie::skipsSnapshot(data); }; // (nr_core S5)
+        host.censusNote = [](uint32_t kind, uint64_t amount) { nr::censusNote(kind, amount); };
         nr_core::setTextureHost(host);
         return true;
     }();
@@ -89,6 +92,9 @@ namespace
         host.draw = [](nr::Job &job) { nr::drawQueuedFrame(job); };
         host.pictureCap = []() { return tf::port::pictureCap(); };
         host.inputNs = []() -> int64_t { return nr::n5::lastInputNs(); };
+#if !defined(__linux__)
+        host.windowBehind = []() { return nr::d3d::windowBehind(); }; // (TODO 420: the CPU hand-over's window behind)
+#endif
         nr::setFrameQueueHost(host);
         return true;
     }();

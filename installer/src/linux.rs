@@ -681,7 +681,8 @@ impl Job {
             }
             let refs: Vec<&str> = args.iter().map(String::as_str).collect();
             let result = self.exec("bash", &refs, Some(&repo), path_env, tx, STEP_DOWNLOAD, log).map_err(full);
-            if play_here {
+            // (TODO 426) unless "Start the game when the update is done" was unticked (read now: it can change meanwhile)
+            if play_here && crate::start_game_after_update(&repo) {
                 let _ = start_game(&repo);
             }
             result?;

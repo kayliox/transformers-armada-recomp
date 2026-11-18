@@ -7,7 +7,9 @@
 #   3. Rebuilds the game with build.sh when the changes need it (it translates the game's code again only when the
 #      recompiler or what it reads changed).
 # The game's own "Update now" (F1 menu, About) runs this with --wait-pid (the game closes first) and --play (the game
-# starts again afterwards, where it was). Everything it prints also goes to update.log.
+# starts again afterwards, where it was) - only while "Start the game when the update is done" is ticked (TODO 426: the
+# setup's update window and F1 > About keep it in states/update_options.json, read when the update ends). Everything
+# it prints also goes to update.log.
 #
 #   ./update.sh
 #   ./update.sh --check-only
@@ -69,8 +71,19 @@ result() {
     [ "$play" = 1 ] || return 0
     mkdir -p "$states" && printf '%s\n' "$1" >"$result_file"
 }
+# (TODO 426) "Start the game when the update is done" unticked: states/update_options.json says "start_game": false.
+start_game_chosen() {
+    [ -f "$states/update_options.json" ] || return 0
+    ! tr -d ' \t\r\n' <"$states/update_options.json" | grep -q '"start_game":false'
+}
 start_game() {
     [ "$play" = 1 ] || return 0
+    if ! start_game_chosen; then
+        if [ "${1:-}" = failed ]; then done_text=""; else done_text="Update done. "; fi
+        printf '\n%sThe game is not started ("Start the game when the update is done" is unticked).\n' "$done_text"
+        steplog "update: the game not started (the player's choice)"
+        return 0
+    fi
     step "Starting the game"
     [ -x "$port/out/build/transformers/TransformersRecomp" ] || { echo "update: the game is missing ($port/out/build/transformers/TransformersRecomp)"; return 0; }
     # (in the build container: the update.sh outside it starts the game, on the system - see above)
@@ -81,7 +94,7 @@ fail() {
     trap - ERR
     printf '\nupdate: %s\n' "$1"
     result "failed $1"
-    start_game
+    start_game failed
     exit 1
 }
 kept_text() { echo "Your own changes were kept on the branch $1; nothing was lost."; }

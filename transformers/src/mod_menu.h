@@ -46,6 +46,14 @@ namespace mod_menu
     uint32_t closeCount();
     // Opens the menu from the game thread (the Options pages' Advanced row: pc_settings_row.h).
     void requestOpen();
+    // (TODO 433) The port's own keys, read once a picture by the window thread (from draw on, as draw has taken the
+    // picture's input): every press of `key` (a raylib KEY_ code: A-Z, F1-F12, Escape, Enter, Backspace, Tab) since the
+    // last picture, counted from the window's own key messages. raylib's IsKeyPressed, read once a picture, sees only
+    // the window's last input poll (about a millisecond) and missed most presses at 30 or 60 pictures a second. The
+    // presses are taken: a second reader of the same key in the same picture gets 0. pictureWheel: the wheel's notches
+    // since the last picture (+ up). TF_PICTURE_KEYS=0: raylib's reads, as before.
+    int takePictureKeyPresses(int key);
+    float pictureWheel();
     // The player's own key layout (controls.txt over the defaults), also while the menus' or the car's keys are in
     // (those overlays move Enter, Space and Escape): the one the game's hints describe. Any thread.
     std::string playerKeyLayout();

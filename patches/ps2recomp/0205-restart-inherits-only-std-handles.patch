@@ -1,0 +1,88 @@
+Subject: [PATCH] Runtime: the restarted game inherits only the standard handles (TODO 414)
+
+The restart (F1 > Restart game, a setting that needs a restart, the HD textures restart) starts the game again with
+CreateProcessW and bInheritHandles TRUE, so the new process got every inheritable handle of the old one: the C library
+opens files inheritable, so the old disc's archives and movies stayed open in the NEW game for its whole life. The mod
+loader could then neither delete nor replace the old modded disc ("could not rebuild TFA.ZIP; playing without mods",
+Restart Manager: the holder was the new game itself). Only the three standard handles (the log files or console) are
+given now, through PROC_THREAD_ATTRIBUTE_HANDLE_LIST. PS2X_RESTART_INHERIT_ALL=1: every handle, as before.
+
+diff --git a/ps2xRuntime/src/lib/ps2_settings.cpp b/ps2xRuntime/src/lib/ps2_settings.cpp
+index 99fbcb6..962cf8e 100644
+--- a/ps2xRuntime/src/lib/ps2_settings.cpp
++++ b/ps2xRuntime/src/lib/ps2_settings.cpp
+@@ -531,21 +531,65 @@ namespace ps2_settings
+             std::vector<wchar_t> command(commandLine.begin(), commandLine.end());
+             command.push_back(L'\0');
+             // (its output where this one's went: the same log files, or console)
+-            STARTUPINFOW startup{};
+-            startup.cb = sizeof(startup);
+-            startup.dwFlags = STARTF_USESTDHANDLES;
+-            startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+-            startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+-            startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
++            STARTUPINFOEXW startup{};
++            startup.StartupInfo.cb = sizeof(startup);
++            startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
++            startup.StartupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
++            startup.StartupInfo.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
++            startup.StartupInfo.hStdError = GetStdHandle(STD_ERROR_HANDLE);
++            // Only those three handles go to the new process. Inheriting every inheritable handle (the C library opens files
++            // inheritable) gave the new game this one's open files for its whole life: the disc's archives and movies, so the
++            // mod loader could neither delete nor replace the old modded disc (TODO 414: "could not rebuild TFA.ZIP; playing
++            // without mods" after F1 > Restart game). PS2X_RESTART_INHERIT_ALL=1: every handle, as before.
++            std::vector<HANDLE> inherit;
++            for (HANDLE h : {startup.StartupInfo.hStdInput, startup.StartupInfo.hStdOutput, startup.StartupInfo.hStdError})
++            {
++                DWORD flags = 0;
++                if (h && h != INVALID_HANDLE_VALUE && GetHandleInformation(h, &flags) && (flags & HANDLE_FLAG_INHERIT) &&
++                    std::find(inherit.begin(), inherit.end(), h) == inherit.end())
++                    inherit.push_back(h);
++            }
++            const char *all = std::getenv("PS2X_RESTART_INHERIT_ALL");
++            const bool listed = !(all && *all == '1');
++            std::vector<unsigned char> attributes;
++            bool withList = false;
++            if (listed && !inherit.empty())
++            {
++                SIZE_T size = 0;
++                InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
++                attributes.resize(size);
++                auto *list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributes.data());
++                if (size && InitializeProcThreadAttributeList(list, 1, 0, &size))
++                {
++                    if (UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit.data(),
++                                                  inherit.size() * sizeof(HANDLE), nullptr, nullptr))
++                    {
++                        startup.lpAttributeList = list;
++                        withList = true;
++                    }
++                    else
++                        DeleteProcThreadAttributeList(list);
++                }
++            }
++            // (no handle to give and the list asked for: none inherited; the list could not be made: every handle, as before)
++            const BOOL inheritHandles = listed && inherit.empty() ? FALSE : TRUE;
+             PROCESS_INFORMATION process{};
+             std::fflush(stdout);
+             std::fflush(stderr);
+-            if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_UNICODE_ENVIRONMENT,
+-                                block.data(), nullptr, &startup, &process))
++            const BOOL started = CreateProcessW(nullptr, command.data(), nullptr, nullptr, inheritHandles,
++                                                CREATE_UNICODE_ENVIRONMENT | (withList ? EXTENDED_STARTUPINFO_PRESENT : 0u),
++                                                block.data(), nullptr, &startup.StartupInfo, &process);
++            const DWORD startError = started ? 0u : GetLastError();
++            if (withList)
++                DeleteProcThreadAttributeList(startup.lpAttributeList);
++            if (!started)
+             {
+-                error = "Windows did not start it (error " + std::to_string(GetLastError()) + ")";
++                error = "Windows did not start it (error " + std::to_string(startError) + ")";
+                 return false;
+             }
++            std::fprintf(stderr, "[restart] the game started again with %s\n",
++                         withList ? "only the standard handles (log files / console)" : inheritHandles ? "every inheritable handle" : "no handle");
++            std::fflush(stderr);
+             CloseHandle(process.hThread);
+             CloseHandle(process.hProcess);
+             return true;
