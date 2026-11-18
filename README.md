@@ -18,6 +18,7 @@
 <p align="center">
   <a href="https://github.com/kayliox/transformers-armada-recomp/releases/latest/download/tfa-setup-linux"><img src="https://img.shields.io/badge/Download-Setup%20for%20Linux-2b7bd6?style=for-the-badge&logo=linux&logoColor=white" alt="Download the setup for Linux, SteamOS and Bazzite" height="56"></a>
   <a href="https://discord.gg/zgtZ7gBFmQ"><img src="https://img.shields.io/badge/Join%20us%20on-Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join the project's Discord server" height="56"></a>
+  <a href="https://buymeacoffee.com/kayliox"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee%2A-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Buy me a coffee (optional, see the note at the bottom)" height="56"></a>
 </p>
 
 <p align="center">
@@ -367,3 +368,5 @@ The code in this repository is licensed under the GNU General Public License v3.
 This is an unofficial fan project. It is not affiliated with or endorsed by Hasbro, Atari, Melbourne House or
 Sony Interactive Entertainment. *Transformers* is a trademark of Hasbro. The screenshots are captured from the
 game for illustration.
+
+<sub>* Buy Me a Coffee is optional. It never unlocks anything, and the project is free and stays free. Every coffee goes back into the project, for things like test hardware, tools and hosting. It's not for personal gain. <i>Transformers</i> is a trademark of Hasbro. This project is not affiliated with Hasbro, Atari or Melbourne House, and it contains no game files: you need your own disc.</sub>
