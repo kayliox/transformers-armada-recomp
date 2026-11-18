@@ -27,7 +27,7 @@
 <p align="center">
   <a href="https://discord.gg/zgtZ7gBFmQ"><img src="https://img.shields.io/badge/Join%20us%20on-Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join the project's Discord server" height="28"></a>
   &nbsp;
-  <a href="https://recomplauncher.com/game/transformers-armada-recomp"><img src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" alt="Get it on RecompLauncher" height="28"></a>
+  <a href="https://recomplauncher.com/game/transformers-armada-recomp"><img src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" alt="Get it on RecompLauncher" height="40"></a>
 </p>
 
 <p align="center">
