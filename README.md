@@ -12,17 +12,22 @@
 <p align="center">
   <a href="https://github.com/kayliox/transformers-armada-recomp/releases/latest/download/tfa-setup.exe"><img src="https://img.shields.io/badge/Download-Setup%20for%20Windows-2b7bd6?style=for-the-badge&logo=windows&logoColor=white" alt="Download the setup for Windows" height="56"></a>
   &nbsp;
+  <a href="https://github.com/kayliox/transformers-armada-recomp/releases/latest/download/tfa-setup-linux"><img src="https://img.shields.io/badge/Download-Setup%20for%20Linux-2b7bd6?style=for-the-badge&logo=linux&logoColor=white" alt="Download the setup for Linux, SteamOS and Bazzite" height="56"></a>
+  &nbsp;
   <a href="https://github.com/kayliox/transformers-armada-recomp/releases"><img src="https://img.shields.io/github/downloads/kayliox/transformers-armada-recomp/total?style=for-the-badge&label=downloads&color=444" alt="Total downloads" height="56"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/kayliox/transformers-armada-recomp/releases/latest/download/tfa-setup-linux"><img src="https://img.shields.io/badge/Download-Setup%20for%20Linux-2b7bd6?style=for-the-badge&logo=linux&logoColor=white" alt="Download the setup for Linux, SteamOS and Bazzite" height="56"></a>
-  <a href="https://discord.gg/zgtZ7gBFmQ"><img src="https://img.shields.io/badge/Join%20us%20on-Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join the project's Discord server" height="56"></a>
-  <a href="https://buymeacoffee.com/kayliox"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee%2A-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Buy me a coffee (optional, see the note at the bottom)" height="56"></a>
+  <b>This port is free, and it stays free.</b><br>
+  Every coffee goes back into the project: test hardware, tools and hosting.<br>
+  If you enjoy it, a coffee helps keep it going.*<br><br>
+  <a href="https://buymeacoffee.com/kayliox"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee (optional, see the note at the bottom)" height="80"></a>
 </p>
 
 <p align="center">
-  <a href="https://recomplauncher.com/game/transformers-armada-recomp"><img src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" alt="Get it on RecompLauncher"></a>
+  <a href="https://discord.gg/zgtZ7gBFmQ"><img src="https://img.shields.io/badge/Join%20us%20on-Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join the project's Discord server" height="28"></a>
+  &nbsp;
+  <a href="https://recomplauncher.com/game/transformers-armada-recomp"><img src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" alt="Get it on RecompLauncher" height="28"></a>
 </p>
 
 <p align="center">
