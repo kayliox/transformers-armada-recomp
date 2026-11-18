@@ -5303,6 +5303,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
             }).detach();
         if (debugging)
         {
+#if defined(__ID3D12InfoQueue1_INTERFACE_DEFINED__)
             ID3D12InfoQueue1 *queue = nullptr;
             if (SUCCEEDED(g.device->QueryInterface(IID_PPV_ARGS(&queue))))
             {
@@ -5335,6 +5336,11 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
             }
             else
                 std::fprintf(stderr, "[native render] no debug message queue (the debug layer is not installed?)\n");
+#else
+            // (TODO 424: ID3D12InfoQueue1 / RegisterMessageCallback are only in newer Windows SDKs;
+            // an older SDK, such as the one Visual Studio 2019 brings, still builds the game without them.)
+            std::fprintf(stderr, "[native render] debug message callback not built in: it needs a newer Windows SDK\n");
+#endif
         }
 #endif
         D3D12_COMMAND_QUEUE_DESC qd{};

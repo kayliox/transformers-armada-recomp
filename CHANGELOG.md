@@ -1,5 +1,10 @@
 # What's new
 
+## 0.8.6
+
+**Fixed**
+- Setup (Windows): it no longer stops at "Disc and game" on PCs with Visual Studio 2019. The build failed there because Visual Studio 2019 comes with an older Windows SDK.
+
 ## 0.8.5
 
 **Fixed**
