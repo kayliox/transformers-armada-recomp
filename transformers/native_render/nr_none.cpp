@@ -12,6 +12,7 @@ namespace nr::glshare
     bool available() { return false; }
     unsigned import(void *, uint64_t, uint32_t, uint32_t, unsigned &memory) { return memory = 0; }
     void release(unsigned, unsigned) {}
+    void finish() {} // (nr_present.cpp overlaysDrawn, nr_core S13a: no GL interop here, nothing to finish)
     bool readBack(unsigned, uint32_t, uint32_t, unsigned &maxColour, unsigned &maxAlpha)
     {
         maxColour = maxAlpha = 0u;

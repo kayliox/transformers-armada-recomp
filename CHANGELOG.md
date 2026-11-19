@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.9.0
+
+**Fixed**
+- Linux and Steam Deck: the game builds again. Since 0.8.8 a fresh install or an update stopped at the very end with "undefined reference to nr::glshare::finish()". Windows was not affected.
+
 ## 0.8.9
 
 **Fixed**
