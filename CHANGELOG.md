@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.9.2
+
+**New**
+- Before it installs anything, the setup now checks the free space, the folder you chose (cloud folders like OneDrive, network drives, very long paths) and your disc image (a wrong disc or a damaged copy is found at once, not after half an hour), and says plainly what to change.
+- When the setup or an update stops, it saves a report on your Desktop (tfa-report-....txt) to attach when you ask for help on Discord or GitHub. It holds no game files, and your user name is taken out.
+- The setup says its plan before it starts: each program it installs, why it is needed, and the space and time in all.
+- After the install, the setup offers to delete the build's leftover files (about 2 GB) that playing never needs. Nothing is deleted unless you press the button; the next update then takes as long as the first build.
+
+**Changed**
+- The install is about 1 GB smaller and a little faster: the build now downloads the libraries it uses as small checked files instead of their whole development histories, and no longer needs GitHub in the middle of the build.
+
+**Fixed**
+- The setup's "Scanning for SDK functions" step can no longer run for hours: after 30 minutes it stops and says why in plain words (a copy of the disc the game is not built from, or an antivirus, Windows' Controlled Folder Access or a slow external drive holding it). The step also no longer writes its long log to the game's drive line by line while it runs, which was very slow on external drives.
+- A wrong game file left in the game folder by an earlier try (a different or damaged copy of the disc) is now found before the build starts: the setup extracts it again from your disc image, or asks for it. A wrong disc image is now refused before anything is copied.
+- The setup now says when the game's folder is on an external drive, or when Windows' Controlled Folder Access is on, before it starts.
+- When Windows' drive (C:) is too full for Microsoft's C++ Build Tools, the setup now says so in plain words (they need about 7 GB on C: even when the game goes on another drive) instead of stopping with "Cannot convert value 2147942512 to type System.Int32". It also checks that space before it installs anything, and other installer errors (no download, another install running, Visual Studio open) are explained too.
+- The setup no longer chooses the Microsoft Store's Python, which Windows does not let other programs start (the setup stopped at "Disc and game" with "Access denied" for python.exe). It uses another Python on the PC, or installs Python 3.12 as on a PC without one, and the build now runs exactly the Python the setup chose.
+- Antarctica: snowflakes close to the camera no longer show a dark, blocky outline where they pass in front of a light (the warp gate's light column, glows).
+- The red-brown glow ring around bright spots in dark places (most visible riding the lift down the Deep Amazon temple shaft, around the lit floor) is gone: the game's glow now fades out there as on the PS2. Elsewhere (sunsets) the glow is a little softer than before, as strong as on the PS2.
+- The build no longer fails on PCs where other programs left compiler or build settings behind (for example a Visual Studio developer prompt, or the "Platform" setting some HP PCs have).
+- If files of the recompiler were changed or put back after the setup (for example by an antivirus), the build now puts its fixes back by itself instead of failing (one way the "C7595" error could come back).
+- Linux and the Steam Deck: the same two fixes as above (settings other programs left behind, the recompiler's files put back), and an update now says plainly when there is not enough free space before it rebuilds.
+
 ## 0.9.1
 
 **Fixed**

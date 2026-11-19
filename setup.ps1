@@ -19,6 +19,10 @@
        gently) and an unfinished set is carried on by the game itself, in a small window
        (tools\make_hd_textures.ps1 -Resume).
     4. Remembers your disc path in .setup.json (git-ignored) for update.ps1.
+    Before step 1 it says its plan (TODO 439): each program it would install, why, its download and disk size, and the
+    space and time in all. -CleanBuild temp / all: afterwards, the build's files that playing never needs are deleted
+    (tools\clean_build.ps1: "temp" costs nothing; "all" frees most of the build's space, and the next update then
+    rebuilds the whole game once). Without it the setup only says how much there is to free.
 
     -HdGentle on (or -Gentle on; the setup window's "Go easy on my PC"): for a PC that restarts, freezes or
     overheats under a long full load. The build uses half the processor threads at a lower priority, and the HD
@@ -44,6 +48,7 @@ param(
     [ValidateSet("", "on", "off")][string]$HdWhilePlaying = "", # keep making them while the game runs
     [Alias("Gentle")][ValidateSet("", "on", "off")][string]$HdGentle = "", # (TODO 310) easy on the PC: the build on half the processor threads at a lower priority, the HD textures with rests; about twice as slow
     [switch]$InstallPrerequisites,
+    [ValidateSet("", "temp", "all")][string]$CleanBuild = "",  # (TODO 439) the build's leftovers deleted at the end (tools\clean_build.ps1)
     [string]$Root,                 # the git repository's top (default: this folder)
     [string]$Hooks,                # a script with extra steps (Invoke-SetupHook), dot-sourced
     [hashtable]$HookArgs = @{}     # passed to the hooks as $ctx.Args
@@ -56,7 +61,19 @@ $Root = (Resolve-Path $Root).Path
 $StateFile = Join-Path $Root ".setup.json"
 
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan; Write-StepLog "setup: $msg" }
-function Fail($msg) { Write-Host "`nsetup: $msg" -ForegroundColor Red; Write-StepLog "setup: stopped: $msg"; exit 1 }
+function Fail($msg) {
+    Write-Host "`nsetup: $msg" -ForegroundColor Red; Write-StepLog "setup: stopped: $msg"
+    # (build robustness) One text file to attach when asking for help (tools\setup_report.ps1: no game files, the user
+    # name taken out). Never stops the stop itself.
+    try {
+        foreach ($f in "install_layout.ps1", "preflight.ps1", "setup_report.ps1") { $p = Join-Path $Port "tools\$f"; if (Test-Path -LiteralPath $p) { . $p } }
+        if (Get-Command New-SetupReport -ErrorAction SilentlyContinue) {
+            $report = New-SetupReport -Port $Port -What "setup" -Message $msg
+            if ($report) { Write-Host "A report to attach when you ask for help (Discord or GitHub) was saved $(Get-ReportPlace $report)" }
+        }
+    } catch {}
+    exit 1
+}
 
 # The shared helpers: real-Python detection (not Windows' Store shortcut), probes, git long paths.
 . (Join-Path $Port "tools\setup_common.ps1")
@@ -88,6 +105,25 @@ $state | ConvertTo-Json | Set-Content $StateFile -Encoding UTF8
 . (Join-Path $Port "tools\install_layout.ps1")
 $gameDir = Get-GameDataDir $Port
 $haveGame = (Test-Path (Join-Path $gameDir "SLUS_206.68")) -or (Test-Path (Join-Path $gameDir "SLES_523.88"))
+# (TODO 441) The game folder's executable checked (its checksum): a wrong one - left by an extraction that refused it
+# only after copying it, or copied in by hand - was never checked again, and the SDK scan ran on it for an hour. With the
+# disc image remembered it is checked and extracted again; without, the setup asks for it.
+if ($haveGame) {
+    $py0 = try { Find-Python } catch { $null }
+    $elf0 = @("SLUS_206.68", "SLES_523.88") | ForEach-Object { Join-Path $gameDir $_ } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if ($py0 -and $elf0) {
+        $elfText = "$(Invoke-Probe { & $py0 (Join-Path $Port "transformers\tools\extract_iso.py") --check-elf $elf0 } | Out-String)".Trim()
+        if ($LASTEXITCODE -eq 2) {
+            Write-StepLog "setup: wrong executable in the game folder: $elfText"
+            if ($state.Iso -and (Test-Path -LiteralPath $state.Iso -PathType Leaf)) {
+                Write-Host "$elfText`nIt is extracted again from your disc image ($($state.Iso)), which is checked first." -ForegroundColor Yellow
+                $haveGame = $false
+            } else {
+                Fail "$elfText`nGive your disc image (a complete, unmodified copy) again, e.g.  .\setup.ps1 -Iso `"D:\Games\Transformers (USA).iso`""
+            }
+        }
+    }
+}
 if (-not $haveGame -and -not $state.Iso) {
     Fail "first setup: give your disc image, e.g.  .\setup.ps1 -Iso `"D:\Games\Transformers (USA).iso`""
 }
@@ -104,9 +140,29 @@ if (-not $haveGame) {
     }
 }
 
+# (build robustness) The checks before the long steps: disk space, the folder, the disc, Windows (tools\preflight.ps1).
+# A problem that would stop the install later stops it now, in plain words; the others are said and the setup goes on.
+if (Test-Path -LiteralPath (Join-Path $Port "tools\preflight.ps1")) {
+    . (Join-Path $Port "tools\preflight.ps1")
+    Step "Checking this PC first (free space, the folder, the disc)"
+    $pfPython = try { Find-Python } catch { $null }
+    $pf = @(Invoke-Preflight -Iso $(if (-not $haveGame) { $state.Iso } else { "" }) -Port $Port -Python $pfPython `
+        -HdQuality $(if ($SkipHdTextures) { "none" } else { $HdQuality }))
+    if (-not (Write-PreflightReport $pf)) { Fail (($pf | Where-Object { $_.Level -eq "stop" } | ForEach-Object { $_.Text }) -join "`n") }
+}
+
 # --- 1. what the build needs --------------------------------------------------------------------
 Step "Checking what the build needs"
 $missing = @(Get-MissingPrerequisites)
+# (TODO 439) The plan, before anything is installed or built: what, why, how big, how long.
+$planQuality = $HdQuality
+if (-not $planQuality) {
+    try { $planQuality = "$((Get-Content (Join-Path $Port "hd_textures\hd_options.json") -Raw | ConvertFrom-Json).quality)" } catch {}
+}
+$planHd = if ($SkipHdTextures) { @(0, 0) } else { Get-HdPresetCost $planQuality }
+Write-Host ""
+foreach ($line in (Get-SetupPlanText -Missing $missing -HdGB $planHd[0] -HdMinutes $planHd[1])) { Write-Host $line }
+Write-StepLog ("setup: plan: missing " + $(if ($missing.Count) { $missing -join ", " } else { "nothing" }))
 if ($missing.Count -gt 0) {
     $how = Get-PrerequisiteInstall
     if (-not $InstallPrerequisites) {
@@ -225,6 +281,24 @@ if ($SkipHdTextures) {
 if (Get-Command Invoke-SetupHook -ErrorAction SilentlyContinue) {
     $ctx = New-HookContext -Root $Root -Port $Port -Python $Python -State $state -HookArgs $HookArgs
     try { Invoke-SetupHook $ctx } catch { Fail $_.Exception.Message }
+}
+
+# (TODO 439) The build's leftovers: deleted when asked (-CleanBuild), else only said with how much they are.
+$cleanPs1 = Join-Path $Port "tools\clean_build.ps1"
+if (Test-Path -LiteralPath $cleanPs1) {
+    if ($CleanBuild) {
+        Step "Deleting the build's $(if ($CleanBuild -eq 'all') { 'temporary and in-between' } else { 'temporary' }) files (tools\clean_build.ps1 -Level $CleanBuild)"
+        & $cleanPs1 -Level $CleanBuild
+        if ($LASTEXITCODE -ne 0) { Write-Host "warning: some of them could not be deleted (see above); the game plays as before" -ForegroundColor Yellow }
+    } else {
+        $sizes = @{}
+        foreach ($l in @(& $cleanPs1 -Report)) { $p = "$l".Split('|'); if ($p.Count -ge 2) { $sizes[$p[0]] = [double]$p[1] } }
+        $free = ($sizes.temp + $sizes.build) / 1GB
+        if ($free -ge 0.1) {
+            Write-Host ("`nThe build left {0:N1} GB that playing never needs. To free it: .\tools\clean_build.ps1 -Level all" -f $free)
+            Write-Host "(the next update then rebuilds the whole game once; -Level temp frees $("{0:N1}" -f ($sizes.temp / 1GB)) GB of it at no cost)."
+        }
+    }
 }
 
 $state | Add-Member -Force SetUpAt (& git -C $Root rev-parse HEAD)

@@ -69,7 +69,11 @@ and interfaces (their names and addresses are the game's).
    what was there before (Deep Amazon's hillsides: temple walls, glyph tiles). Type-0 batches on the
    sprite routine are sprites too (the size their w as it is; Antarctica's snow, which as a mesh
    covered the screen), and the routine's path for q15.xy zero (traced on a captured batch) is the
-   same sprite from the centre to the centre plus q18 * size * Q. The primitives' strips (begin
+   same sprite from the centre to the centre plus q18 * size * Q. (TODO 409) A blended sprite that
+   writes depth with the alpha test at its lowest (the snow: alpha GEQUAL 1, KEEP) writes it for its
+   faint rim too, so an additive draw behind it after it (the warp gate's light column) stops there: a
+   dark blocky outline round a near flake. Its colour is drawn without depth, then its depth alone where
+   its alpha is at least 0x40 (`TF_NATIVE_SPRITE_DEPTH=0`: as before). The primitives' strips (begin
    0x220530, quads 0x220A10, end 0x220350) write their batches straight into the display list and
    were never drawn - the warp gates' cones, the dropships' glow, the lasers' beams: their end is
    wrapped and the strips read from the words written (`TF_NATIVE_STRIPS=0` off). ALPHA Cs * As

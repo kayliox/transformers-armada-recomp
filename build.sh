@@ -34,6 +34,8 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# (build robustness) Another project's CMake toolchain / generator or another Python's PYTHONPATH left out (tools/clean_env.sh)
+if [ -f "$root/tools/clean_env.sh" ]; then . "$root/tools/clean_env.sh"; tfa_clean_env build; fi
 # (TODO 279) The disc's files: game/ here, or the install's data/game once its folders were moved (tools/install_layout.sh)
 . "$root/tools/install_layout.sh"
 game=$(tfa_game_data_dir "$root") work=$root/work build=$root/out/build tools_build=$root/out/tools tools=$root/transformers/tools
@@ -66,7 +68,34 @@ if [ "$no_patches" = 0 ]; then
     mapfile -t patches < <(find "$root/patches/ps2recomp" -maxdepth 1 -name '*.patch' | LC_ALL=C sort)
     record=$root/out/ps2recomp-patches.txt
     series=$(for p in "${patches[@]}"; do printf '%s %s\n' "$(basename "$p")" "$(sha "$p" | tr a-f A-F)"; done)
-    if [ "${#patches[@]}" -gt 0 ] && [ "$series" != "$(cat "$record" 2>/dev/null)" ]; then
+    # (build robustness, as build.ps1) The record says which series was applied, not that the files are still as it
+    # left them: the files the series writes are hashed into out/ps2recomp-tree.txt after it is applied and checked at
+    # each build; a file changed or put back since applies the series again (else it would be built as it is).
+    tree_record=$root/out/ps2recomp-tree.txt
+    tree_state() {
+        local p rel
+        for p in "${patches[@]}"; do tr -d '\r' <"$p" | sed -n -e 's/^+++ b\///p' -e 's/^rename to //p'; done | LC_ALL=C sort -u |
+            while IFS= read -r rel; do
+                if [ -f "$ps2recomp/$rel" ]; then printf '%s %s\n' "$rel" "$(sha "$ps2recomp/$rel" | tr a-f A-F)"
+                else printf '%s absent\n' "$rel"; fi
+            done
+    }
+    tree_changed=0
+    if [ "${#patches[@]}" -gt 0 ] && [ "$series" = "$(cat "$record" 2>/dev/null)" ]; then
+        state=$(tree_state)
+        if [ -f "$tree_record" ]; then
+            if [ "$state" != "$(cat "$tree_record")" ]; then
+                changed=$(diff <(printf '%s\n' "$state") "$tree_record" | sed -n 's/^< \([^ ]*\) .*/\1/p' || true)
+                echo "  PS2Recomp's files are not as the patch series left them ($(printf '%s\n' "$changed" | grep -c .): $(printf '%s\n' "$changed" | head -n 3 | paste -sd, -)): the series is applied again"
+                steplog "build: PS2Recomp changed since its patches: applied again"
+                tree_changed=1
+            fi
+        else
+            # (an install from before this record: the series record matches, so the files are taken as they are)
+            printf '%s\n' "$state" >"$tree_record"
+        fi
+    fi
+    if [ "${#patches[@]}" -gt 0 ] && { [ "$series" != "$(cat "$record" 2>/dev/null)" ] || [ "$tree_changed" = 1 ]; }; then
         step "Applying the PS2Recomp patch series (${#patches[@]} patches) to a clean submodule"
         keep=$(mktemp -d)
         trap 'rm -rf "$keep"' EXIT
@@ -86,6 +115,7 @@ if [ "$no_patches" = 0 ]; then
         done
         mkdir -p "$root/out"
         printf '%s' "$series" >"$record"
+        tree_state >"$tree_record"
     fi
 fi
 [ "$patches_only" = 1 ] && exit 0
@@ -101,11 +131,23 @@ if [ ! -f "$game/$elf" ]; then
 fi
 
 generator=(-G Ninja -DCMAKE_BUILD_TYPE="$config")
+# (build robustness) The libraries CMake would clone with git, fetched once as pinned, hash-checked archives into out/deps
+# (tools/fetch_deps.py, tools/deps.json): -DFETCHCONTENT_SOURCE_DIR_<NAME>=<folder>, empty = CMake fetches it itself
+dep_defines() {
+    local line
+    "$python" "$root/tools/fetch_deps.py" --set "$1" --build "$2" --deps "$root/out/deps" 2>&1 | while IFS= read -r line; do
+        case "$line" in
+            [A-Z0-9_]*=*) printf '%s\n' "-DFETCHCONTENT_SOURCE_DIR_$line" ;;
+            *) echo "  $line" >&2 ;;
+        esac
+    done
+}
 
 # 2-4. Tools, then the translation when its inputs changed (work/translation-inputs.txt, as build.ps1's)
 if [ "$skip_recompile" = 0 ]; then
     step "Building recompiler tools"
-    cmake -S "$ps2recomp" -B "$tools_build" "${generator[@]}" \
+    mapfile -t tool_deps < <(dep_defines tools "$tools_build")
+    cmake -S "$ps2recomp" -B "$tools_build" "${generator[@]}" ${tool_deps[@]+"${tool_deps[@]}"} \
         -DPS2X_BUILD_RUNTIME=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_STUDIO=OFF >/dev/null
     cmake --build "$tools_build" ${parallel[@]+"${parallel[@]}"} --target ps2_recomp ps2_analyzer
     analyzer=$tools_build/ps2xAnalyzer/ps2_analyzer recomp=$tools_build/ps2xRecomp/ps2_recomp
@@ -151,7 +193,8 @@ step "Configuring game build"
 # (TF_GAME_DIR: the disc's files where they are, game/ or the install's data/game, as build.ps1 passes it - the grass
 # step and the icon read them)
 # shellcheck disable=SC2086
-cmake -S "$root" -B "$build" "${generator[@]}" "$vkd3d_arg" "-DTF_GAME_DIR=$game" ${TF_CMAKE_ARGS:-} >/dev/null
+mapfile -t game_deps < <(dep_defines game "$build")
+cmake -S "$root" -B "$build" "${generator[@]}" ${game_deps[@]+"${game_deps[@]}"} "$vkd3d_arg" "-DTF_GAME_DIR=$game" ${TF_CMAKE_ARGS:-} >/dev/null
 step "Building TransformersRecomp ($config) - the first build compiles ~22,000 generated functions"
 cmake --build "$build" ${parallel[@]+"${parallel[@]}"} --target TransformersRecomp
 step "Built $build/transformers/TransformersRecomp"

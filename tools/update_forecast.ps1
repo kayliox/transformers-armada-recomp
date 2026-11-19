@@ -71,7 +71,7 @@ $changed = @($changed | Where-Object { $_ -and $_.StartsWith($pre) } | ForEach-O
 
 # What never needs the game rebuilt (as update.ps1's list)
 $noBuild = @("docs/*", "*.md", "installer/*", ".github/*", ".githooks/*", "setup.ps1", "update.ps1", "setup.sh", "update.sh",
-    "Play.bat", "play.sh", "tests/*", "tools/setup_common.ps1", "tools/step_log.ps1", "tools/update_forecast.ps1",
+    "Play.bat", "play.sh", "tests/*", "tools/setup_common.ps1", "tools/step_log.ps1", "tools/update_forecast.ps1", "tools/clean_build.ps1", "tools/clean_build.sh", "tools/clean_env.sh", "tools/preflight.ps1", "tools/setup_report.ps1",
     "tools/check_no_game_data.py", "tools/check_publishable.py", "LICENSE", ".gitignore", ".gitattributes")
 $build = @($changed | Where-Object { $p = $_; -not ($noBuild | Where-Object { $p -like $_ }) })
 if (-not $build.Count) { Answer "none" 0 "" }
@@ -93,6 +93,17 @@ if (-not $batchFiles) { $batchFiles = 330 }   # (a release's count, about)
 $fixed = (T "tools" 20) + (T "configure" 20) + (T "link" 30) + 30       # (checks, configure, link: every build)
 $fullCompile = $batchFiles * (T "compile_batch" 3.0) + 150 * (T "compile_other" 0.8)
 $translate = (T "translate" 120) + (T "sync" 30)
+
+# 0. (TODO 439) The build's in-between files were deleted to save space (tools\clean_build.ps1 -Level all): the next
+#    build compiles the whole game. Its mark counts until a build after it (the game's exe newer than the mark).
+$cleaned = Join-Path $Port "out\build-cleaned.txt"
+if (Test-Path -LiteralPath $cleaned) {
+    $exe = @(Get-ChildItem -LiteralPath (Join-Path $Port "out\build\transformers") -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object { Join-Path $_.FullName "TransformersRecomp.exe" } | Where-Object { Test-Path -LiteralPath $_ }) | Select-Object -First 1
+    if (-not $exe -or [IO.File]::GetLastWriteTimeUtc($exe) -le [IO.File]::GetLastWriteTimeUtc($cleaned)) {
+        Answer "most" (($fixed + $translate + $fullCompile) / 60) "its build files were deleted to save space"
+    }
+}
 
 # 1. The PS2Recomp submodule moved: its whole tree is new.
 if ($build -contains "PS2Recomp") { Answer "most" (($fixed + $translate + $fullCompile) / 60) "the recompiler (PS2Recomp) moved to a new version" }

@@ -49,12 +49,27 @@ if (-not $env:GIT_CONFIG_COUNT) {
     $env:GIT_CONFIG_KEY_1 = "safe.directory"; $env:GIT_CONFIG_VALUE_1 = "*"
 }
 $Root = $PSScriptRoot
+# (build robustness) Settings in this PC's environment that would change what CMake, the compiler or Python do: a
+# Visual Studio developer prompt's INCLUDE / LIB, extra compiler options in CL / _CL_, another toolchain's CC / CXX /
+# CFLAGS, a CMake toolchain file, generator or project include, HP PCs' "Platform", a PYTHONPATH / PYTHONHOME of
+# another Python. Left out of this build and of every program it starts (never changed for the PC), and said once.
+$LeftOut = @()
+foreach ($v in "CL", "_CL_", "LINK", "_LINK_", "CC", "CXX", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "INCLUDE", "LIB", "LIBPATH",
+               "CMAKE_TOOLCHAIN_FILE", "CMAKE_GENERATOR", "CMAKE_GENERATOR_PLATFORM", "CMAKE_GENERATOR_TOOLSET", "CMAKE_GENERATOR_INSTANCE",
+               "CMAKE_PREFIX_PATH", "CMAKE_PROJECT_INCLUDE", "CMAKE_PROJECT_INCLUDE_BEFORE", "CMAKE_PROJECT_TOP_LEVEL_INCLUDES",
+               "CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER", "Platform", "Configuration", "PYTHONPATH", "PYTHONHOME") {
+    if ([Environment]::GetEnvironmentVariable($v)) { $LeftOut += $v; Remove-Item -LiteralPath "Env:$v" }
+}
+if ($LeftOut) { Write-Host "  (settings of this PC's environment left out of the build: $($LeftOut -join ', '))" }
 # (TODO 279) The disc's files: game\ here, or the install's data\game once its folders were moved (tools\install_layout.ps1)
 . (Join-Path $Root "tools\install_layout.ps1")
 # (TODO 310) Each step to TF_STEP_LOG with its time, when the setup or the update set it (tools\step_log.ps1)
 . (Join-Path $Root "tools\step_log.ps1")
 # (TODO 441) The stall watchdog over the long one-program steps (tools\step_watchdog.ps1: Start-StepWatchdog)
 . (Join-Path $Root "tools\step_watchdog.ps1")
+# (build robustness) The libraries CMake would clone with git, fetched once as pinned, hash-checked archives into out\deps
+# (tools\deps.ps1, tools\fetch_deps.py): no network and no git in the configure, no git history kept (about 1 GB)
+. (Join-Path $Root "tools\deps.ps1")
 # (TODO 310) -Gentle: for a PC that resets or overheats under a long full load. The build and every program it starts
 # (Windows passes the lower priority on to them) run below normal, and MSBuild and the compiler use half the processor
 # threads - "/m" and the compiler's own count (MultiToolTask) both held to it. Without it the build is as before.
@@ -75,9 +90,27 @@ $Build = Join-Path $Root $(if ($Public) { "out\build-public" } else { "out\build
 if ($BuildDir) { $Build = Join-Path $Root "out\$BuildDir" } # (-BuildDir: an A/B build beside the played one)
 $ToolsBuild = Join-Path $Root "out\tools"
 $Tools = Join-Path $Root "transformers\tools"
+# (TODO 444) The Python the build runs, by its exact path: the setup's choice (TF_PYTHON, set by setup.ps1 / update.ps1's
+# Use-Python), else the first python on PATH outside a WindowsApps folder, else "python" as before (a build by hand).
+# A bare "python" found the Microsoft Store's Python on a player's PC (its folder put first on PATH), which Windows does
+# not let other programs start directly: "Access denied" at the build's first step.
+function Resolve-BuildPython([string]$Chosen) {
+    if ($Chosen -and "$Chosen" -notlike '*\WindowsApps\*' -and (Test-Path -LiteralPath $Chosen -PathType Leaf)) { return $Chosen }
+    $py = @(Get-Command python -All -CommandType Application -ErrorAction SilentlyContinue | ForEach-Object Source |
+            Where-Object { $_ -and $_ -notlike '*\WindowsApps\*' }) | Select-Object -First 1
+    if ($py) { return $py }
+    $first = "$((Get-Command python -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source)"
+    if ($first -like "$env:ProgramFiles\WindowsApps\*") {
+        throw ("The only Python found is the Microsoft Store's ($first), which Windows does not let other programs start directly. " +
+            "Install Python 3.12 from https://www.python.org/downloads/windows/ (tick 'Add python.exe to PATH'), or run the setup: it installs it.")
+    }
+    return "python"
+}
+$Py = Resolve-BuildPython $env:TF_PYTHON
+$env:TF_PYTHON = $Py
 # (cpucheck) The processor first: the game needs SSE4.1 (2008 or newer) - said now, not after the long build
 # (transformers\tools\cpu_check.py: numpy's own cpuid table; when it cannot tell, the game's own check at its start stands).
-try { & python (Join-Path $Tools "cpu_check.py"); if ($LASTEXITCODE -eq 3) { exit 3 } } catch { }
+try { & $Py (Join-Path $Tools "cpu_check.py"); if ($LASTEXITCODE -eq 3) { exit 3 } } catch { }
 
 # --- The release being built: USA (SLUS-20668, transformers\config\) or another one with its own
 # config (transformers\config\versions\<serial>\). TF_GAME_VERSION when set; else the release whose
@@ -94,7 +127,7 @@ if (-not $GameVersion) {
 }
 if (-not $GameVersion) {
     $disc = if ($Iso) { $Iso } else { (Get-ChildItem $Root -Filter *.iso -File | Select-Object -First 1).FullName }
-    if ($disc) { $GameVersion = (& python (Join-Path $Tools "extract_iso.py") --detect $disc | Out-String).Trim() }
+    if ($disc) { $GameVersion = (& $Py (Join-Path $Tools "extract_iso.py") --detect $disc | Out-String).Trim() }
 }
 if (-not $GameVersion) { $GameVersion = "SLUS-20668" }
 if (-not $Versions.Contains($GameVersion)) { throw "No config for the release $GameVersion (transformers\config\versions\$GameVersion)." }
@@ -103,7 +136,7 @@ $ElfName = $Versions[$GameVersion]
 # Another release runs the USA hooks at its own addresses (transformers\src\game_version.h, TF_GA): every code address
 # the C++ uses must be written with TF_GA, or that build would hook the wrong place.
 if ($GameVersion -ne "SLUS-20668") {
-    & python (Join-Path $Tools "check_pal_addresses.py")
+    & $Py (Join-Path $Tools "check_pal_addresses.py")
     if ($LASTEXITCODE -ne 0) { throw "Code addresses not translated for $GameVersion (see above)." }
     # (docs\PAL_ADDRESSES.md) The private tree's mods (overlay\) use USA addresses that are not wrapped: another release
     # is built without them, as -Public builds.
@@ -114,7 +147,7 @@ if ($GameVersion -ne "SLUS-20668") {
     }
 } else {
     # (docs\PAL_ADDRESSES.md) The USA build checks the same, as a warning: an address added without TF_GA shows at once.
-    & python (Join-Path $Tools "check_pal_addresses.py") | Out-Host
+    & $Py (Join-Path $Tools "check_pal_addresses.py") | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Host "warning: code addresses without TF_GA (above): the European build would stop on them. docs\PAL_ADDRESSES.md" -ForegroundColor Yellow }
 }
 
@@ -218,25 +251,71 @@ function Run {
     if ($LASTEXITCODE -ne 0) { Assert-NotBlocked $Exe $LASTEXITCODE; throw "$Exe failed with exit code $LASTEXITCODE" }
 }
 function RunLogged {
-    param([string]$Exe, [string[]]$Arguments, [string]$Log, [string]$What = "")
+    param([string]$Exe, [string[]]$Arguments, [string]$Log, [string]$What = "", [int]$TimeLimit = 0)
     # The output goes into the log file directly, not through PowerShell: the analyzer writes ~9 MB
     # of lines, which PowerShell 5 passes one by one - with update.ps1's transcript running, that
     # alone took ~80 s instead of ~8 (TODO 115). Its error output is added at the end.
+    # (TODO 441) While the program runs its output goes to a file in Windows' temp folder, and is moved to $Log when it
+    # ends: the analyzer writes each of its ~150,000 lines to the disk at once (it flushes every line), which on an
+    # external or slow drive, or in a folder an antivirus checks write by write, can take an hour instead of 20 s.
     $quoted = @($Arguments | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } })
-    $err = "$Log.stderr"
+    $runLog = $Log
+    try {
+        $tmpDir = [IO.Path]::GetTempPath()
+        if ($tmpDir -and (Test-Path -LiteralPath $tmpDir)) { $runLog = Join-Path $tmpDir ("tfa_{0}_{1}" -f $PID, (Split-Path $Log -Leaf)) }
+    } catch { $runLog = $Log }
+    $err = "$runLog.stderr"
     Assert-NotBlocked $Exe
     # (TODO 441) the watchdog: says so when the program sits still for minutes (Start-StepWatchdog)
     $watch = $null
-    if ($What) { try { $watch = Start-StepWatchdog -What $What -Exe $Exe -Log $Log -Expected (Get-StageSeconds $script:stage) -Folder $Root } catch {} }
+    if ($What) { try { $watch = Start-StepWatchdog -What $What -Exe $Exe -Log $runLog -LogShown $Log -Expected (Get-StageSeconds $script:stage) -Folder $Root } catch {} }
+    $timedOut = $false; $cpu = 0.0; $ran = 0.0
+    $started = [Diagnostics.Stopwatch]::StartNew()
     try {
-        $p = Start-Process -FilePath $Exe -ArgumentList $quoted -WorkingDirectory (Get-Location).ProviderPath -NoNewWindow -Wait -PassThru `
-            -RedirectStandardOutput $Log -RedirectStandardError $err
+        $p = Start-Process -FilePath $Exe -ArgumentList $quoted -WorkingDirectory (Get-Location).ProviderPath -NoNewWindow -PassThru `
+            -RedirectStandardOutput $runLog -RedirectStandardError $err
+        $null = $p.Handle   # (kept open: the exit code can be read after it ends)
+        # (TODO 441) -TimeLimit: a program that runs far past any normal time is stopped (only this process, which this
+        # script started) and said in plain words, instead of the setup waiting forever
+        if (-not $p.WaitForExit($(if ($TimeLimit -gt 0) { $TimeLimit * 1000 } else { -1 }))) {
+            $timedOut = $true
+            $ran = $started.Elapsed.TotalSeconds
+            try { $cpu = $p.TotalProcessorTime.TotalSeconds } catch {}
+            try { $p.Kill() } catch {}
+            [void]$p.WaitForExit(15000)
+        }
+        $p.WaitForExit()
     } catch { Assert-NotBlocked $Exe -1 "$($_.Exception.Message)"; throw }
-    finally { Stop-StepWatchdog $watch }
-    if (Test-Path -LiteralPath $err) {
-        $bytes = [IO.File]::ReadAllBytes($err)
-        if ($bytes.Length) { $f = [IO.File]::Open($Log, [IO.FileMode]::Append); try { $f.Write($bytes, 0, $bytes.Length) } finally { $f.Dispose() } }
-        Remove-Item -LiteralPath $err -ErrorAction SilentlyContinue
+    finally {
+        Stop-StepWatchdog $watch
+        # (the output moved to the step's own log, its error output added at the end; on any failure the temp copy stays
+        # where it is and the log says so)
+        if ($runLog -ne $Log -and (Test-Path -LiteralPath $runLog)) {
+            try { Move-Item -LiteralPath $runLog -Destination $Log -Force -ErrorAction Stop }
+            catch { try { Copy-Item -LiteralPath $runLog -Destination $Log -Force -ErrorAction Stop; Remove-Item -LiteralPath $runLog -ErrorAction SilentlyContinue } catch { Write-Host "  (the step's output stays in $runLog)" } }
+        }
+        if (Test-Path -LiteralPath $err) {
+            try {
+                $bytes = [IO.File]::ReadAllBytes($err)
+                if ($bytes.Length) { $f = [IO.File]::Open($Log, [IO.FileMode]::Append); try { $f.Write($bytes, 0, $bytes.Length) } finally { $f.Dispose() } }
+            } catch {}
+            Remove-Item -LiteralPath $err -ErrorAction SilentlyContinue
+        }
+    }
+    if ($timedOut) {
+        $leaf = Split-Path $Exe -Leaf
+        $min = [int][Math]::Round($ran / 60)
+        $head = "$What was stopped after $min minutes ($leaf; it usually takes about a minute or less)."
+        if ($cpu -ge 0.5 * $ran) {
+            throw ("$head It was busy the whole time, which happens when the game's executable is not the one the build is made for. " +
+                "Check that your disc image is a complete, unmodified copy of Transformers USA (SLUS-20668) or the European disc (SLES-52388): " +
+                "delete the folder $Game and run the setup again with a fresh copy of your disc. The step's log: $Log")
+        }
+        throw ("$head It was waiting most of the time (it used the processor for $([int]$cpu) s), so something held it: " +
+            "most often an antivirus (add the game folder $Root to its exclusions), Windows' Controlled Folder Access (Windows Security > " +
+            "Virus & threat protection > Ransomware protection: allow the setup, or turn it off during the install), or a slow external drive " +
+            "(choose a folder on the PC's own disk, for example C:\Games\TFA). Running the setup as administrator helped one player. " +
+            "Then run the setup again: finished steps are kept. The step's log: $Log")
     }
     if ($p.ExitCode -ne 0) {
         Assert-NotBlocked $Exe $p.ExitCode
@@ -331,7 +410,7 @@ function Invoke-HealingBuild([string[]]$Arguments, [string]$Root, [scriptblock]$
     }
 }
 
-foreach ($tool in "cmake", "python", "git") {
+foreach ($tool in "cmake", $Py, "git") {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
         throw "$tool was not found on PATH. See README.md for the requirements."
     }
@@ -356,7 +435,43 @@ $ps2recomp = Join-Path $Root "PS2Recomp"
 $patchRecord = Join-Path $Root "out\ps2recomp-patches.txt"
 $series = ($patches | ForEach-Object { "$($_.Name) $((Get-FileHash $_.FullName -Algorithm SHA256).Hash)" }) -join "`n"
 $recorded = if (Test-Path $patchRecord) { (Get-Content $patchRecord -Raw).Trim() } else { $null }
-if ($patches -and $recorded -ne $series) {
+# (build robustness) The record says which series was applied, not that the files are still as it left them: a
+# PS2Recomp file changed or put back since (an antivirus restore, a hand edit, a "git submodule update --force", a
+# copy cut short) would be built as it is - the recompiler without its fixes (the TODO 407 error came back that
+# way if patch 1005 was undone). So the files the series writes are hashed into out\ps2recomp-tree.txt after
+# it is applied, and checked at every build (well under a second); any difference applies the series again.
+$treeRecord = Join-Path $Root "out\ps2recomp-tree.txt"
+function Get-PatchedTreeState {
+    $rels = [Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($p in $patches) {
+        foreach ($m in [regex]::Matches((Get-Content -LiteralPath $p.FullName -Raw), '(?m)^\+\+\+ b/(.+?)\s*$|^rename to (.+?)\s*$')) {
+            $rel = if ($m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Groups[2].Value }
+            [void]$rels.Add($rel)
+        }
+    }
+    ($rels | ForEach-Object {
+        $path = Join-Path $ps2recomp $_
+        "$_ $(if (Test-Path -LiteralPath $path -PathType Leaf) { (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash } else { 'absent' })"
+    }) -join "`n"
+}
+$treeChanged = $false
+if ($patches -and $recorded -eq $series) {
+    $state = Get-PatchedTreeState
+    if (Test-Path -LiteralPath $treeRecord) {
+        $was = (Get-Content -LiteralPath $treeRecord -Raw).Trim()
+        if ($was -ne $state) {
+            $old = @{}; foreach ($l in ($was -split "`n")) { $k, $v = $l -split ' ', 2; $old[$k] = $v }
+            $diff = @(($state -split "`n") | Where-Object { $k, $v = $_ -split ' ', 2; $old[$k] -ne $v } | ForEach-Object { ($_ -split ' ', 2)[0] })
+            Write-Host "  PS2Recomp's files are not as the patch series left them ($($diff.Count): $(($diff | Select-Object -First 3) -join ', ')$(if ($diff.Count -gt 3) { ', ...' })): the series is applied again" -ForegroundColor Yellow
+            Write-StepLog "build: PS2Recomp changed since its patches ($($diff.Count) file(s)): applied again"
+            $treeChanged = $true
+        }
+    } else {
+        # (an install from before this record: the series record matches, so the files are taken as they are)
+        Set-Content -LiteralPath $treeRecord -Value $state -NoNewline
+    }
+}
+if ($patches -and ($recorded -ne $series -or $treeChanged)) {
     # With a record, the tree holds the recorded series: it is reset and the new one applied. A
     # tree without one (from before the record) that already has exactly this series in it (each
     # patch reverses) needs no reset.
@@ -402,9 +517,32 @@ if ($patches -and $recorded -ne $series) {
     }
     New-Item -ItemType Directory -Force (Split-Path $patchRecord) | Out-Null
     Set-Content -Path $patchRecord -Value $series -NoNewline
+    Set-Content -LiteralPath $treeRecord -Value (Get-PatchedTreeState) -NoNewline
 }
 
 # 1. Game data -------------------------------------------------------------
+# (TODO 441) The game's executable already in the game folder is checked (its checksum, a fraction of a second): a wrong
+# one - left by an extraction that refused it only after copying it, or copied in by hand - went straight to the SDK scan,
+# never checked again. With the disc image given it is extracted again (the extraction checks the disc first); without,
+# the build stops in plain words.
+$elfPath = Join-Path $Game $ElfName
+if ((Test-Path -LiteralPath $elfPath) -and $Py) {
+    $ErrorActionPreference = "Continue"
+    $elfCheck = "$(& $Py (Join-Path $Tools "extract_iso.py") --check-elf $elfPath 2>&1 | Out-String)".Trim()
+    $elfCode = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    if ($elfCode -eq 2) {
+        Write-StepLog "build: wrong executable in the game folder: $elfCheck"
+        if ($Iso) {
+            Write-Host "  $elfCheck" -ForegroundColor Yellow
+            Write-Host "  The game folder's executable is extracted again from $Iso." -ForegroundColor Yellow
+            Remove-Item -LiteralPath $elfPath -Force
+        } else {
+            throw ("$elfCheck It is in $Game. Delete that folder and run the setup again with your disc image " +
+                "(a complete, unmodified copy of Transformers USA, SLUS-20668, or the European disc, SLES-52388): finished steps are kept.")
+        }
+    } elseif ($elfCode -ne 0) { Write-Host "  (the game's executable could not be checked: $elfCheck)" }
+}
 if (-not (Test-Path (Join-Path $Game $ElfName))) {
     if (-not $Iso) {
         $found = Get-ChildItem $Root -Filter *.iso -File | Select-Object -First 1
@@ -412,7 +550,7 @@ if (-not (Test-Path (Join-Path $Game $ElfName))) {
         $Iso = $found.FullName
     }
     Step "Extracting $Iso" "extract"
-    Run python @((Join-Path $Tools "extract_iso.py"), $Iso, $Game)
+    Run $Py @((Join-Path $Tools "extract_iso.py"), $Iso, $Game)
 }
 
 # 2. Tools -----------------------------------------------------------------
@@ -543,6 +681,20 @@ if ($Vulkan) { $cmakeArgs += "-DTF_VULKAN=ON" }     # (the Vulkan backend: trans
 $cmakeArgs += $(if ($NoFsrSdk) { "-DTF_FSR_SDK=OFF" } else { "-DTF_FSR_SDK=ON" })
 $cmakeArgs += "-DTF_GAME_DIR=$Game"                 # (the disc's files where they are: game\ or the install's data\game)
 if ($Sdl3 -or $Vulkan) { $cmakeArgs += "-DPS2X_SDL3=ON" } # (SDL3 as the window at run time: PS2Recomp's ps2_platform.h - Vulkan presents it, so -Vulkan too)
+# (TODO 444) CMake's own Python (find_package(Python3) for the files it generates; on Windows it looks in the registry
+# first, where the Microsoft Store's Python is listed): the build's, when the folder has none yet, or a WindowsApps one or
+# one that is gone. A usable one already there is kept (another value would make those files again).
+if ($Py -ne "python") {
+    $cachedPy = ""
+    $pyCache = Join-Path $Build "CMakeCache.txt"
+    if (Test-Path -LiteralPath $pyCache) {
+        $hit = Select-String -LiteralPath $pyCache -Pattern '^Python3_EXECUTABLE:[^=]*=(.*)$' | Select-Object -First 1
+        if ($hit) { $cachedPy = $hit.Matches[0].Groups[1].Value.Trim() }
+    }
+    if (-not $cachedPy -or ($cachedPy.Replace('/', '\')) -like '*\WindowsApps\*' -or $cachedPy -like "*-NOTFOUND" -or -not (Test-Path -LiteralPath $cachedPy -PathType Leaf)) {
+        $cmakeArgs += "-DPython3_EXECUTABLE=$($Py.Replace('\', '/'))"
+    }
+}
 foreach ($define in ($CMakeDefine -split ";" | Where-Object { $_ })) { $cmakeArgs += "-D$define" } # (-CMakeDefine: cache settings for that folder, which keeps them)
 
 # What the translation (steps 3-4) depends on, one line per input: "<name> <SHA-256>". The
@@ -589,7 +741,7 @@ if (-not $SkipRecompile) {
     # (configured at every build, ~15 s: the build's own reconfigure, when a source file came, takes
     # effect only at the build after - a new file would be left out of this one)
     Run cmake (@("-S", (Join-Path $Root "PS2Recomp"), "-B", $ToolsBuild,
-                 "-DPS2X_BUILD_RUNTIME=OFF", "-DPS2X_BUILD_TEST=OFF", "-DPS2X_BUILD_STUDIO=OFF") + $genArgs)
+                 "-DPS2X_BUILD_RUNTIME=OFF", "-DPS2X_BUILD_TEST=OFF", "-DPS2X_BUILD_STUDIO=OFF") + $genArgs + (Get-DepDefines $Root "tools" $ToolsBuild))
     Remove-EmptyBuildFiles $ToolsBuild    # (TODO 378)
     Write-CompilerReport $ToolsBuild "The recompiler tools are"
     Invoke-HealingBuild (@("--build", $ToolsBuild, "--config", $Config, "--target", "ps2_recomp", "ps2_analyzer", "--") + $BuildParallel + @("/v:m")) $ToolsBuild { param($l) $l }
@@ -643,7 +795,7 @@ if (-not $SkipRecompile) {
             # read from the environment leave no file time behind)
             $probe = Join-Path $Work "transformers.check.toml"
             try {
-                Run python @((Join-Path $Tools "make_config.py"), $Work, $probe) | Out-Null
+                Run $Py @((Join-Path $Tools "make_config.py"), $Work, $probe) | Out-Null
                 $upToDate = (Get-FileHash -LiteralPath $probe).Hash -eq (Get-FileHash -LiteralPath (Join-Path $Work "transformers.toml")).Hash
             } catch { $upToDate = $false }
             Remove-Item -LiteralPath $probe -ErrorAction SilentlyContinue
@@ -670,7 +822,10 @@ if (-not $SkipRecompile) {
                 Remove-Item $scanFile -ErrorAction SilentlyContinue
                 Copy-Item (Join-Path $Game $ElfName) $Work -Force
                 Step "Scanning for SDK functions$(Usual 'scan')" "scan"
-                RunLogged (Join-Path $ToolsBuild "ps2xAnalyzer\$Config\ps2_analyzer.exe") @($ElfName, "analyzer.toml") (Join-Path $Work "analyzer.log") "The SDK scan"
+                # (TODO 441) stopped in plain words after 30 min (TF_SCAN_LIMIT_MINUTES; 0 = no limit): it takes 20-60 s
+                $scanLimit = 30 * 60
+                if ($env:TF_SCAN_LIMIT_MINUTES -match '^\d{1,4}$') { $scanLimit = [int]$env:TF_SCAN_LIMIT_MINUTES * 60 }
+                RunLogged (Join-Path $ToolsBuild "ps2xAnalyzer\$Config\ps2_analyzer.exe") @($ElfName, "analyzer.toml") (Join-Path $Work "analyzer.log") "The SDK scan" -TimeLimit $scanLimit
                 Set-Content -Path $scanFile -Value $scanText -NoNewline
             }
             $configText = Get-ConfigText
@@ -679,8 +834,8 @@ if (-not $SkipRecompile) {
             } else {
                 Remove-Item $configFile -ErrorAction SilentlyContinue
                 Step "Recovering function boundaries$(Usual 'functions')" "functions"
-                Run python @((Join-Path $Tools "find_functions.py"), $ElfName, "functions.csv", "--names", "analyzer.toml", "--jump-tables", "jump_tables.json")
-                Run python @((Join-Path $Tools "make_config.py"), $Work, "transformers.toml")
+                Run $Py @((Join-Path $Tools "find_functions.py"), $ElfName, "functions.csv", "--names", "analyzer.toml", "--jump-tables", "jump_tables.json")
+                Run $Py @((Join-Path $Tools "make_config.py"), $Work, "transformers.toml")
                 Set-Content -Path $configFile -Value $configText -NoNewline
             }
 
@@ -690,7 +845,7 @@ if (-not $SkipRecompile) {
 
             # Install only what changed, so the compile below is incremental.
             Step "Updating generated sources" "sync"
-            Run python @((Join-Path $Tools "sync_generated.py"), "staging", "generated", "batches")
+            Run $Py @((Join-Path $Tools "sync_generated.py"), "staging", "generated", "batches")
         }
         finally { Pop-Location }
         Set-Content -Path $inputsFile -Value $inputs.Text -NoNewline
@@ -797,7 +952,7 @@ function Get-CompileForecast {
 # (configured at every build, as the tools above: a new source file - the game's or a generated
 # batch - must be in the project before this build, the build's own check adds it only to the next)
 Step "Configuring game build" "configure"
-Run cmake $cmakeArgs
+Run cmake ($cmakeArgs + (Get-DepDefines $Root "game" $Build))
 Write-CompilerReport $Build "The game is"
 
 $forecast = $null

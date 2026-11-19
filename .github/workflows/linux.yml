@@ -41,3 +41,9 @@ jobs:
           [ -n "$vkd3d" ] || { tail -n 40 out/vkd3d-src/configure.log out/vkd3d-src/make.log; exit 1; }
           cmake -S . -B out/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DTF_VKD3D_DIR="$vkd3d"
           cmake --build out/build --target tf_port_objects -- -k 0
+      - name: The port's code without vkd3d (the build a PC without the native renderer's tools makes)
+        run: |
+          # (nr_none.cpp's stand-in renderer is compiled only here: it fell out of step with nr_backend.h unseen, 0.8.9)
+          if [ "${{ matrix.compiler }}" = clang ]; then export CC=clang CXX=clang++; else export CC=gcc CXX=g++; fi
+          cmake -S . -B out/build-novkd3d -G Ninja -DCMAKE_BUILD_TYPE=Release -DTF_VKD3D_DIR=
+          cmake --build out/build-novkd3d --target tf_port_objects -- -k 0

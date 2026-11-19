@@ -28,6 +28,7 @@ mod winapi;
 mod launcher;
 #[cfg(windows)]
 mod frame_watch;
+mod plan; // (TODO 439: the plan before anything runs, the clean-up after)
 #[cfg(not(windows))]
 use winapi::{desktop_shortcut_once, start_hd_maker};
 
@@ -158,6 +159,14 @@ struct App {
     settled_at: Option<Instant>,
     #[cfg(not(windows))]
     tools_note: String, // (Linux: where the build tools come from - the form's last line)
+    // (TODO 439) What is installed (the plan's "already installed"), found on a thread of its own; and the build's
+    // leftovers after a setup (tools\clean_build.ps1 -Report), the clean-up running, and what it said.
+    found: plan::Found,
+    found_rx: Option<Receiver<plan::Found>>,
+    leftovers: Option<plan::Leftovers>,
+    leftovers_rx: Option<Receiver<Option<plan::Leftovers>>>,
+    clean_rx: Option<Receiver<Result<String, String>>>,
+    clean_note: String,
 }
 
 const STEP_TOOLS: usize = 0;
@@ -213,7 +222,32 @@ impl App {
             shot: None,
             shot_state: Arc::new(Mutex::new(0)),
             settled_at: None,
+            found: plan::Found::default(),
+            found_rx: None,
+            leftovers: None,
+            leftovers_rx: None,
+            clean_rx: None,
+            clean_note: String::new(),
         }
+    }
+
+    /// (TODO 439) What is installed, for the plan: found on a thread (vswhere, a python started).
+    fn start_detect(&mut self) {
+        let (tx, rx) = channel();
+        self.found_rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(plan::detect());
+        });
+    }
+
+    /// (TODO 439) The build's leftovers now (tools\clean_build.ps1 -Report), on a thread.
+    fn start_leftovers(&mut self) {
+        let (tx, rx) = channel();
+        self.leftovers_rx = Some(rx);
+        let game = game_folder(&self.repo());
+        std::thread::spawn(move || {
+            let _ = tx.send(plan::report(&game));
+        });
     }
 
     /// The graphics card found, and the preset suggested for it (suggest_quality).
@@ -417,6 +451,29 @@ impl App {
                 self.check_rx = None;
             }
         }
+        if let Some(rx) = &self.found_rx {
+            if let Ok(f) = rx.try_recv() {
+                self.found = f;
+                self.found_rx = None;
+            }
+        }
+        if let Some(rx) = &self.leftovers_rx {
+            if let Ok(l) = rx.try_recv() {
+                self.leftovers = l;
+                self.leftovers_rx = None;
+            }
+        }
+        if let Some(rx) = &self.clean_rx {
+            if let Ok(r) = rx.try_recv() {
+                self.clean_note = match r {
+                    Ok(t) => t,
+                    Err(e) => format!("The clean-up stopped: {e}"),
+                };
+                self.clean_rx = None;
+                self.start_leftovers();
+            }
+        }
+        let mut want_leftovers = false;
         let Some(rx) = &self.rx else { return };
         while let Ok(msg) = rx.try_recv() {
             match msg {
@@ -454,6 +511,8 @@ impl App {
                     self.progress = 1.0;
                     self.phase = Phase::Done(true);
                     self.done_at = Some(Instant::now());
+                    // (TODO 439) after a setup: the build's leftovers, for the clean-up offer (asked for below)
+                    want_leftovers = !self.update;
                     // (TODO 426) whether the update started the game (an update script from before the choice starts it
                     // whenever it was told to)
                     let repo = self.repo();
@@ -474,6 +533,9 @@ impl App {
                         && (start_game_after_update(&repo) || !update_script_reads_choice(&repo));
                 }
             }
+        }
+        if want_leftovers {
+            self.start_leftovers();
         }
         for s in &mut self.steps {
             if s.status == Status::Active {
@@ -1250,10 +1312,14 @@ impl HdQuality {
     /// "about 35 min, 1.9 GB" for the card found: one of the stronger cards about as quick as the RTX 3070 it was
     /// measured on, another (or none found) about 1.5-2 times slower.
     fn estimate(self, gpu: Option<&(String, u64)>) -> String {
+        format!("about {} min, {:.1} GB", self.minutes(gpu), self.gigabytes())
+    }
+
+    /// (TODO 439) The making time on the card found, minutes (rounded to 5; the plan's too).
+    fn minutes(self, gpu: Option<&(String, u64)>) -> u32 {
         let slow = gpu.is_none_or(|(n, v)| suggest_quality(n, *v) == HdQuality::Fast);
         let m = self.minutes_rtx3070() * if slow { 1.75 } else { 1.0 };
-        let m = ((m / 5.0).round() * 5.0).max(5.0) as u32;
-        format!("about {m} min, {:.1} GB", self.gigabytes())
+        ((m / 5.0).round() * 5.0).max(5.0) as u32
     }
 }
 
@@ -1818,7 +1884,8 @@ fn waiting_for_permission(recent_lower: &str) -> bool {
 /// tools\setup_common.ps1 Test-WingetSourceBroken (setup.ps1's own installs: Python, the Build Tools).
 fn winget_source_broken(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    ["0x8a15000f", "0x8a150044", "-1978335217", "-1978335164", "data required by the source is missing", "failed when opening source",
+    // (TODO 443: the codes also as winget may print them, unsigned: 2316632079 = 0x8a15000f, 2316632132 = 0x8a150044)
+    ["0x8a15000f", "0x8a150044", "-1978335217", "-1978335164", "2316632079", "2316632132", "data required by the source is missing", "failed when opening source",
      "failed when searching source", "failed in attempting to update the source", "source reset", "no sources match the given value",
      "no sources are configured"]
         .iter().any(|w| lower.contains(w))
@@ -1859,6 +1926,16 @@ fn source_repair_outcome(r: &Result<(), String>) -> SourceRepair {
     }
 }
 
+/// (TODO 443) Whether an installer's words say the disk was full (ERROR_DISK_FULL 112, ERROR_HANDLE_DISK_FULL 39, as HRESULTs
+/// 0x80070070 / 0x80070027, signed or unsigned). Keep in step with tools\setup_common.ps1 Get-InstallFailureMeaning.
+fn disk_full(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    ["0x80070070", "0x80070027", "2147942512", "2147942439", "-2147024784", "-2147024857", "there is not enough space", "disk is full",
+     "not enough disk space", "not enough free disk space"]
+        .iter().any(|w| lower.contains(w))
+        || lower.lines().any(|l| l.trim_end().ends_with("exit code: 112") || l.trim_end().ends_with("exit code: 39"))
+}
+
 /// What to do when Git could not be installed, from what winget said (`e`: its last lines, or why it did not start) and
 /// how the repair of winget's source went, if one was tried.
 fn git_failure_text(e: &str, repair: Option<SourceRepair>) -> String {
@@ -1876,6 +1953,12 @@ fn git_failure_text(e: &str, repair: Option<SourceRepair>) -> String {
                         then run the setup again.\n{by_hand}\nPython and the Visual Studio Build Tools come next; to install them by hand \
                         too: https://www.python.org/downloads/windows/ (tick 'Add python.exe to PATH') and \
                         https://visualstudio.microsoft.com/visual-cpp-build-tools/ (tick 'Desktop development with C++').");
+    }
+    // (TODO 443) the disk full: ERROR_DISK_FULL as an HRESULT, 0x80070070 = 2147942512 (winget prints it unsigned) = -2147024784
+    if disk_full(e) {
+        return format!("Not enough free disk space on Windows' drive. Git needs about 0.5 GB there, and Microsoft's C++ Build Tools, \
+                        which come next, about 7 GB, even when the game goes on another drive. Free some space on it (Windows Settings > \
+                        System > Storage, or Disk Cleanup), then run the setup again: finished steps are kept.\n{by_hand}");
     }
     // (exit code 2: Git's installer when Windows' question was declined or closed itself unanswered - the ThinkPad test)
     let cancelled = lower.contains("you cancelled the installation")
@@ -2156,7 +2239,7 @@ impl eframe::App for App {
         #[cfg(windows)]
         frame_watch::frame(); // (TODO 421: TF_SETUP_FRAMELOG)
         self.poll();
-        if self.phase == Phase::Running || self.check_rx.is_some() {
+        if self.phase == Phase::Running || self.check_rx.is_some() || self.found_rx.is_some() || self.leftovers_rx.is_some() || self.clean_rx.is_some() {
             ui.ctx().request_repaint_after(TICK); // (TODO 303: was every 100 ms, and every frame for the Spinner)
         }
         // (the update done and the game starting - this window goes after a moment)
@@ -2168,7 +2251,10 @@ impl eframe::App for App {
         }
         if let Some(path) = self.shot.clone() {
             // (tests: the window's picture, a second after the check answered or the update ended)
-            let settled = (self.phase == Phase::Installed && self.check.done) || matches!(self.phase, Phase::Done(_) | Phase::Form);
+            // (the plan's "already installed" and the build's leftovers are found on threads: the picture waits for them)
+            let settled = (self.phase == Phase::Installed && self.check.done && self.leftovers_rx.is_none())
+                || matches!(self.phase, Phase::Done(_))
+                || (self.phase == Phase::Form && self.found_rx.is_none());
             if settled && self.settled_at.is_none() {
                 self.settled_at = Some(Instant::now());
             }
@@ -2315,6 +2401,11 @@ impl App {
             }
             ui.label(RichText::new(line).color(DIM).small());
         }
+        // (TODO 439) the build's leftovers, when there are any (not while an update is on offer: it brings them back)
+        if !c.available {
+            ui.add_space(12.0);
+            self.cleanup_view(ui);
+        }
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Max), |ui| {
             ui.horizontal(|ui| {
                 if c.available && self.check_rx.is_none() && ui.add_sized([150.0, 40.0], egui::Button::new(RichText::new("Update").size(16.0)).fill(ACCENT)).clicked() {
@@ -2436,10 +2527,7 @@ impl App {
         #[cfg(not(windows))]
         winapi::steam_checkbox(ui);
         ui.add_space(6.0);
-        #[cfg(windows)]
-        ui.label(RichText::new("Missing tools (Git, Python, Visual Studio Build Tools) are installed with winget; Windows may ask for permission.").color(DIM).small());
-        #[cfg(not(windows))]
-        ui.label(RichText::new(&self.tools_note).color(DIM).small());
+        self.plan_view(ui);
 
         let ready = matches!(retail_note, Some((_, c)) if c == GOOD) && !self.folder.trim().is_empty();
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Max), |ui| {
@@ -2447,6 +2535,80 @@ impl App {
                 self.start();
             }
         });
+    }
+
+    /// (TODO 439) The plan, before anything runs: each program, why, its size, already installed or not; the game, the HD
+    /// textures; the space and time in all.
+    fn plan_view(&mut self, ui: &mut egui::Ui) {
+        let hd = (self.hd && !self.low_end).then(|| (self.hd_quality.gigabytes(), self.hd_quality.minutes(self.gpu.as_ref())));
+        let (lines, disk, minutes) = plan::lines(&self.found, hd, cfg!(windows));
+        ui.label(RichText::new("What the setup does").strong());
+        #[cfg(windows)]
+        ui.label(RichText::new("It installs only these three programs, and only the missing ones (with winget; Windows may ask for permission):").color(DIM).small());
+        #[cfg(not(windows))]
+        ui.label(RichText::new(&self.tools_note).color(DIM).small());
+        // (the lines at the normal size, wrapped inside their indent: the screen a player reads before installing)
+        for (i, l) in lines.iter().enumerate() {
+            ui.indent(("plan_line", i), |ui| {
+                ui.label(RichText::new(&l.text).color(if l.present { GOOD } else { DIM }));
+            });
+        }
+        ui.label(RichText::new(plan::total_text(disk, minutes)));
+    }
+
+    /// (TODO 439) The build's leftovers and the two ways to free them; nothing is deleted unless a button is pressed.
+    fn cleanup_view(&mut self, ui: &mut egui::Ui) {
+        if self.leftovers.is_none() && self.leftovers_rx.is_none() && self.clean_rx.is_none() && self.phase == Phase::Installed {
+            self.start_leftovers();
+        }
+        if !self.clean_note.is_empty() {
+            let colour = if self.clean_note.starts_with("The clean-up stopped") { BAD } else { GOOD };
+            ui.label(RichText::new(&self.clean_note).color(colour).small());
+        }
+        if self.clean_rx.is_some() {
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
+                ticking_spinner(ui, rect, ACCENT);
+                ui.label(RichText::new("Deleting the build's files...").color(DIM));
+            });
+            return;
+        }
+        let Some(l) = self.leftovers else { return };
+        let (temp, all) = (plan::gb(l.temp), plan::gb(l.temp + l.build));
+        if all < 0.1 {
+            return;
+        }
+        ui.label(RichText::new("Free up disk space (optional)").strong());
+        ui.label(RichText::new(format!(
+            "The build left {all:.1} GB of files that playing never needs. Updates use most of them to rebuild only what changed."))
+            .color(DIM).small());
+        let mut level = None;
+        ui.horizontal(|ui| {
+            if temp >= 0.05
+                && ui.button(format!("Delete temporary files ({temp:.1} GB)"))
+                    .on_hover_text("The recompiler's raw output, written again by every build. Nothing changes: updates stay as quick.")
+                    .clicked()
+            {
+                level = Some("temp");
+            }
+            if ui.button(format!("Delete all build files ({all:.1} GB)"))
+                .on_hover_text("The game plays as before. The next update then rebuilds the whole game once (about as long as the first build) and makes these files again.")
+                .clicked()
+            {
+                level = Some("all");
+            }
+        });
+        ui.label(RichText::new("With \"all\" the game plays as before, but the next update rebuilds the whole game once (about as long as the first build).")
+            .color(DIM).small());
+        if let Some(level) = level {
+            let (tx, rx) = channel();
+            self.clean_rx = Some(rx);
+            self.clean_note.clear();
+            let game = game_folder(&self.repo());
+            std::thread::spawn(move || {
+                let _ = tx.send(plan::clean(&game, level));
+            });
+        }
     }
 
     fn progress_view(&mut self, ui: &mut egui::Ui) {
@@ -2510,6 +2672,11 @@ impl App {
         }
         ui.add_space(8.0);
         ui.add(egui::ProgressBar::new(self.progress).desired_height(8.0).fill(ACCENT));
+        // (TODO 439) after a setup: free the build's leftovers, if the player wants (nothing is deleted unasked)
+        if self.phase == Phase::Done(true) && !self.update {
+            ui.add_space(10.0);
+            self.cleanup_view(ui);
+        }
         if !self.error.is_empty() {
             ui.add_space(12.0);
             egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
@@ -2575,7 +2742,7 @@ fn main() -> eframe::Result {
     }
     #[cfg(windows)]
     frame_watch::start(); // (TODO 421: TF_SETUP_FRAMELOG, a testing aid)
-    let mut viewport = egui::ViewportBuilder::default().with_inner_size([760.0, 560.0]).with_min_inner_size([640.0, 520.0]).with_title("Transformers Armada - Setup");
+    let mut viewport = egui::ViewportBuilder::default().with_inner_size([760.0, 680.0]).with_min_inner_size([640.0, 520.0]).with_title("Transformers Armada - Setup");
     // (Linux: the window's name to the desktop - its taskbar entry, KDE's window rules)
     #[cfg(not(windows))]
     {
@@ -2598,6 +2765,7 @@ fn main() -> eframe::Result {
     let repo_arg = all.iter().position(|a| a == "--repo").and_then(|i| all.get(i + 1).cloned());
     app.set_flavour(repo_arg, all.iter().any(|a| a == "--mods"));
     app.detect_gpu();
+    app.start_detect(); // (TODO 439: the plan's "already installed")
     // (the copy a setup leaves in the install folder opens on that folder; a copy elsewhere - a launcher's
     // own, Quiver - on the folder the last install finished in)
     let mut found = false;
@@ -2808,11 +2976,27 @@ mod winget_source_tests {
         assert!(winget_source_broken("No sources match the given value: winget"));
         assert!(winget_source_broken("There are no sources configured; add one with 'source add' or reset to defaults with 'source reset'"));
         assert!(winget_source_broken("Installer failed with exit code: -1978335217"));
+        assert!(winget_source_broken("Installer failed with exit code: 2316632079"));
         // (other failures are not: the permission question, a changed download, "already installed", no winget at all)
         for other in ["You cancelled the installation.\nInstaller failed with exit code: 2", "Installer hash does not match",
                       "Found an existing package already installed. No newer package versions are available from the configured sources.",
                       "winget could not be started: program not found", "Downloading https://github.com/git-for-windows/git/releases/x.exe", ""] {
             assert!(!winget_source_broken(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn a_full_disk_is_said_in_plain_words() {
+        // (TODO 443) the disk full, as winget prints an installer's code (unsigned: 2147942512 = 0x80070070), signed, and in words
+        for full in ["Starting package install...\nInstaller failed with exit code: 2147942512", "Installer failed with exit code: -2147024784",
+                     "0x80070070 : There is not enough space on the disk.", "Installer failed with exit code: 112"] {
+            assert!(disk_full(full), "{full}");
+            let t = git_failure_text(full, None);
+            assert!(t.contains("Not enough free disk space") && t.contains("about 7 GB") && t.contains("git-scm.com"), "{t}");
+            assert!(!t.contains('\u{2014}') && !t.contains('\u{2013}'), "no dashes: {t}");
+        }
+        for other in ["Installer failed with exit code: 1121", "Installer failed with exit code: 2", "Installer failed with exit code: 2147942401", ""] {
+            assert!(!disk_full(other), "{other}");
         }
     }
 

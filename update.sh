@@ -207,7 +207,7 @@ if [ "$force" = 0 ]; then
     while IFS= read -r path; do
         case "$path" in
         docs/* | *.md | installer/* | .github/* | .githooks/* | setup.ps1 | update.ps1 | Play.bat | setup.sh | update.sh | play.sh | \
-            tools/setup_common.ps1 | tools/step_log.ps1 | tools/check_no_game_data.py | tools/check_publishable.py | LICENSE | .gitignore | .gitattributes) ;;
+            tools/setup_common.ps1 | tools/step_log.ps1 | tools/clean_build.ps1 | tools/clean_build.sh | tools/clean_env.sh | tools/preflight.ps1 | tools/setup_report.ps1 | tools/check_no_game_data.py | tools/check_publishable.py | LICENSE | .gitignore | .gitattributes) ;;
         *) need_build=1 ;;
         esac
     done < <(g diff --name-only "$since" HEAD)
@@ -219,6 +219,12 @@ if [ "$need_build" = 1 ]; then
         python3 -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("gentle") else 1)' "$port/hd_textures/hd_options.json" 2>/dev/null; then
         build_args+=(--gentle)
     fi
+    # (build robustness, as update.ps1) Free space before a rebuild: a full one makes about 1.5 GB of files again
+    free_mb=$(df -Pm "$port" 2>/dev/null | awk 'NR==2 {print $4}')
+    if [ -n "$free_mb" ] && [ "$free_mb" -lt 1536 ]; then
+        fail "not enough free space for the update: $(( free_mb / 1024 )) GB free here, about 2 GB needed. Free some space, then update again."
+    fi
+    if [ -f "$port/tools/clean_env.sh" ]; then . "$port/tools/clean_env.sh"; tfa_clean_env update; fi
     step "Rebuilding the game (build.sh${build_args[*]+, going easy on the PC})"
     if [ "$force" = 1 ]; then rm -f "$port"/work/*-inputs.txt; fi # (the translation redone too)
     "$port/build.sh" ${build_args[@]+"${build_args[@]}"} || fail "the build failed (see above)"

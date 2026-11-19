@@ -104,7 +104,8 @@ cbuffer Draw : register(b0)
     float4 clipOn;                 // x: the core clips (q21.x above 0); y: the colour screen-linear (the GS's Gouraud)
     float4 standIn;                // a flat colour drawn in place of the texture (w = its alpha + 2; under 1.5: none) - a game
                                    // texture still on its way to the GPU (TODO 76: made on the uploader, not in this frame)
-    float4 down;                   // x: a copy from a supersampled target into the picture - four taps over the pixel's footprint
+    float4 down;                   // x: a copy from a supersampled target into the picture - four taps over the pixel's footprint;
+                                   // w: (TODO 434) the game's glow chain - the GS's truncating filter and modulation
     float4 clipRowsB[4];           // (N9 stage 3) clipRows in the frame before's pose
     float4 pose;                   // (N9 stage 3) x: the camera's turn of the picture applies (the scene's 3D); y: the vertices blended;
                                    // w: (TODO 299) the scene's 3D for the temporal upscaler - jittered, its motion written
@@ -891,6 +892,9 @@ float4 psColour(VsOut i)
 #endif
     if (flags.w > 0.5)
         t.a = 1.0; // (PSMCT24 / PSMZ24: TEXA's TA0, 0x80 - a frame buffer read as 24-bit has no alpha of its own)
+    // (TODO 434) The glow chain's draws (down.w): the GS's bilinear filter truncates to a whole level.
+    if (down.w > 0.5)
+        t.rgb = floor(t.rgb * 255.0 + 0.002) / 255.0;
     float4 v = (clipOn.y > 0.5 && i.whole > 0.99999) ? i.colour : i.colourP;
     int tfx = (int)flags.y;
     bool tcc = flags.z > 0.5;
@@ -903,6 +907,8 @@ float4 psColour(VsOut i)
         // HIGHLIGHT(2): the GS adds the vertex alpha to the colour as it is - 0x80 is 128 of 255 - and the alpha here is in units
         // of 0x80 (TODO 61: it added 255, twice the GS's: a lit mesh's alpha 0x80 made it solid white).
         c = float4(t.rgb * v.rgb + v.a * (128.0 / 255.0), tcc ? (tfx == 2 ? t.a + v.a : t.a) : v.a);
+    if (down.w > 0.5)
+        c.rgb = floor(c.rgb * 255.0 + 0.002) / 255.0; // (TODO 434: and its modulation, (T x C) >> 7)
     // (TODO 305 (7)) A motion trail's ghost copy: its share of the trail's alpha (p3.z) on the result - where the alpha comes from the
     // texture (TCC; the flyers), the vertex's alpha, where the routine's fade lives, takes no part.
     if ((int)mode.z == 4 && p[3].x == 2.0)

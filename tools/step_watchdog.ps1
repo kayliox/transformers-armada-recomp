@@ -19,7 +19,7 @@
 
 function Start-StepWatchdog {
     param([Parameter(Mandatory)][string]$What, [Parameter(Mandatory)][string]$Exe, [string]$Log = "", [double]$Expected = 60,
-          [string]$Folder = "", [string[]]$Hints = @())
+          [string]$Folder = "", [string[]]$Hints = @(), [string]$LogShown = "")
     $quiet = 300
     if ($env:TF_WATCHDOG_SECONDS -match '^\d+$' -and [int]$env:TF_WATCHDOG_SECONDS -gt 0) { $quiet = [int]$env:TF_WATCHDOG_SECONDS }
     $long = 0
@@ -35,7 +35,7 @@ function Start-StepWatchdog {
     }
     $ps = [PowerShell]::Create()
     [void]$ps.AddScript({
-        param($What, $Exe, $Log, $Expected, $Quiet, $Hints, $StepLog, $LongAfter)
+        param($What, $Exe, $Log, $Expected, $Quiet, $Hints, $StepLog, $LongAfter, $LogShown)
         function Say([string]$t) {
             [Console]::Out.WriteLine($t); [Console]::Out.Flush()
             if ($StepLog -and $t) { try { [IO.File]::AppendAllText($StepLog, "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  build: $t`r`n") } catch {} }
@@ -44,9 +44,10 @@ function Start-StepWatchdog {
         $name = [IO.Path]::GetFileNameWithoutExtension($Exe)
         $size = -1L; $cpu = -1.0; $since = [DateTime]::UtcNow; $next = $Quiet
         $began = [DateTime]::UtcNow
+        $cpuMark = 0.0; $ranMark = 0.0
         $busyLimit = if ($LongAfter -gt 0) { $LongAfter } else { [Math]::Max(600, 20 * $Expected) }
         $usual = if ($Expected -ge 90) { "about $([int][Math]::Round($Expected / 60)) min" } elseif ($Expected -ge 45) { "about a minute" } else { "under a minute" }
-        $logText = if ($Log) { " The step's log: $Log" } else { "" }
+        $logText = if ($LogShown) { " The step's log: $LogShown" } elseif ($Log) { " The step's log: $Log" } else { "" }
         while ($true) {
             Start-Sleep -Seconds ([Math]::Min(10, [Math]::Max(1, [int]($Quiet / 6))))
             $s = 0L; if ($Log) { try { $s = ([IO.FileInfo]::new($Log)).Length } catch {} }
@@ -57,11 +58,22 @@ function Start-StepWatchdog {
             $ran = ([DateTime]::UtcNow - $began).TotalSeconds
             if ($ran -ge $busyLimit) {
                 $m = [int][Math]::Floor($ran / 60)
+                # (TODO 441) busy or held: the processor time it used since the last time this was said (a player's
+                # report could not tell the two apart: this line was said by the clock alone)
+                $used = $c - $cpuMark; $span = $ran - $ranMark; $cpuMark = $c; $ranMark = $ran
                 Say ""
-                Say "$What has been running for $m min, far longer than usual ($usual). Check that the disc image is a"
-                Say "complete copy of Transformers USA (SLUS-20668) or the European disc (SLES-52388). You can close the setup and run it"
-                Say "again: finished steps are kept.$logText"
-                Say "${What}: $m min, far longer than usual. Check the disc; rerunning the setup is safe."
+                if ($running -and $used -ge 0.3 * $span) {
+                    Say "$What has been running for $m min, far longer than usual ($usual), busy all along ($([int]$used) s of"
+                    Say "processor time in the last $([int]($span / 60)) min). Check that the disc image is a complete copy of Transformers USA"
+                    Say "(SLUS-20668) or the European disc (SLES-52388). You can close the setup and run it again: finished steps are kept.$logText"
+                    Say "${What}: $m min and busy, far longer than usual. Check the disc; rerunning the setup is safe."
+                } else {
+                    Say "$What has been running for $m min, far longer than usual ($usual), mostly waiting ($([int]$used) s of"
+                    Say "processor time in the last $([int]($span / 60)) min): something holds it. Most often an antivirus or Windows' Controlled"
+                    Say "Folder Access (allow the game folder), or a slow external drive. You can close the setup and run it again: finished"
+                    Say "steps are kept.$logText"
+                    Say "${What}: $m min, mostly waiting: an antivirus or a slow drive may hold it. Rerunning is safe."
+                }
                 $busyLimit = $ran + 600
             }
             if ($s -ne $size -or $c -gt $cpu + 0.5) { $size = $s; $cpu = $c; $since = [DateTime]::UtcNow; $next = $Quiet; continue }
@@ -76,7 +88,7 @@ function Start-StepWatchdog {
             Say "No progress for $min min: an antivirus may hold $leaf, or check the disc. Rerunning the setup is safe."
             $next = $still + 600
         }
-    }).AddArgument($What).AddArgument($Exe).AddArgument($Log).AddArgument($Expected).AddArgument($quiet).AddArgument($Hints).AddArgument($env:TF_STEP_LOG).AddArgument($long)
+    }).AddArgument($What).AddArgument($Exe).AddArgument($Log).AddArgument($Expected).AddArgument($quiet).AddArgument($Hints).AddArgument($env:TF_STEP_LOG).AddArgument($long).AddArgument($LogShown)
     return [pscustomobject]@{ Shell = $ps; Async = $ps.BeginInvoke() }
 }
 

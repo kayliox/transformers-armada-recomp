@@ -170,6 +170,17 @@ A few things behave differently from the original on purpose. Each one can be tu
 
 The setup installs everything else for you (Git, Python and the Visual Studio C++ build tools).
 
+**Why the setup builds the game, and where the space goes.** No game code may be shared, so the game is built on
+your PC from your own disc. That needs exactly three programs, installed only when missing: Git (0.4 GB), Python
+(0.4 GB with its parts) and Microsoft's free C++ Build Tools (6 GB, about 2 GB to download). Then the disc's files
+(2.7 GB), the build (2.3 GB, 10 to 25 minutes) and, if you want them, the HD textures (0.6 to 2.3 GB). About 13 GB
+in all. After the build, the build's leftover files can be deleted to save space (the setup offers it); the next
+update then takes as long as the first build. The setup says all of this before it starts:
+
+<p align="center">
+  <img src="docs/images/setup-plan.jpg" width="70%" alt="The setup window: the disc image, the install folder, HD textures, and what the setup does: each program it installs, why, and the space and time in all">
+</p>
+
 **On Linux or a Steam Deck** the game can also run natively, without Windows: see
 [Linux and Steam Deck (native)](#linux-and-steam-deck-native) below.
 
@@ -334,6 +345,8 @@ old files stay in `transformers-armada-recomp` as they were.
 - **Problems:** [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) (common fixes and FAQ)
 - **Windows 11 Smart App Control** can refuse the game or parts of it, because you build the game yourself and it is
   not signed. What it looks like and what to do: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+- **The setup or an update stopped?** It saves a report on your Desktop (`tfa-report-....txt`). Attach it when you ask
+  for help: it holds no game files, and your user name is taken out.
 - **Bugs and ideas:** open an [issue](https://github.com/kayliox/transformers-armada-recomp/issues).
   Never attach disc images, save states or memory card files: they contain game data.
 

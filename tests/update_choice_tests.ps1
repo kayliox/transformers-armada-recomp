@@ -7,6 +7,9 @@
 # Run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\update_choice_tests.ps1   (exit code 0: all passed)
 $ErrorActionPreference = "Stop"
 $Root = Split-Path $PSScriptRoot -Parent
+# (the report a stopped setup / update writes, tools\setup_report.ps1: into a temp folder, never the Desktop)
+$env:TF_REPORT_DIR = Join-Path ([IO.Path]::GetTempPath()) "tfa_test_reports"
+New-Item -ItemType Directory -Force $env:TF_REPORT_DIR | Out-Null
 $failed = 0
 function Check([bool]$ok, [string]$what) {
     if ($ok) { Write-Host "  ok    $what" } else { Write-Host "  FAIL  $what" -ForegroundColor Red; $script:failed++ }

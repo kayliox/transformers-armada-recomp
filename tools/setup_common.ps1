@@ -67,7 +67,19 @@ function Get-PythonCandidates {
             }
         }
     }
-    return @($c | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique)
+    # (TODO 444) Never a Python inside a WindowsApps folder, from any source above: Windows' Store shortcut (the PATH
+    # alias that opens the Store) and the Microsoft Store's Python itself. The py launcher and the registry name the
+    # Store Python's real exe (C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_...\python3.13.exe):
+    # it answered the setup's probe, then the build's own "python" in that folder stopped with "Access denied" (a
+    # player's setup, 2026-11-19). Without another Python the setup installs Python 3.12, as on a PC with none.
+    $script:SkippedStorePythons = @($c | Where-Object { $_ -and (Test-StorePythonPath $_) } | Select-Object -Unique)
+    return @($c | Where-Object { $_ -and -not (Test-StorePythonPath $_) -and (Test-Path -LiteralPath $_) } | Select-Object -Unique)
+}
+
+# (TODO 444) Whether a python.exe path is inside a WindowsApps folder (the Microsoft Store's Python or Windows' Store
+# shortcut): never used by the setup or the build.
+function Test-StorePythonPath([string]$Path) {
+    return ("$Path" -like '*\WindowsApps\*')
 }
 
 # One python.exe: "ok" (3.11 or newer with pip), "old" (older than 3.11), "nopip" (3.11+ without pip) or "broken".
@@ -102,14 +114,18 @@ function Get-PythonFindings {
         if (-not $ver) { $ver = "?" }
         "$_ (Python $ver, $why)"
     })
-    if ($found.Count -eq 0) { return "no python.exe found (not on PATH, not in the py launcher, the usual folders or the registry)" }
-    return "found: " + ($found -join "; ")
+    $store = if (@($script:SkippedStorePythons).Count) { "; the Microsoft Store's Python, never used (Windows does not let other programs run it directly): " + (@($script:SkippedStorePythons) -join "; ") } else { "" }
+    if ($found.Count -eq 0) { return "no python.exe found (not on PATH, not in the py launcher, the usual folders or the registry)$store" }
+    return "found: " + ($found -join "; ") + $store
 }
 
 function Use-Python([string]$Exe) {
     $dir = Split-Path $Exe
     $userScripts = Invoke-Probe { & $Exe -c "import sysconfig; print(sysconfig.get_path('scripts', 'nt_user'))" }
     $env:PATH = "$dir;$dir\Scripts;$userScripts;$env:PATH"
+    # (TODO 444) The exact python.exe chosen, for build.ps1 and the programs it starts (they run this one, not whatever
+    # "python" PATH finds first)
+    $env:TF_PYTHON = $Exe
 }
 
 # Fonts improve prompts, but must not prevent an otherwise playable install or its mods.
@@ -326,9 +342,63 @@ function Get-PrerequisiteManualSteps {
     @{
         git    = "Git: download it from https://git-scm.com/download/win , run it and keep the default choices."
         python = "Python: download Python 3.12 from https://www.python.org/downloads/windows/ (the 'Windows installer (64-bit)'), run it and TICK 'Add python.exe to PATH' on its first page."
-        vs     = "Visual Studio Build Tools: download them from https://visualstudio.microsoft.com/visual-cpp-build-tools/ , run them, tick 'Desktop development with C++' (keep the Windows 11 SDK ticked on the right) and press Install (about 7 GB). Already have Visual Studio or its Build Tools? Open 'Visual Studio Installer' from the Start menu, press Modify and tick the same 'Desktop development with C++'."
+        vs     = "Visual Studio Build Tools: download them from https://visualstudio.microsoft.com/visual-cpp-build-tools/ , run them, tick 'Desktop development with C++' (keep the Windows 11 SDK ticked on the right) and press Install (about 2 GB to download, 6 GB on disk). Already have Visual Studio or its Build Tools? Open 'Visual Studio Installer' from the Start menu, press Modify and tick the same 'Desktop development with C++'."
         winget = "winget (Windows' package manager) is missing or too old: install or update 'App Installer' from the Microsoft Store, https://apps.microsoft.com/detail/9NBLGGH4NNS1 , then run the setup again. (Windows Server and LTSC editions have no Store: install the tools by hand with the links below.)"
     }
+}
+
+# (TODO 439) The sizes and times the setup's plan says, measured on a fresh install (the Testbench: Ryzen 5 5600, NVMe,
+# GTX 1080, 2026-11-19; README "Install size"). Download / disk in MB / GB. Keep in step with installer\src\main.rs
+# (PLAN_TOOLS and the PLAN_* numbers).
+function Get-SetupSizes {
+    @{
+        git      = @{ Download = 67; Disk = 0.4; Why = "gets the game's build recipe (this repository) and its updates" }
+        python   = @{ Download = 27; Disk = 0.2; Why = "runs the build's tools and makes the HD textures" }
+        vs       = @{ Download = 1900; Disk = 6.1; Why = "Microsoft's free C++ compiler: the game is built on this PC from your own disc, since no game code may be shared" }
+        pyparts  = 0.3     # Pillow, numpy and CMake for that Python (pip)
+        disc     = 2.7     # the disc's files, extracted from your disc image
+        build    = 2.3     # the build: the game itself (0.3) and its in-between files (tools\clean_build.ps1 can delete those); measured 2026-11-19 with the libraries as archives, was 3.4 with their git histories
+        gameMin  = 12; gameMax = 25   # the build, minutes (the Testbench, 12 threads: 10 min 37 s)
+    }
+}
+
+# (TODO 439) An HD textures preset's set on the disk (GB) and its making time on an RTX 3070-class card (minutes):
+# tools\hd_textures\tier_rules.py ESTIMATES, as installer\src\main.rs HdQuality says them.
+function Get-HdPresetCost([string]$Quality) {
+    switch ($Quality) { "fast" { return @(0.6, 10) } "best" { return @(2.3, 33) } default { return @(1.4, 25) } }
+}
+
+# (TODO 439) The setup's plan, said before anything runs: each program with why it is needed, its download and disk
+# size, and whether it is already installed ($Missing: Get-MissingPrerequisites), then the game, the HD textures, and the
+# space and time in all. $HdGB / $HdMinutes: the HD textures preset's (0 when they are left out).
+function Get-SetupPlanText([string[]]$Missing, [double]$HdGB = 0, [int]$HdMinutes = 0) {
+    $s = Get-SetupSizes
+    $names = @{ git = "Git"; python = "Python 3.12"; vs = "Visual Studio 2022 Build Tools (C++)" }
+    $lines = [Collections.Generic.List[string]]::new()
+    $lines.Add("The programs the build needs (installed with Windows' package manager, winget, only when missing):")
+    $disk = 0.0; $download = 0
+    foreach ($k in "git", "python", "vs") {
+        $t = $s[$k]
+        if ($Missing -contains $k) {
+            $dl = if ($t.Download -ge 1000) { "{0:N1} GB" -f ($t.Download / 1000) } else { "$($t.Download) MB" }
+            $lines.Add(("  {0}: to install ({1} download, {2:N1} GB on disk) - {3}" -f $names[$k], $dl, $t.Disk, $t.Why))
+            $disk += $t.Disk; $download += $t.Download
+        } else {
+            $lines.Add(("  {0}: already installed - {1}" -f $names[$k], $t.Why))
+        }
+    }
+    $lines.Add(("  Pillow, numpy and CMake for Python (pip, when missing): about {0:N1} GB" -f $s.pyparts))
+    $disk += $s.pyparts + $s.disc + $s.build
+    $lines.Add(("The game, built on this PC from your disc: {0:N1} GB of disc files and {1:N1} GB of build, about {2} to {3} min." -f $s.disc, $s.build, $s.gameMin, $s.gameMax))
+    if ($HdGB -gt 0) {
+        $disk += $HdGB
+        $lines.Add(("HD textures (optional): about {0:N1} GB, about {1} min on the graphics card; you can play meanwhile." -f $HdGB, $HdMinutes))
+    } else {
+        $lines.Add("HD textures: left out (the game shows its original textures).")
+    }
+    $lines.Add(("In all: about {0:N0} GB of free space{1}. Nothing else is installed." -f [Math]::Ceiling($disk), $(if ($download) { (", about {0:N1} GB to download" -f ($download / 1000)) } else { "" })))
+    $lines.Add("After the build, tools\clean_build.ps1 can free most of the build's space (the setup window offers it).")
+    return @($lines)
 }
 
 # winget, if it can be used: $null when it can, else why not. (Windows 10 LTSC / Server and old Windows 10 have no
@@ -348,10 +418,11 @@ function Get-WingetProblem {
 # (TODO 438) Whether winget's words say its source (the package list it installs from) is damaged or missing: every
 # winget install then fails the same way, Git, Python and the Build Tools alike. A player's screen (2026-11-18): "Failed
 # when opening source(s); try the 'source reset' command if the problem persists. ... 0x8a15000f : Data required by the
-# source is missing". (0x8a15000f = -1978335217 data missing, 0x8a150044 = -1978335164; the words cover the rest: a
+# source is missing". (0x8a15000f = -1978335217 data missing, 0x8a150044 = -1978335164; TODO 443: also as winget may print
+# them, unsigned: 2316632079, 2316632132; the words cover the rest: a
 # removed source, a list that could not be updated.) Keep in step with installer\src\main.rs winget_source_broken.
 function Test-WingetSourceBroken([string]$Output) {
-    return ($Output -match "0x8a15000f|0x8a150044|-1978335217|-1978335164|Data required by the source is missing|Failed when opening source|Failed when searching source|Failed in attempting to update the source|source reset|No sources match the given value|no sources are configured")
+    return ($Output -match "0x8a15000f|0x8a150044|-1978335217|-1978335164|2316632079|2316632132|Data required by the source is missing|Failed when opening source|Failed when searching source|Failed in attempting to update the source|source reset|No sources match the given value|no sources are configured")
 }
 
 # (TODO 438) What a player does when winget's source stays damaged (the setup's own repair did not help or was declined).
@@ -384,25 +455,88 @@ function Repair-WingetSource {
     return @{ Code = $code; Output = "$text`nwinget source reset: exit code $code" }
 }
 
+# (TODO 443) An exit code as the signed 32-bit number Windows and PowerShell use ($LASTEXITCODE, Process.ExitCode), from
+# a number or from text that may give it unsigned: winget prints an installer's code as "2147942512" (= 0x80070070,
+# ERROR_DISK_FULL), past [int]'s range, and a plain [int] cast of it stopped a player's setup with "Cannot convert value
+# 2147942512 to type System.Int32" instead of saying the disk was full. Decimal (signed or unsigned) or 0x hex; $null
+# when it is not a 32-bit exit code.
+function ConvertTo-ExitCode($Value) {
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [int]) { return $Value }
+    $s = "$Value".Trim()
+    [long]$n = 0
+    if ($s -match '^0x([0-9a-fA-F]{1,8})$') { $n = [Convert]::ToInt64($Matches[1], 16) }
+    elseif (-not ($s -match '^[+-]?\d{1,19}$' -and [long]::TryParse($s, [ref]$n))) { return $null }
+    if ($n -gt 4294967295 -or $n -lt -2147483648) { return $null }
+    if ($n -gt 2147483647) { $n -= 4294967296 }
+    return [int]$n
+}
+
+# (TODO 443) An exit code as a player and a search engine see it: "2147942512 (0x80070070)" - the unsigned number winget
+# prints and the hex Microsoft's pages use. Text that is not a code is given back as it is.
+function Format-ExitCode($Code) {
+    $c = ConvertTo-ExitCode $Code
+    if ($null -eq $c) { return "$Code" }
+    if ($c -ge 0 -and $c -lt 65536) { return "$c" }
+    $u = if ($c -lt 0) { [long]$c + 4294967296 } else { [long]$c }
+    return ("{0} (0x{1:X8})" -f $u, $u)
+}
+
+# (TODO 443) The free space on Windows' own drive (GB, one decimal), $null when it cannot be read. The Build Tools go
+# there whatever drive the game is on.
+function Get-SystemDriveFreeGB {
+    try { return [math]::Round(([IO.DriveInfo]::new("$env:SystemDrive\")).AvailableFreeSpace / 1GB, 1) } catch { return $null }
+}
+
 # What an installer's exit code and last lines mean, in words a player can act on ("" when nothing is known).
-function Get-InstallFailureMeaning([int]$Code, [string]$Output) {
-    # (winget's own exit code says only "the installer failed"; the installer's is in its output)
-    $m = [regex]::Match($Output, "Installer failed with exit code: (-?\d+)")
-    if ($m.Success) { $Code = [int]$m.Groups[1].Value }
-    if ($Output -match "You cancelled the installation" -or $Code -in 2, 1223, 1602, 5004) {
+# $Code: a number or text (TODO 443: never cast with [int] - an HRESULT printed unsigned overflows it).
+# (TODO 443) The installer's own exit code: winget's says only "the installer failed", the installer's is in its output
+# ("Installer failed with exit code: N") - the last one when several installers ran (winget's, then the maker's own).
+# Else $Code. Signed Int32 (ConvertTo-ExitCode), or $null.
+function Get-InstallerExitCode($Code, [string]$Output) {
+    $ms = [regex]::Matches("$Output", "Installer failed with exit code: (-?\d+|0x[0-9a-fA-F]+)")
+    if ($ms.Count) { $c = ConvertTo-ExitCode $ms[$ms.Count - 1].Groups[1].Value; if ($null -ne $c) { return $c } }
+    return (ConvertTo-ExitCode $Code)
+}
+
+function Get-InstallFailureMeaning($Code, [string]$Output) {
+    $Code = Get-InstallerExitCode $Code $Output
+    # (TODO 443) Disk full: ERROR_DISK_FULL 112 / ERROR_HANDLE_DISK_FULL 39, as themselves or as HRESULTs (0x80070070 =
+    # 2147942512 = -2147024784, 0x80070027). First: a full disk makes other installers' words misleading.
+    if ($Code -in 112, 39, -2147024784, -2147024857 -or
+        $Output -match "0x80070070|0x80070027|2147942512|2147942439|-2147024784|-2147024857|not enough (free )?(disk )?space|There is not enough space|disk is full") {
+        $free = Get-SystemDriveFreeGB
+        $now = if ($null -ne $free) { " (it has $free GB free now)" } else { "" }
+        return ("not enough free disk space. Microsoft's C++ Build Tools need about 7 GB free on Windows' drive $env:SystemDrive$now, " +
+                "even when the game goes on another drive; Git and Python about 1 GB more. Free some space on $env:SystemDrive " +
+                "(Windows Settings > System > Storage, or Disk Cleanup), then run the setup again: finished steps are kept.")
+    }
+    if ($Output -match "You cancelled the installation" -or $Code -in 2, 1223, 1602, 5004, -2147023673) {
         # (2: Git's installer (Inno Setup) when Windows' question was declined or closed itself unanswered - the ThinkPad test)
         return "Windows asked for permission to install and nobody answered (or No was chosen). The question may show only as a flashing shield button in the taskbar, and it closes by itself after about 2 minutes. Run the setup again and click Yes."
     }
-    if ($Output -match "hash does not match|0x8a150008|-1978335224") {
+    if ($Output -match "hash does not match|0x8a150008|-1978335224|2316632072") {
         return "winget found that the download changed since its package list was made (it happens to the Build Tools after Microsoft updates them)."
     }
     if ($Code -in 3010, 1641) { return "installed: Windows has to restart before it can be used." }
-    if ($Output -match "already installed|No newer package versions|0x8a15002b|-1978335189") {
+    if ($Output -match "already installed|No newer package versions|0x8a15002b|-1978335189|2316632107") {
         return "winget says it is already installed, yet the setup does not find a working one (for Python: 3.11 or newer with pip)."
     }
     if ($Code -eq 8006) { return "another Visual Studio installer was busy: close it (or restart the PC) and run the setup again." }
     if (Test-WingetSourceBroken $Output) { return (Get-WingetSourceText) }
-    if ($Output -match "0x80070070|not enough (disk )?space|There is not enough space") { return "not enough free disk space (the Build Tools need about 7 GB on C:)." }
+    # (TODO 443) Visual Studio's installer's documented exit codes, and the Windows errors installers pass on
+    # (learn.microsoft.com: "Use command-line parameters to install Visual Studio", exit codes)
+    switch ($Code) {
+        740 { return "the installer needs administrator rights and did not get them. Run the setup again and click Yes when Windows asks; on a work or school PC an administrator may have to install it." }
+        { $_ -in 1001, 1003 } { return "Visual Studio or its installer was already open. Close every Visual Studio window and its installer (or restart the PC), then run the setup again." }
+        1618 { return "another program was installing at the same time (Windows Update or another installer). Wait for it to finish (or restart the PC), then run the setup again." }
+        { $_ -in 5003, -1073720687, -2147012867, -2147012889, -2147012894 } { return "the installer could not download its files. Check the internet connection (a VPN, proxy or firewall can block Microsoft's download servers), then run the setup again: finished steps are kept." }
+        { $_ -in 5007, 8010 } { return "Microsoft's installer says this PC does not meet the Build Tools' requirements (64-bit Windows 10 or 11 with its updates). Install Windows' updates, then run the setup again." }
+        8004 { return "the installer could not use its install folder. Check that $env:SystemDrive has space and that no antivirus or policy blocks 'Program Files (x86)\Microsoft Visual Studio', then run the setup again." }
+        { $_ -in 8005, 8002 } { return "the installer's downloaded files did not check out (a cut download, or a proxy changing it). Run the setup again; if it happens again, restart the PC first." }
+        -1073741510 { return "the installer was closed before it finished (by a person, a restart or another program). Run the setup again: finished steps are kept." }
+        -2147024891 { return "Windows refused access (an antivirus or a company policy blocking the installer). Allow it, or install the tools by hand with the link below." }
+    }
     return ""
 }
 
@@ -492,7 +626,7 @@ function Install-MissingPrerequisites([string[]]$Missing) {
             $what = if ($fix[0].Action -eq "resume") { "Finishing the incomplete Visual Studio install" } else { "Adding the C++ tools and the Windows SDK to" }
             Write-Host "`n==> $what $($fix[0].Path) (Windows asks for permission: click Yes)" -ForegroundColor Cyan
             $code = Install-VsCppTools $fix[0].Path $fix[0].Action
-            Write-Host "Visual Studio's installer finished (exit code $code)."
+            Write-Host "Visual Studio's installer finished (exit code $(Format-ExitCode $code))."
             $out = "Installer failed with exit code: $code"
             if ($code -eq -1) {
                 # (its installer is missing or broken: Microsoft's bootstrapper repairs it while it modifies the install)
@@ -560,7 +694,7 @@ function Install-MissingPrerequisites([string[]]$Missing) {
                 $retry = $true
                 $meaning = "its installer finished without an error, but the setup does not see it yet."
             }
-            if (-not $meaning) { $meaning = "its installer stopped with exit code $code (the lines above say why)." }
+            if (-not $meaning) { $meaning = "its installer stopped with exit code $(Format-ExitCode (Get-InstallerExitCode $code $out)) (the lines above say why)." }
             if ($meaning -like "installed: Windows has to restart*") { $restart = $true }
             $report.Add("- $($how[$m][0]): $meaning")
         }

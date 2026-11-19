@@ -1,0 +1,67 @@
+# Builds the recompiler tools (PS2Recomp's ps2_recomp and ps2_analyzer, with this project's patch series) on more than
+# one Windows toolchain, the way build.ps1 builds them on a player's PC: the libraries from tools/deps.json, CMake 4
+# (pip, what the setup installs) and CMake 3, a folder path with spaces. Run when what the tools are built from changes,
+# and every week: a new Visual Studio on GitHub's machines then shows a compile break here before players meet it (a
+# player's newer compiler stopped the setup at "Disc and game", TODO 407). No disc and no game data are involved: the
+# tools are built, never run.
+name: Recompiler tools (toolchains)
+
+on:
+  push:
+    branches: [main]
+    paths: ["patches/ps2recomp/**", "PS2Recomp", "build.ps1", "build.sh", "tools/deps.json", "tools/fetch_deps.py",
+            "tools/deps.ps1", ".github/workflows/tools-toolchains.yml"]
+  pull_request:
+    paths: ["patches/ps2recomp/**", "PS2Recomp", "build.ps1", "build.sh", "tools/deps.json", "tools/fetch_deps.py",
+            "tools/deps.ps1", ".github/workflows/tools-toolchains.yml"]
+  schedule:
+    - cron: "17 4 * * 1"   # (Mondays: catches a runner image's new Visual Studio)
+  workflow_dispatch:
+
+jobs:
+  tools:
+    # (the public repository only: the private home repository's Actions minutes are not spent on it)
+    if: github.repository == 'kayliox/transformers-armada-recomp'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2022, cmake: "cmake>=4,<5", dir: "src" }
+          - { os: windows-2025, cmake: "cmake>=4,<5", dir: "src" }
+          - { os: windows-2025, cmake: "cmake>=3.31,<3.32", dir: "src" }
+          - { os: windows-2025, cmake: "cmake>=4,<5", dir: "a folder with spaces" }
+    name: ${{ matrix.os }}, ${{ matrix.cmake }}, ${{ matrix.dir }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          path: ${{ matrix.dir }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: CMake from pip (as the setup installs it)
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check "${{ matrix.cmake }}"
+          $scripts = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+          "$scripts" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: Apply the PS2Recomp patch series
+        shell: bash
+        working-directory: ${{ matrix.dir }}
+        run: ./build.sh --patches-only
+      - name: Configure and build the recompiler tools (build.ps1's way)
+        shell: pwsh
+        working-directory: ${{ matrix.dir }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake --version
+          . .\tools\deps.ps1
+          function Write-StepLog { param($m) }
+          $defs = Get-DepDefines (Get-Location).Path "tools" (Join-Path (Get-Location).Path "out\tools")
+          cmake -S PS2Recomp -B out/tools -A x64 -DPS2X_BUILD_RUNTIME=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_STUDIO=OFF @defs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Select-String -Path out/tools/CMakeFiles/*/CMakeCXXCompiler.cmake -Pattern 'CMAKE_CXX_COMPILER_VERSION' | Select-Object -First 1 | ForEach-Object Line
+          cmake --build out/tools --config RelWithDebInfo --target ps2_recomp ps2_analyzer -- /m /v:m
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Get-Item out/tools/ps2xRecomp/RelWithDebInfo/ps2_recomp.exe, out/tools/ps2xAnalyzer/RelWithDebInfo/ps2_analyzer.exe | Format-Table Name, Length

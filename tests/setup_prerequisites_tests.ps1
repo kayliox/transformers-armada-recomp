@@ -10,6 +10,9 @@
 # Run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\setup_prerequisites_tests.ps1   (exit code 0: all passed)
 $ErrorActionPreference = "Stop"
 $Root = Split-Path $PSScriptRoot -Parent
+# (the report a stopped setup / update writes, tools\setup_report.ps1: into a temp folder, never the Desktop)
+$env:TF_REPORT_DIR = Join-Path ([IO.Path]::GetTempPath()) "tfa_test_reports"
+New-Item -ItemType Directory -Force $env:TF_REPORT_DIR | Out-Null
 $failed = 0
 function Check([bool]$ok, [string]$what) {
     if ($ok) { Write-Host "  ok    $what" } else { Write-Host "  FAIL  $what" -ForegroundColor Red; $script:failed++ }
@@ -136,6 +139,15 @@ $scenarios = @(
                   (($r.Report -join "`n") -split "Terminal \(Admin\)").Count -eq 3 -and ($r.Report -join "`n") -match "python.org" } },
     @{ Name = "TODO 438: the repair fixes the source, the install then fails for another reason: that reason is shown"; Env = @{ SIM_MISSING = "vs"; SIM_VS = $srcBroken; SIM_VS_AFTER = "-1978335226|Installer failed with exit code: 3010|0" }
        Expect = { param($r) $r.Restart -and ($r.Report -join "`n") -notmatch "Terminal \(Admin\)" } },
+    @{ Name = "TODO 443 (Drift): the Build Tools' installer ends with 2147942512 (0x80070070, disk full): said in plain words, no cast error"
+       Env = @{ SIM_MISSING = "vs"; SIM_VS = "-1978335226|Starting package install...\nInstaller failed with exit code: 2147942512|0" }
+       Expect = { param($r) $r.Still.Count -eq 1 -and ($r.Report -join "`n") -match "not enough free disk space" -and ($r.Report -join "`n") -match "about 7 GB free on Windows' drive" } },
+    @{ Name = "TODO 443: winget's code and then the maker's installer's (signed, -2147024784): the last one decides"
+       Env = @{ SIM_MISSING = "vs"; SIM_WINGET = "winget is not installed on this PC"; SIM_DIRECT_VS = "-2147024784|0" }
+       Expect = { param($r) $global:SimCalls -contains "direct-vs" -and ($r.Report -join "`n") -match "not enough free disk space" } },
+    @{ Name = "TODO 443: an unknown code past Int32 (0x80070001 unsigned): shown with its hex, no cast error"
+       Env = @{ SIM_MISSING = "vs"; SIM_VS = "-1978335226|Installer failed with exit code: 2147942401|0" }
+       Expect = { param($r) ($r.Report -join "`n") -match "exit code 2147942401 \(0x80070001\)" } },
     @{ Name = "ARM64 PC"; Env = @{ SIM_MISSING = "vs"; SIM_VS = "1|Installer failed with exit code: 1|0"; PROCESSOR_ARCHITECTURE = "ARM64" }
        Expect = { param($r) ($r.Report -join "`n") -match "ARM" -and ($r.Report -join "`n") -match "exit code 1" } }
 )
@@ -177,6 +189,8 @@ try {
            Match = @("still missing: Python 3.11 or newer, Visual Studio", "sim evidence \(after the installs\)", "What the setup found", "press Modify", "Add python.exe to PATH"); NotMatch = @("prerequisites installed") },
         @{ Name = "TODO 438: source damaged, repair declined, makers' installers fail: how to repair + every link"; Env = @{ SIM_MISSING = "python,vs"; SIM_PYTHON = $srcBroken; SIM_RESET = "1223" }
            Match = @("still missing: Python 3.11 or newer, Visual Studio", "Terminal \(Admin\)", "winget source reset --force", "python.org", "visual-cpp-build-tools"); NotMatch = @("prerequisites installed") },
+        @{ Name = "TODO 443 (Drift's screen): disk full 2147942512 - plain words, never 'Cannot convert'"; Env = @{ SIM_MISSING = "vs"; SIM_VS = "-1978335226|Starting package install...\nInstaller failed with exit code: 2147942512|0" }
+           Match = @("still missing: Visual Studio 2022 Build Tools", "not enough free disk space", "about 7 GB free on Windows' drive", "even when the game goes on another drive"); NotMatch = @("Cannot convert", "InvalidCastFromStringToInteger", "prerequisites installed") },
         @{ Name = "success but unseen: the retry phrase tfa-setup.exe looks for"; Env = @{ SIM_MISSING = "vs"; SIM_VS = "0|Successfully installed|0" }
            Match = @("prerequisites installed, but not found yet: vs", "restart the PC"); NotMatch = @() }
     )
@@ -195,6 +209,21 @@ try {
     foreach ($v in $simVars) { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
+
+Write-Host "2b. exit codes past Int32 (TODO 443)"
+. (Join-Path $Root "tools\setup_common.ps1")
+Check ((ConvertTo-ExitCode "2147942512") -eq -2147024784) "2147942512 (unsigned) -> -2147024784"
+Check ((ConvertTo-ExitCode "-2147024784") -eq -2147024784) "-2147024784 (signed) as it is"
+Check ((ConvertTo-ExitCode "0x80070070") -eq -2147024784) "0x80070070 (hex)"
+Check ((ConvertTo-ExitCode 3010) -eq 3010 -and (ConvertTo-ExitCode "4294967295") -eq -1) "small codes and 0xFFFFFFFF"
+Check ($null -eq (ConvertTo-ExitCode "4294967296") -and $null -eq (ConvertTo-ExitCode "abc") -and $null -eq (ConvertTo-ExitCode "99999999999999999999999")) "out of range or not a number: null, no error"
+Check ((Format-ExitCode -2147024784) -eq "2147942512 (0x80070070)" -and (Format-ExitCode 1603) -eq "1603") "the code as a player sees it"
+Check ((Get-InstallFailureMeaning "2147942512" "") -match "not enough free disk space") "the meaning from text past Int32 (the old [int] parameter threw)"
+Check ((Get-InstallFailureMeaning 0 "Installer failed with exit code: 0x80070070") -match "not enough free disk space") "hex in the installer's line"
+Check ((Get-InstallFailureMeaning 5003 "") -match "could not download") "5003: no download"
+Check ((Get-InstallFailureMeaning 1618 "") -match "another program was installing") "1618: another install running"
+Check ((Get-InstallFailureMeaning 1 "") -eq "") "an unknown code: nothing made up"
+Check ((Test-WingetSourceBroken "Installer failed with exit code: 2316632079")) "winget's source code printed unsigned (0x8a15000f)"
 
 Write-Host "3. an antivirus taking a program built on this PC (build.ps1)"
 # (build.ps1's own functions, taken out of it by the PowerShell parser: running it would build)
@@ -266,6 +295,53 @@ Check (@(Get-VsUnknownToCmake @() $helpOld).Count -eq 0) "setup: no Visual Studi
 # parameter turned the missing help text into "" (never $null), so no CMake ever "knew" any Visual Studio and the setup
 # stopped at Tools on every PC with Visual Studio (0.8.3 and 0.8.4).
 Check ((Get-Command Get-VsUnknownToCmake).Parameters["CMakeHelp"].ParameterType -ne [string]) "setup: the CMake help text parameter is not a [string] (a missing one must stay null)"
+
+Write-Host "5. the Microsoft Store's Python is never used (TODO 444)"
+. (Join-Path $Root "tools\setup_common.ps1")
+Check (Test-StorePythonPath "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\python3.13.exe") "the Store Python's real exe (Nine9hundred's screen)"
+Check (Test-StorePythonPath "C:\Users\x\AppData\Local\Microsoft\WindowsApps\python.exe") "Windows' Store shortcut"
+Check (-not (Test-StorePythonPath "C:\Users\x\AppData\Local\Programs\Python\Python312\python.exe")) "a normal per-user Python"
+Check (-not (Test-StorePythonPath "D:\MyWindowsAppsBackup\python.exe")) "a folder that only contains the word"
+# A stand-in py launcher (py.cmd first on PATH) that names a Store Python, as the real launcher and the registry do on
+# such a PC; the exe exists, so only the WindowsApps rule keeps it out.
+$fake = Join-Path ([IO.Path]::GetTempPath()) ("tfa_store_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+$storeDir = Join-Path $fake "Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0"
+New-Item -ItemType Directory -Force $storeDir, (Join-Path $fake "bin"), (Join-Path $fake "only") | Out-Null
+$storeExe = Join-Path $storeDir "python3.13.exe"; Set-Content -LiteralPath $storeExe "x"
+Set-Content -LiteralPath (Join-Path $fake "bin\py.cmd") "@echo off`r`nif ""%1""==""-0p"" (echo  -V:3.13 *        $storeExe) else (echo $storeExe)"
+$savePath = $env:PATH; $savePF = $env:ProgramFiles; $saveTF = $env:TF_PYTHON
+try {
+    $env:PATH = (Join-Path $fake "bin") + ";" + $savePath
+    $cands = @(Get-PythonCandidates)
+    Check ((@($cands | Where-Object { $_ -like "*\WindowsApps\*" }).Count -eq 0) -and (@($script:SkippedStorePythons) -contains $storeExe)) "the py launcher names the Store Python: not a candidate, noted as skipped"
+    Check ((Get-PythonFindings) -match "Microsoft Store's Python, never used") "the findings in the log say why it was left out"
+    Check ((Find-Python) -notlike "*\WindowsApps\*") "Find-Python never returns it"
+    # build.ps1's own choice (its function, from its syntax tree)
+    $ast2 = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root "build.ps1"), [ref]$null, [ref]$null)
+    $f = $ast2.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq "Resolve-BuildPython" }, $true)
+    foreach ($d in $f) { Invoke-Expression $d.Extent.Text }
+    $real = Find-Python
+    if ($real) {
+        Check ((Resolve-BuildPython $real) -eq $real) "build.ps1 runs the exact python the setup chose (TF_PYTHON)"
+        Check ((Resolve-BuildPython $storeExe) -notlike "*\WindowsApps\*") "build.ps1 given a Store Python: takes another"
+    } else { Write-Host "  skip  no real Python on this PC" }
+    # Only a Store Python reachable: build.ps1 stops in plain words instead of "Access denied"
+    $env:ProgramFiles = Join-Path $fake "Program Files"
+    Set-Content -LiteralPath (Join-Path $storeDir "python.exe") "x"
+    $env:PATH = $storeDir + ";" + (Join-Path $env:SystemRoot "System32")
+    $msg = ""; try { [void](Resolve-BuildPython "") } catch { $msg = "$_" }
+    Check ($msg -match "only Python found is the Microsoft Store's" -and $msg -match "python.org") "only the Store Python on PATH: build.ps1 says so and how to fix it"
+    $env:PATH = (Join-Path $fake "only") + ";" + (Join-Path $env:SystemRoot "System32")
+    Check ((Resolve-BuildPython "") -eq "python") "no Python at all on PATH: 'python' as before (a build by hand)"
+    if ($real) {
+        $env:PATH = $savePath
+        Use-Python $real
+        Check ($env:TF_PYTHON -eq $real) "Use-Python hands the chosen exe to build.ps1 (TF_PYTHON)"
+    }
+} finally {
+    $env:PATH = $savePath; $env:ProgramFiles = $savePF; $env:TF_PYTHON = $saveTF
+    Remove-Item -LiteralPath $fake -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 if ($failed) { Write-Host "`n$failed check(s) failed" -ForegroundColor Red; exit 1 }
 Write-Host "`nall checks passed" -ForegroundColor Green

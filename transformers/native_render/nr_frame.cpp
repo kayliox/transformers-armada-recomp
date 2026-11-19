@@ -3707,7 +3707,10 @@ namespace nr::frame
         // (TODO 108) The modern bloom in place of the game's glow, when chosen and the frame has a glow (findGlow): its chain left
         // out, the bloom drawn where its first addition was.
         // (not in a frame left out: its picture is not drawn)
-        const GlowChain glow = bloomMode() != 0 && !(input.dropped && !input.droppedDrawn) ? findGlow(input, mainFbp) : GlowChain{};
+        // (TODO 434) With the game's own glow (mode 0) the chain is found too: its draws are drawn with the GS's integer
+        // arithmetic (glowGsInteger, below). TF_NATIVE_GLOWTRUNC=0: as before (the GPU's rounding).
+        static const bool glowTrunc = !(std::getenv("TF_NATIVE_GLOWTRUNC") && *std::getenv("TF_NATIVE_GLOWTRUNC") == '0');
+        const GlowChain glow = (bloomMode() != 0 || glowTrunc) && !(input.dropped && !input.droppedDrawn) ? findGlow(input, mainFbp) : GlowChain{};
         bool bloomDone = false;
         {
             static const bool bloomLog = std::getenv("TF_NATIVE_BLOOMLOG") != nullptr;
@@ -3826,7 +3829,7 @@ namespace nr::frame
                 treeTurn(cat);
                 treelog::win.draws[cat] += 1.0;
             }
-            if (glow.found)
+            if (glow.found && bloomMode() != 0)
             {
                 const uint8_t role = glow.role[static_cast<size_t>(&draw - input.draws.data())];
                 if (role == 1u)
@@ -4430,6 +4433,13 @@ namespace nr::frame
                         tg.h == static_cast<uint32_t>(tg.gsH) && (source->w >= static_cast<uint32_t>(source->gsW) * 2u || source->h >= static_cast<uint32_t>(source->gsH) * 2u))
                         c.down[0] = 2.0f;
                 }
+                // (TODO 434) The game's glow chain (its draws into the small effect buffers, the game's own glow drawn): the
+                // GS's integer arithmetic - its bilinear filter and modulation truncate (the colour's fraction dropped), the
+                // GPU rounds to the nearest level. The chain is ~30 passes of shrinks, blurs and copies of the threshold's
+                // faint remains: rounding kept 1-5 levels alive to the end, added three times over the picture - a red-brown
+                // halo round bright spots (Deep Amazon's temple shaft) that PCSX2 does not draw; truncating, they die out as
+                // on the PS2.
+                c.down[3] = glowTrunc && glow.found && bloomMode() == 0 && glow.role[static_cast<size_t>(&draw - input.draws.data())] == 1u ? 1.0f : 0.0f;
                 // (TODO 94, a measuring aid: TF_NATIVE_FLATPS=alt - every draw's pixels a flat grey in every other profile
                 // window: what the pixel shader's work costs, against the rest of a draw.)
                 {
@@ -4601,6 +4611,17 @@ namespace nr::frame
                 const bool rgbOnlyFail = !afailOff && c.test[0] > 0.5f && c.test[3] == 3.0f && (writeMask & gfx::kWriteA) != 0u;
                 if (rgbOnlyFail)
                     c.test[3] = 0.0f;
+                // (TODO 409) A blended sprite particle that writes depth (Antarctica's snow: ALPHA Cs * As + Cd * (1 - As), TEST
+                // alpha GEQUAL 1 / KEEP, ZBUF written) writes it for every pixel with any alpha at all, its faint rim too: an
+                // additive draw after it behind it (the warp gate's light column, glows) then stops at that rim, so up close a
+                // flake over a light carries a dark, blocky outline the shape of its texels - the GS does the same, at the PS2's
+                // size a pixel or two. Here: the colour drawn as the game asks without depth, then the depth alone where the
+                // particle is at least half covering (alpha 0x40 of 0x80). TF_NATIVE_SPRITE_DEPTH=0: as before.
+                static const bool spriteDepthOff = std::getenv("TF_NATIVE_SPRITE_DEPTH") && *std::getenv("TF_NATIVE_SPRITE_DEPTH") == '0';
+                constexpr float kSpriteDepthAref = 64.0f;
+                const bool spriteDepth = !spriteDepthOff && !rgbOnlyFail && !tg.main && draw.mesh && draw.mesh->sprites && zte && zwrite &&
+                                         (pass.prim & 0x40u) != 0u && (pass.alpha & 0xFFu) == 0x44u && c.test[0] > 0.5f && c.test[3] == 0.0f &&
+                                         (c.test[1] == 5.0f || c.test[1] == 6.0f) && c.test[2] < kSpriteDepthAref && writeMask != 0u;
                 // (TF_NATIVE_CLIPGS=0: the GPU's clipper with the planes; =alt: by turns, a profile window each.)
                 // (Unset: the quality preset's - the GPU's clipper on Low and Medium, TODO 94.)
                 static const char *clipGsEnv = std::getenv("TF_NATIVE_CLIPGS");
@@ -4633,7 +4654,7 @@ namespace nr::frame
                     if (!modes.empty())
                         zwMode = modes[g_profWindow % modes.size()];
                 }
-                bool zwriteNow = zwrite;
+                bool zwriteNow = zwrite && !spriteDepth; // (TODO 409: its depth comes after, in a pass of its own)
                 if (zwMode & 15u)
                 {
                     const uint32_t cls = source ? 1u : (draw.mesh && draw.mesh->sprites) ? 2u : (draw.mesh && draw.mesh->immediate) ? 4u : 8u;
@@ -4939,7 +4960,7 @@ namespace nr::frame
                 const bool splitOn = clipSplit && (*clipSplit == '1' || (*clipSplit == 'a' && !(g_profWindow & 1u)));
                 static thread_local std::vector<ClipRun> runs;
                 gfx::RingSpan insideSpan; // (the split's constants for the runs wholly inside)
-                bool split = clipGs && splitOn && !keptView && !rgbOnlyFail && pass.mode[2] < 0.5f && pass.mode[3] < 0.5f && draw.mesh &&
+                bool split = clipGs && splitOn && !keptView && !rgbOnlyFail && !spriteDepth && pass.mode[2] < 0.5f && pass.mode[3] < 0.5f && draw.mesh &&
                              draw.mesh->indices.size() == m->count && dev.ringAlloc(gfx::RingKind::Constants, kConstantStride, 256u, insideSpan);
                 const gfx::PipelineDesc pipeInside = pipeOf(blend, zte, func, zwrite, writeMask, tg.main, false, psVar);
                 if (split) // (the inside runs' pipeline made now - and the draw's own set again)
@@ -5189,6 +5210,28 @@ namespace nr::frame
                     {
                         std::memcpy(c2Span.cpu, &c2, sizeof(c2));
                         dev.bindDrawConstants(c2Span);
+                        if (!skipThis)
+                        {
+                            predicate(skipDraw);
+                            if (m->indirect)
+                                dev.drawIndirect(draw.mesh->id, firstInst);
+                            else
+                                dev.drawIndexed(drawCount, 0u, instCount, firstInst);
+                            predicate(false);
+                        }
+                    }
+                }
+                if (spriteDepth)
+                {
+                    // (TODO 409: the particle's depth alone, where it covers at least half - the colour is drawn above)
+                    Constants c3 = c;
+                    c3.test[2] = kSpriteDepthAref;
+                    gfx::RingSpan c3Span;
+                    if (dev.setPipeline(pipeOf(gfx::BlendState{}, zte, func, true, 0u, tg.main, clipGs, psVar)) &&
+                        dev.ringAlloc(gfx::RingKind::Constants, kConstantStride, 256u, c3Span))
+                    {
+                        std::memcpy(c3Span.cpu, &c3, sizeof(c3));
+                        dev.bindDrawConstants(c3Span);
                         if (!skipThis)
                         {
                             predicate(skipDraw);

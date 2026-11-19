@@ -67,7 +67,7 @@ namespace nr::draw
         float clipRows[16];
         float clipOn[4];
         float standIn[4];    // (w: alpha + 2; 0 = none - the shader's standIn)
-        float down[4];       // (x: the supersampled copy's four taps)
+        float down[4];       // (x: the supersampled copy's four taps; w: the glow chain's GS truncation, TODO 434)
         float clipRowsB[16]; // (N9 stage 3: clipRows in the frame before's pose)
         float pose[4];       // (N9 stage 3: x the camera's turn applies, y the vertices' frame-before stream)
         float lightsB[12];   // (N9 stage 3: p[8..10] of 0x21f0 in the frame before's pose)

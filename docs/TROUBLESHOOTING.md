@@ -42,8 +42,24 @@ your antivirus does not help.
 
 - Run the setup again. A network hiccup during a download is the most common cause.
 - After an update, run `.\update.ps1 -Force` to rebuild everything.
-- If it still fails, open an [issue](https://github.com/kayliox/transformers-armada-recomp/issues) with the end
-  of the output.
+- If it still fails, open an [issue](https://github.com/kayliox/transformers-armada-recomp/issues) (or ask on
+  Discord) and attach the report the setup saved on your Desktop when it stopped (`tfa-report-<date>-<time>.txt`).
+  It holds no game files, and your user name is taken out. To make one by hand: in the game's folder,
+  `powershell -ExecutionPolicy Bypass -File tools\setup_report.ps1`.
+
+### The setup stops before it installs anything
+
+Before the long steps the setup checks the PC, and stops at once on a problem that would make it fail later:
+
+- **Not enough free space:** it says how much the drive has and needs. Free some space, or pick a folder on another
+  drive, then run the setup again.
+- **A network share or drive:** pick a folder on the PC's own disk.
+- **The disc image is not a Transformers disc it knows, or its executable has the wrong checksum:** another version of
+  the game, a modified disc or a damaged copy. Make a fresh copy of your disc.
+
+It also says (and goes on) when the folder is in OneDrive, Dropbox or another synced folder (pick another folder if
+the build fails at random), when the path is very long or has letters outside plain English, and when Smart App
+Control is on.
 
 ### The PC restarts, freezes or overheats during the setup or an update
 

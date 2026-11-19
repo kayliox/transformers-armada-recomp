@@ -243,6 +243,15 @@ function Save-LocalWork([string]$branch) {
 function Fail($msg) {
     Write-Host "`nupdate: $msg" -ForegroundColor Red
     if (Get-Command Write-StepLog -ErrorAction SilentlyContinue) { Write-StepLog "update: stopped: $msg" }
+    # (build robustness) One text file to attach when asking for help (tools\setup_report.ps1: no game files, the user
+    # name taken out). Never stops the stop itself.
+    try {
+        foreach ($f in "install_layout.ps1", "preflight.ps1", "setup_report.ps1") { $p = Join-Path $Port "tools\$f"; if (Test-Path -LiteralPath $p) { . $p } }
+        if (Get-Command New-SetupReport -ErrorAction SilentlyContinue) {
+            $report = New-SetupReport -Port $Port -What "update" -Message $msg
+            if ($report) { Write-Host "A report to attach when you ask for help (Discord or GitHub) was saved $(Get-ReportPlace $report)" }
+        }
+    } catch {}
     Result "failed $msg"
     Start-Game -AfterFailure
     # (the console window the game opened: a moment to read why; not in tfa-setup's hidden run)
@@ -302,7 +311,11 @@ try { $state = Get-Content $StateFile -Raw | ConvertFrom-Json } catch {}
 if (-not $state) { Write-Host "warning: .setup.json is empty or damaged: it is written again at the end" -ForegroundColor Yellow; $state = [pscustomobject]@{} }
 if (-not $Binaries -and $state.PSObject.Properties["Binaries"]) { $Binaries = $state.Binaries }
 $Python = Find-Python
-if (-not $Python) { Fail "Python 3.11+ not found: run setup.ps1 again" }
+if (-not $Python) {
+    # (TODO 444) only the Microsoft Store's Python on this PC: the build cannot start it; the setup installs Python 3.12
+    if (@($script:SkippedStorePythons).Count) { Fail "the only Python on this PC is the Microsoft Store's, which the build cannot start (Windows does not allow it). Run the setup again: it installs Python 3.12 beside it." }
+    Fail "Python 3.11+ not found: run setup.ps1 again"
+}
 Use-Python $Python
 
 Step "Checking the repository for new changes" "checking"
@@ -354,7 +367,7 @@ $changed = if ($Force) { @("${pre}build.ps1", "${pre}tools/hd_textures/") } else
 # (TODO 425: the scripts' own tests and the Linux scripts too - a release that changed only them ran a whole build check)
 $noBuild = @("docs/*", "*.md", "installer/*", ".github/*", ".githooks/*", "setup.ps1", "update.ps1", "Play.bat",
     "tools/setup_common.ps1", "tools/step_log.ps1", "tools/check_no_game_data.py", "tools/check_publishable.py", "LICENSE", ".gitignore", ".gitattributes",
-    "tests/*", "tools/update_forecast.ps1", "setup.sh", "update.sh", "play.sh")
+    "tests/*", "tools/update_forecast.ps1", "tools/clean_build.ps1", "tools/clean_build.sh", "tools/clean_env.sh", "tools/preflight.ps1", "tools/setup_report.ps1", "setup.sh", "update.sh", "play.sh")
 $needBuild = @($changed | Where-Object {
     $path = $_
     $path.StartsWith($pre) -and -not ($noBuild | Where-Object { $path.Substring($pre.Length) -like $_ })
@@ -383,6 +396,13 @@ if ($needBuild -and $Binaries) {
     # recompiler programs (rebuilt only when their own sources change - a PS2Recomp patch for the
     # runtime alone leaves them as they were), the Python tools that run them, the config or the
     # game's ELF changed (TODO 115). Otherwise only the changed files are compiled.
+    # (TODO 439) Every update builds the game on this PC, so it needs Visual Studio's C++ tools: a player who removed them
+    # after the setup (the README says they can go when you never update) is told plainly, not by a compiler error.
+    if (@(Get-MissingPrerequisites) -contains "vs") {
+        Fail ("this update rebuilds the game on this PC, which needs Visual Studio's C++ build tools, and they are not installed " +
+            "(removed since the setup?). Run the setup once (tfa-setup.exe in the folder you installed into, Set up again): it installs " +
+            "them again and brings the game up to date.")
+    }
     $buildArgs = @{}
     $buildPs1 = Join-Path $Port "build.ps1"
     if ($Force) {
@@ -400,6 +420,13 @@ if ($needBuild -and $Binaries) {
     $gentle = $false
     try { $gentle = [bool](Get-Content (Join-Path $Port "hd_textures\hd_options.json") -Raw -ErrorAction Stop | ConvertFrom-Json).gentle } catch {}
     if ($gentle -and (Select-String -LiteralPath $buildPs1 -SimpleMatch '[switch]$Gentle' -Quiet)) { $buildArgs.Gentle = $true }
+    # (build robustness) Free space and the folder, before a rebuild (tools\preflight.ps1; from the update after the one that
+    # brings it, as this script runs as it was before the pull)
+    if (Test-Path -LiteralPath (Join-Path $Port "tools\preflight.ps1")) {
+        . (Join-Path $Port "tools\preflight.ps1")
+        $pf = @(Invoke-Preflight -Port $Port -Update)
+        if (-not (Write-PreflightReport $pf)) { Fail (($pf | Where-Object { $_.Level -eq "stop" } | ForEach-Object { $_.Text }) -join "`n") }
+    }
     Step ("Rebuilding the game (build.ps1{0}{1})" -f $(if ($buildArgs.SkipRecompile) { " -SkipRecompile: the game's code is translated as before" } else { "" }),
         $(if ($buildArgs.Gentle) { ", going easy on the PC" } else { "" })) "the game"
     & $buildPs1 @buildArgs

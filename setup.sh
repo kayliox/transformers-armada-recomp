@@ -11,17 +11,21 @@
 #                            # (kept in hd_textures/hd_options.json, so update.sh goes easy too; --gentle off undoes it)
 #   ./setup.sh --packages ubuntu   # the packages the build needs (ubuntu, debian, fedora or arch), on one line: for a
 #                                  # setup program or a container to install, nothing else done
+#   ./setup.sh --clean temp|all    # (TODO 439) afterwards, the build's leftovers deleted (tools/clean_build.sh): "temp"
+#                                  # costs nothing, "all" frees most of the build's space and the next update rebuilds
+#                                  # the whole game once. Without it the setup only says how much there is to free.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 state=$root/.setup.json
-iso="" gentle="" packages=""
+iso="" gentle="" packages="" clean=""
 while [ $# -gt 0 ]; do
     case "$1" in
     --iso) iso=$2; shift 2 ;;
     --gentle) gentle=$2; shift 2 ;;
     --packages) packages=$2; shift 2 ;;
-    -h | --help) sed -n '2,13p' "$0"; exit 0 ;;
+    --clean) clean=$2; shift 2 ;;
+    -h | --help) sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -53,6 +57,8 @@ step() { printf '\n==> %s\n' "$*"; steplog "setup: $*"; }
 if [ -z "${TF_STEP_LOG:-}" ]; then export TF_STEP_LOG="$root/setup_steps.log"; : >"$TF_STEP_LOG"; fi
 fail() { printf '\nsetup: %s\n' "$*" >&2; exit 1; }
 usa_size=2900951040 # Transformers (USA), SLUS-20668: the only disc the build accepts (it checks the executable inside)
+# (build robustness) Another project's CMake toolchain / generator or another Python's PYTHONPATH left out (tools/clean_env.sh)
+if [ -f "$root/tools/clean_env.sh" ]; then . "$root/tools/clean_env.sh"; tfa_clean_env setup; fi
 # (TODO 279) The disc's files: game/ here, or the install's data/game once its folders were moved (tools/install_layout.sh)
 . "$root/tools/install_layout.sh"
 game_dir=$(tfa_game_data_dir "$root")
@@ -87,6 +93,29 @@ if [ ! -f "$game_dir/SLUS_206.68" ]; then
     [ "$size" = "$usa_size" ] || echo "warning: $iso is not the size of the USA release (SLUS-20668, $usa_size bytes); the build checks the disc's executable."
 fi
 
+# (TODO 439) The plan, before anything is built: what it makes, how big, how long (the disc's size as measured on a
+# fresh install, tools/setup_common.ps1 Get-SetupSizes; the build's own size differs by distribution).
+cat <<'EOF'
+
+The setup builds the game on this PC from your disc (no game code may be shared, so none is downloaded):
+  the disc's files: about 2.7 GB; the build: a few GB more (most of it can be freed afterwards); about 15 to 25 min.
+  It installs nothing itself: missing build tools are listed below with the command that installs them.
+  HD textures (optional, later): ./tools/make_hd_textures.sh, about 0.6 to 2.3 GB by preset.
+EOF
+# (build robustness, as tools/preflight.ps1 on Windows) Before the long steps: enough free space here (the disc's
+# files when not extracted yet, the build, the HD textures' room), and the disc image a release this project knows
+# (extract_iso.py --check reads only its executable: a wrong disc or a bad copy is found now, not after the build).
+need_mb=$(( 2300 + 1000 + 2000 ))
+[ -f "$game_dir/SLUS_206.68" ] || need_mb=$(( need_mb + 2700 ))
+free_mb=$(df -Pm "$root" 2>/dev/null | awk 'NR==2 {print $4}')
+if [ -n "$free_mb" ] && [ "$free_mb" -lt "$need_mb" ]; then
+    fail "not enough free space for the install: $(( free_mb / 1024 )) GB free here, about $(( (need_mb + 1023) / 1024 )) GB needed. Free some space (or set up in a folder on another drive), then run the setup again."
+fi
+if [ ! -f "$game_dir/SLUS_206.68" ] && [ -n "$iso" ] && command -v python3 >/dev/null; then
+    check=$(python3 "$root/transformers/tools/extract_iso.py" --check "$iso" 2>&1) && code=0 || code=$?
+    [ "$code" = 2 ] && fail "$check"
+    [ "$code" = 0 ] && echo "The disc: $check"
+fi
 step "Checking what the build needs"
 missing=()
 for tool in git cmake ninja pkg-config; do command -v "$tool" >/dev/null || missing+=("$tool"); done
@@ -155,6 +184,24 @@ if [ -z "$(tfa_layout_settings "$root")" ]; then
     for example in "$root/overlay/settings.example.ini" "$root/settings.example.ini"; do
         if [ ! -f "$root/settings.ini" ] && [ -f "$example" ]; then cp "$example" "$root/settings.ini"; fi
     done
+fi
+# (TODO 439) The build's leftovers: deleted when asked (--clean), else only said with how much they are.
+if [ -f "$root/tools/clean_build.sh" ]; then
+    case "$clean" in
+    temp | all)
+        step "Deleting the build's leftovers (tools/clean_build.sh --level $clean)"
+        bash "$root/tools/clean_build.sh" --level "$clean" || echo "warning: some of them could not be deleted (see above); the game plays as before"
+        ;;
+    "")
+        report=$(bash "$root/tools/clean_build.sh" --report 2>/dev/null || true)
+        free=$(printf '%s\n' "$report" | awk -F'|' '$1 == "temp" || $1 == "build" { s += $2 } END { printf "%.1f", s / 1073741824 }')
+        if awk -v f="$free" 'BEGIN { exit !(f >= 0.1) }'; then
+            printf '\nThe build left %s GB that playing never needs. To free it: ./tools/clean_build.sh --level all\n' "$free"
+            echo "(the next update then rebuilds the whole game once; --level temp frees the temporary part at no cost)."
+        fi
+        ;;
+    *) echo "warning: --clean takes temp or all" ;;
+    esac
 fi
 json "SetUpAt=$(git -C "$root" rev-parse HEAD)"
 steplog "setup: ready"

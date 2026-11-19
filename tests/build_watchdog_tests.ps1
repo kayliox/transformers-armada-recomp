@@ -33,6 +33,10 @@ try {
         'Write-Output "USUAL-FIRST:$(Usual ''scan'')|$(Usual ''translate'')|$(Usual ''link'')"'
         '$History["scan"] = 19.2; Write-Output "USUAL-FAST:$(Usual ''scan'')"; $History["scan"] = 200; Write-Output "USUAL-SLOW:$(Usual ''scan'')"; $History = @{}'
         'try { RunLogged $args[0] @("/T", "9", "tfawatchdogtest") $args[1] "The SDK scan" } catch { Write-Output "RUNLOGGED-THREW:$($_.Exception.Message)" }'
+        '$env:TF_WATCHDOG_LONG_SECONDS = "600"'
+        'try { RunLogged $args[0] @("/T", "60", "tfawatchdogtest2") $args[1] "The SDK scan" -TimeLimit 4 } catch { Write-Output "LIMIT-STILL:$($_.Exception.Message)" }'
+        'try { RunLogged $args[2] @("/c", "for /l %i in (0,0,1) do @rem") $args[1] "The SDK scan" -TimeLimit 4 } catch { Write-Output "LIMIT-BUSY:$($_.Exception.Message)" }'
+        'Write-Output "LEFT:$(@(Get-Process -Name ps2_analyzer, ps2_busy -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$(Split-Path $args[0])*" }).Count)"'
         'Write-Output "DONE"'
     ) -join "`r`n"
     [IO.File]::WriteAllText($harness, $code)
@@ -40,7 +44,9 @@ try {
     $steps = Join-Path $tmp "steps.log"
     $env:TF_WATCHDOG_SECONDS = "3"; $env:TF_WATCHDOG_LONG_SECONDS = "6"; $env:TF_STEP_LOG = $steps
     $clock = [Diagnostics.Stopwatch]::StartNew()
-    $out = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $harness $exe $log 2>&1 | ForEach-Object { "$_" })
+    $busy = Join-Path $tmp "ps2_busy.exe"
+    Copy-Item (Join-Path $env:SystemRoot "System32\cmd.exe") $busy
+    $out = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $harness $exe $log $busy 2>&1 | ForEach-Object { "$_" })
     $took = $clock.Elapsed.TotalSeconds
     Remove-Item Env:TF_WATCHDOG_SECONDS, Env:TF_WATCHDOG_LONG_SECONDS, Env:TF_STEP_LOG
     $text = $out -join "`n"
@@ -52,13 +58,18 @@ try {
     Check ($text -match "an antivirus checking or holding ps2_analyzer\.exe, which was just built on this PC" -and $text -match "the disc image: it must be a complete copy") "what to try: the antivirus, the disc"
     Check ($text -match "You can close the setup and run it again: finished steps are kept") "running the setup again is said to be safe"
     Check ($text -match "No progress for \d+ min: an antivirus may hold ps2_analyzer\.exe, or check the disc") "the short last line the setup window shows"
-    Check ($text -match "The SDK scan has been running for \d+ min, far longer than usual") "a program busy far past its time: said too"
+    Check ($text -match "The SDK scan has been running for \d+ min, far longer than usual \(under a minute\), mostly waiting") "a program far past its time: said too, and that it is waiting, not busy (TODO 441)"
+    Check ($text -match "LIMIT-STILL:The SDK scan was stopped after \d+ minutes" -and $text -match "LIMIT-STILL:.*waiting most of the time.*Controlled Folder Access.*external drive.*finished steps are kept") "-TimeLimit, a program that waits: stopped, said in plain words (antivirus, Controlled Folder Access, external drive)"
+    Check ($text -match "LIMIT-BUSY:The SDK scan was stopped after \d+ minutes" -and $text -match "LIMIT-BUSY:.*busy the whole time.*SLUS-20668") "-TimeLimit, a program that is busy: stopped, said in plain words (the disc)"
+    Check ($text -match "LEFT:0") "the stopped programs are gone"
+    Check ((Test-Path $log) -and @(Get-ChildItem ([IO.Path]::GetTempPath()) -Filter "tfa_*_analyzer.log*" -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-5) }).Count -eq 0) "the output, written in the temp folder while it runs, ends in the step's log (nothing left in temp)"
+    Check ($text -notmatch "The step's log: [^\r\n]*tfa_\d+_analyzer\.log") "the watchdog names the step's own log, not the temp file"
     Check ((Test-Path $steps) -and ((Get-Content $steps -Raw) -match "build: The SDK scan has made no progress")) "the step log has it too"
     Check ($text -match "RUNLOGGED-THREW:ps2_analyzer\.exe failed with exit code 1" -and $text -match "DONE") "the program's own ending still decides (waitfor timed out: exit code 1)"
     Check ($took -lt 30) "the watchdog never holds the step up ($([int]$took) s)"
     $said = ([regex]::Matches($text, "has made no progress")).Count
     Check ($said -eq 1) "said once, not every check ($said)"
-    $lines = @($out | Where-Object { $_ -match "^No progress for|far longer than usual\. Check the disc;" })
+    $lines = @($out | Where-Object { $_ -match "^No progress for|far longer than usual\. Check the disc;|min, mostly waiting: an antivirus" })
     Check (($lines | Where-Object { $_.Length -gt 110 }).Count -eq 0) "the short line fits the setup window"
     Check ($text -notmatch [char]0x2014) "no long dashes"
     if ($failed) { Write-Host ($out -join "`n") }
