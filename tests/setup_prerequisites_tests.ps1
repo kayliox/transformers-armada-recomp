@@ -139,7 +139,7 @@ $scenarios = @(
                   (($r.Report -join "`n") -split "Terminal \(Admin\)").Count -eq 3 -and ($r.Report -join "`n") -match "python.org" } },
     @{ Name = "TODO 438: the repair fixes the source, the install then fails for another reason: that reason is shown"; Env = @{ SIM_MISSING = "vs"; SIM_VS = $srcBroken; SIM_VS_AFTER = "-1978335226|Installer failed with exit code: 3010|0" }
        Expect = { param($r) $r.Restart -and ($r.Report -join "`n") -notmatch "Terminal \(Admin\)" } },
-    @{ Name = "TODO 443 (Drift): the Build Tools' installer ends with 2147942512 (0x80070070, disk full): said in plain words, no cast error"
+    @{ Name = "TODO 443: the Build Tools' installer ends with 2147942512 (0x80070070, disk full): said in plain words, no cast error"
        Env = @{ SIM_MISSING = "vs"; SIM_VS = "-1978335226|Starting package install...\nInstaller failed with exit code: 2147942512|0" }
        Expect = { param($r) $r.Still.Count -eq 1 -and ($r.Report -join "`n") -match "not enough free disk space" -and ($r.Report -join "`n") -match "about 7 GB free on Windows' drive" } },
     @{ Name = "TODO 443: winget's code and then the maker's installer's (signed, -2147024784): the last one decides"
@@ -189,7 +189,7 @@ try {
            Match = @("still missing: Python 3.11 or newer, Visual Studio", "sim evidence \(after the installs\)", "What the setup found", "press Modify", "Add python.exe to PATH"); NotMatch = @("prerequisites installed") },
         @{ Name = "TODO 438: source damaged, repair declined, makers' installers fail: how to repair + every link"; Env = @{ SIM_MISSING = "python,vs"; SIM_PYTHON = $srcBroken; SIM_RESET = "1223" }
            Match = @("still missing: Python 3.11 or newer, Visual Studio", "Terminal \(Admin\)", "winget source reset --force", "python.org", "visual-cpp-build-tools"); NotMatch = @("prerequisites installed") },
-        @{ Name = "TODO 443 (Drift's screen): disk full 2147942512 - plain words, never 'Cannot convert'"; Env = @{ SIM_MISSING = "vs"; SIM_VS = "-1978335226|Starting package install...\nInstaller failed with exit code: 2147942512|0" }
+        @{ Name = "TODO 443 (a player's screen): disk full 2147942512 - plain words, never 'Cannot convert'"; Env = @{ SIM_MISSING = "vs"; SIM_VS = "-1978335226|Starting package install...\nInstaller failed with exit code: 2147942512|0" }
            Match = @("still missing: Visual Studio 2022 Build Tools", "not enough free disk space", "about 7 GB free on Windows' drive", "even when the game goes on another drive"); NotMatch = @("Cannot convert", "InvalidCastFromStringToInteger", "prerequisites installed") },
         @{ Name = "success but unseen: the retry phrase tfa-setup.exe looks for"; Env = @{ SIM_MISSING = "vs"; SIM_VS = "0|Successfully installed|0" }
            Match = @("prerequisites installed, but not found yet: vs", "restart the PC"); NotMatch = @() }
@@ -298,9 +298,9 @@ Check ((Get-Command Get-VsUnknownToCmake).Parameters["CMakeHelp"].ParameterType 
 
 Write-Host "5. the Microsoft Store's Python is never used (TODO 444)"
 . (Join-Path $Root "tools\setup_common.ps1")
-Check (Test-StorePythonPath "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\python3.13.exe") "the Store Python's real exe (Nine9hundred's screen)"
-Check (Test-StorePythonPath "C:\Users\x\AppData\Local\Microsoft\WindowsApps\python.exe") "Windows' Store shortcut"
-Check (-not (Test-StorePythonPath "C:\Users\x\AppData\Local\Programs\Python\Python312\python.exe")) "a normal per-user Python"
+Check (Test-StorePythonPath "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\python3.13.exe") "the Store Python's real exe (a player's screen)"
+Check (Test-StorePythonPath "D:\Profiles\player\AppData\Local\Microsoft\WindowsApps\python.exe") "Windows' Store shortcut"
+Check (-not (Test-StorePythonPath "D:\Profiles\player\AppData\Local\Programs\Python\Python312\python.exe")) "a normal per-user Python"
 Check (-not (Test-StorePythonPath "D:\MyWindowsAppsBackup\python.exe")) "a folder that only contains the word"
 # A stand-in py launcher (py.cmd first on PATH) that names a Store Python, as the real launcher and the registry do on
 # such a PC; the exe exists, so only the WindowsApps rule keeps it out.

@@ -1,0 +1,58 @@
+Subject: [PATCH] Exclusive full screen at the start stays exclusive with GL's own swap (TODO 442)
+
+A player's laptop started in exclusive full screen (PS2X_FULLSCREEN=2) showed the picture in the lower right of the
+screen with the desktop around it, every start since 0.8.7; switching to exclusive full screen in the game worked.
+Patch 1007 sets VSync's window flag on GL's swap's first picture (SetWindowState(FLAG_VSYNC_HINT)), and raylib's
+SetWindowState toggles exclusive full screen whenever the window's FLAG_FULLSCREEN_MODE differs from the flags it is
+given (its one state check without "and it was asked for"): the window just put in exclusive full screen at the start
+left it again at once, back at its windowed place with the screen's size. In the game the flag was set long before,
+so a switch there was never undone. The window's own full screen bit is now passed along with VSync's flag. The same
+call on Linux (its GL swap's VSync, older) had the same effect and goes through the same helper.
+
+diff --git a/ps2xRuntime/src/lib/ps2_host_present.cpp b/ps2xRuntime/src/lib/ps2_host_present.cpp
+index 737dde6..a0f07ef 100644
+--- a/ps2xRuntime/src/lib/ps2_host_present.cpp
++++ b/ps2xRuntime/src/lib/ps2_host_present.cpp
+@@ -278,6 +278,24 @@ namespace ps2_host_present
+         g_drawing = true;
+     }
+ 
++    namespace
++    {
++        // (TODO 442) VSync's flag set without leaving exclusive full screen. raylib's SetWindowState toggles exclusive full
++        // screen whenever the window's FLAG_FULLSCREEN_MODE differs from the flags it is given (its one state check without
++        // "and it was asked for"), so SetWindowState(FLAG_VSYNC_HINT) alone, on GL's swap's first picture, took a window
++        // just put in exclusive full screen at the start straight out of it again: the window went back to its windowed
++        // place at the screen's size (a player's picture in the lower right with the desktop around it). Switching in the
++        // game worked, as the flag was set by then. The window's own full screen bit is passed along, so nothing toggles.
++        // (SDL3's window has its own SetWindowState, which reads each flag given: VSync's alone there.)
++        void setVsyncFlag()
++        {
++            unsigned int flags = FLAG_VSYNC_HINT;
++            if (!ps2_platform::sdl3() && IsWindowState(FLAG_FULLSCREEN_MODE))
++                flags |= FLAG_FULLSCREEN_MODE;
++            SetWindowState(flags);
++        }
++    }
++
+     void end()
+     {
+         if (!g_active)
+@@ -291,7 +309,7 @@ namespace ps2_host_present
+             {
+                 applied = wanted;
+                 if (wanted)
+-                    SetWindowState(FLAG_VSYNC_HINT);
++                    setVsyncFlag();
+                 else
+                     ClearWindowState(FLAG_VSYNC_HINT);
+             }
+@@ -309,7 +327,7 @@ namespace ps2_host_present
+             if (glSwapSync && wanted != applied)
+             {
+                 applied = wanted;
+-                SetWindowState(FLAG_VSYNC_HINT);
++                setVsyncFlag();
+                 if (!wanted)
+                     ClearWindowState(FLAG_VSYNC_HINT);
+                 std::fprintf(stderr, "[present] GL's own swap: VSync %s (swap interval %d)\n", wanted ? "on" : "off", wanted);

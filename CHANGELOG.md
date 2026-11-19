@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.9.3
+
+**Fixed**
+- Exclusive full screen fills the screen again when the game starts in it. Since 0.8.7, on PCs where the game shows its pictures without the DXGI swap chain (most laptops with Intel graphics), the game left exclusive full screen right after the start and the picture sat in the lower right of the screen with the desktop around it. Switching to exclusive full screen in the game was not affected.
+
 ## 0.9.2
 
 **New**
