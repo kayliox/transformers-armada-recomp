@@ -63,11 +63,8 @@ namespace nr
             void setAntiAliasing(int) override {}
             void setSupersampling(bool) override {}
             void setSpeedupsForced(int) override {}
-            uint32_t largeImageCap() override { return 0; }
-            uint64_t largeImageBudget() override { return 0; }
             uint64_t largeImageBytes() override { return 0; }
-            uint64_t adapterMemoryMB() override { return 0; }
-            int qualityPreset() override { return 0; }
+            std::optional<uint64_t> adapterMemoryMB() override { return std::nullopt; } // (nr_backend.h since nr_policy.cpp)
             double gpuPictureMs() override { return 0.0; }
             double gpuExtraMs() override { return 0.0; }
             double cpuPictureMs() override { return 0.0; }

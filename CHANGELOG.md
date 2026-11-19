@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.9.1
+
+**Fixed**
+- Linux: the build no longer stops on PCs without the native renderer's build tools (no vkd3d), with errors like "'largeImageCap' marked 'override', but does not override". Builds with vkd3d (including the Steam Deck setup) and Windows were not affected.
+
 ## 0.9.0
 
 **Fixed**
