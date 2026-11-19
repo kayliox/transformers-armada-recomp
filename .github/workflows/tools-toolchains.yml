@@ -28,7 +28,9 @@ jobs:
         include:
           - { os: windows-2022, cmake: "cmake>=4,<5", dir: "src" }
           - { os: windows-2025, cmake: "cmake>=4,<5", dir: "src" }
-          - { os: windows-2025, cmake: "cmake>=3.31,<3.32", dir: "src" }
+          # (CMake 3.31 knows Visual Studio up to 2022 only; windows-2025 images carry a newer one, which the setup
+          #  meets by updating pip's CMake: so CMake 3 is tested where its Visual Studio is)
+          - { os: windows-2022, cmake: "cmake>=3.31,<3.32", dir: "src" }
           - { os: windows-2025, cmake: "cmake>=4,<5", dir: "a folder with spaces" }
     name: ${{ matrix.os }}, ${{ matrix.cmake }}, ${{ matrix.dir }}
     runs-on: ${{ matrix.os }}
