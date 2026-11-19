@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.8.9
+
+**Fixed**
+- A setup or update step that is stuck ("Scanning for SDK functions" sitting for an hour) now says so after 5 minutes, with what usually causes it and what to try: an antivirus holding a program the setup just built, the disc image, a slow disk. Running the setup again keeps the finished steps. The first setup also says how long the scan and the translation usually take.
+
 ## 0.8.8
 
 **Fixed**

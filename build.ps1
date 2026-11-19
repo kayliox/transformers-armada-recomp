@@ -53,6 +53,8 @@ $Root = $PSScriptRoot
 . (Join-Path $Root "tools\install_layout.ps1")
 # (TODO 310) Each step to TF_STEP_LOG with its time, when the setup or the update set it (tools\step_log.ps1)
 . (Join-Path $Root "tools\step_log.ps1")
+# (TODO 441) The stall watchdog over the long one-program steps (tools\step_watchdog.ps1: Start-StepWatchdog)
+. (Join-Path $Root "tools\step_watchdog.ps1")
 # (TODO 310) -Gentle: for a PC that resets or overheats under a long full load. The build and every program it starts
 # (Windows passes the lower priority on to them) run below normal, and MSBuild and the compiler use half the processor
 # threads - "/m" and the compiler's own count (MultiToolTask) both held to it. Without it the build is as before.
@@ -150,9 +152,20 @@ function Format-Estimate([double]$seconds) {
     if ($seconds -lt 90) { return "about a minute" }
     return "about {0} min" -f [int][Math]::Round($seconds / 60)
 }
-# (a stage's time from earlier builds on this PC: "(usually about 2 min here)")
+# (a stage's time from earlier builds on this PC: "(usually about 2 min here)"; TODO 441: on a first build, the time it
+# takes on most PCs, so a step that sits far longer than that is seen to be stuck - a player's SDK scan sat for an hour)
+$FirstTimes = @{ scan = 30; functions = 60; translate = 60; sync = 20 }   # (seconds: the Testbench's 26 / 56 / 30 / 14, rounded up)
+function Get-StageSeconds([string]$stage) {
+    if ($History.ContainsKey($stage)) { return [double]$History[$stage] }
+    if ($FirstTimes.ContainsKey($stage)) { return [double]$FirstTimes[$stage] }
+    return 0.0
+}
 function Usual([string]$stage) {
-    if ($History.ContainsKey($stage) -and [double]$History[$stage] -ge 20) { return " (usually $(Format-Estimate ([double]$History[$stage])) here)" }
+    if ($History.ContainsKey($stage)) {
+        if ([double]$History[$stage] -ge 20) { return " (usually $(Format-Estimate ([double]$History[$stage])) here)" }
+        return ""
+    }
+    if ($FirstTimes.ContainsKey($stage)) { return " (usually $(Format-Estimate $FirstTimes[$stage]))" }
     return ""
 }
 
@@ -205,17 +218,21 @@ function Run {
     if ($LASTEXITCODE -ne 0) { Assert-NotBlocked $Exe $LASTEXITCODE; throw "$Exe failed with exit code $LASTEXITCODE" }
 }
 function RunLogged {
-    param([string]$Exe, [string[]]$Arguments, [string]$Log)
+    param([string]$Exe, [string[]]$Arguments, [string]$Log, [string]$What = "")
     # The output goes into the log file directly, not through PowerShell: the analyzer writes ~9 MB
     # of lines, which PowerShell 5 passes one by one - with update.ps1's transcript running, that
     # alone took ~80 s instead of ~8 (TODO 115). Its error output is added at the end.
     $quoted = @($Arguments | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } })
     $err = "$Log.stderr"
     Assert-NotBlocked $Exe
+    # (TODO 441) the watchdog: says so when the program sits still for minutes (Start-StepWatchdog)
+    $watch = $null
+    if ($What) { try { $watch = Start-StepWatchdog -What $What -Exe $Exe -Log $Log -Expected (Get-StageSeconds $script:stage) -Folder $Root } catch {} }
     try {
         $p = Start-Process -FilePath $Exe -ArgumentList $quoted -WorkingDirectory (Get-Location).ProviderPath -NoNewWindow -Wait -PassThru `
             -RedirectStandardOutput $Log -RedirectStandardError $err
     } catch { Assert-NotBlocked $Exe -1 "$($_.Exception.Message)"; throw }
+    finally { Stop-StepWatchdog $watch }
     if (Test-Path -LiteralPath $err) {
         $bytes = [IO.File]::ReadAllBytes($err)
         if ($bytes.Length) { $f = [IO.File]::Open($Log, [IO.FileMode]::Append); try { $f.Write($bytes, 0, $bytes.Length) } finally { $f.Dispose() } }
@@ -653,7 +670,7 @@ if (-not $SkipRecompile) {
                 Remove-Item $scanFile -ErrorAction SilentlyContinue
                 Copy-Item (Join-Path $Game $ElfName) $Work -Force
                 Step "Scanning for SDK functions$(Usual 'scan')" "scan"
-                RunLogged (Join-Path $ToolsBuild "ps2xAnalyzer\$Config\ps2_analyzer.exe") @($ElfName, "analyzer.toml") (Join-Path $Work "analyzer.log")
+                RunLogged (Join-Path $ToolsBuild "ps2xAnalyzer\$Config\ps2_analyzer.exe") @($ElfName, "analyzer.toml") (Join-Path $Work "analyzer.log") "The SDK scan"
                 Set-Content -Path $scanFile -Value $scanText -NoNewline
             }
             $configText = Get-ConfigText
@@ -669,7 +686,7 @@ if (-not $SkipRecompile) {
 
             Step "Translating MIPS to C++$(Usual 'translate')" "translate"
             if (Test-Path staging) { Remove-Item -Recurse -Force staging }
-            RunLogged (Join-Path $ToolsBuild "ps2xRecomp\$Config\ps2_recomp.exe") @("transformers.toml") (Join-Path $Work "recomp.log")
+            RunLogged (Join-Path $ToolsBuild "ps2xRecomp\$Config\ps2_recomp.exe") @("transformers.toml") (Join-Path $Work "recomp.log") "The translation"
 
             # Install only what changed, so the compile below is incremental.
             Step "Updating generated sources" "sync"
