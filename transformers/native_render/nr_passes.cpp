@@ -185,7 +185,10 @@ namespace nr
                 // from the eye (Ez ~ -1) gave its triangle coordinates far out on the map: single triangles of the
                 // reflective characters flashed bright as they moved.
                 static const bool vertexDivide = std::getenv("TF_NATIVE_REFLECTQ") && *std::getenv("TF_NATIVE_REFLECTQ") == '0';
-                reflection.mode[1] = vertexDivide ? 3.0f : 9.0f;
+                // (TODO 436) Its CLAMP held half a texel from the edge as the GS holds it (the shader's reflectEdge);
+                // TF_NATIVE_REFLECTHOLD=0: by the pixel's footprint as before (9.25: still mode 9 to the vertex shader).
+                static const bool footHold = std::getenv("TF_NATIVE_REFLECTHOLD") && *std::getenv("TF_NATIVE_REFLECTHOLD") == '0';
+                reflection.mode[1] = vertexDivide ? 3.0f : footHold ? 9.25f : 9.0f;
                 for (int q = 0; q < 11; ++q)
                     copy(reflection.p[q], lighting[q]);
                 copy(reflection.p[11], output[16]);

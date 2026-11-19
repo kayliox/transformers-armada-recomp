@@ -22,6 +22,15 @@ $global:SimMissing = [System.Collections.Generic.List[string]]::new()
 foreach ($n in $env:SIM_MISSING.Split(',')) { if ($n) { $global:SimMissing.Add($n) } }
 $global:SimCalls = [System.Collections.Generic.List[string]]::new()
 $global:SimVsListed = [bool]$env:SIM_VS_NOCPP
+$global:SimSourceFixed = $false
+# (TODO 438: winget's source repair, SIM_RESET = its exit code (default 0); after a repair with exit 0 each install uses
+# SIM_<TOOL>_AFTER when that is given)
+function Repair-WingetSource {
+    $global:SimCalls.Add("reset")
+    $c = if ($env:SIM_RESET) { [int]$env:SIM_RESET } else { 0 }
+    if ($c -eq 0) { $global:SimSourceFixed = $true }
+    return @{ Code = $c; Output = "winget source reset: exit code $c" }
+}
 function Get-WingetProblem { if ($env:SIM_WINGET) { return $env:SIM_WINGET } else { return $null } }
 function Get-MissingPrerequisites { return @($global:SimMissing) }
 function Update-PathFromRegistry { }
@@ -63,6 +72,8 @@ function Invoke-PrerequisiteCommand([string]$CommandLine) {
     $global:SimCalls.Add($tool)
     if ($tool -eq "vs" -and $env:SIM_VS_LATE) { $global:SimVsListed = $true }
     $spec = [Environment]::GetEnvironmentVariable("SIM_" + $tool.ToUpper())   # "<code>|<output>|<installed 0/1>"
+    $after = [Environment]::GetEnvironmentVariable("SIM_" + $tool.ToUpper() + "_AFTER")
+    if ($global:SimSourceFixed -and $after) { $spec = $after }
     if (-not $spec) { $spec = "0|Successfully installed|1" }
     $p = $spec.Split('|')
     if ($p[2] -eq "1") { [void]$global:SimMissing.Remove($tool) }
@@ -73,6 +84,9 @@ function Invoke-PrerequisiteCommand([string]$CommandLine) {
 
 # (winget's words on the second player's screenshot)
 $already = "-1978335189|Found an existing package already installed. Trying to upgrade the installed package...\nNo available upgrade found.\nNo newer package versions are available from the configured sources.|0"
+# (winget's words on a player's screenshot, TODO 438: its source catalogue damaged)
+$srcBroken = "-1978335217|Failed when opening source(s); try the 'source reset' command if the problem persists.\nAn unexpected error occurred while executing the command:\n0x8a15000f : Data required by the source is missing|0"
+$okInstall = "0|Successfully installed|1"
 $scenarios = @(
     @{ Name = "everything installs"; Env = @{ SIM_MISSING = "git,python,vs" }
        Expect = { param($r) $r.Still.Count -eq 0 } },
@@ -110,12 +124,24 @@ $scenarios = @(
        Expect = { param($r) $r.Still.Count -eq 0 -and $global:SimCalls -contains "direct-vs" } },
     @{ Name = "winget's source broken"; Env = @{ SIM_MISSING = "git"; SIM_GIT = "-1978335217|Failed when searching source: winget\nAn unexpected error occurred while executing the command: 0x8a15000f|0" }
        Expect = { param($r) ($r.Report -join "`n") -match "source reset" -and ($r.Report -join "`n") -match "git-scm.com" } },
+    @{ Name = "TODO 438: source damaged, repaired once, every install tried again and works"; Env = @{ SIM_MISSING = "git,python,vs"; SIM_GIT = $srcBroken; SIM_PYTHON = $srcBroken; SIM_VS = $srcBroken
+                 SIM_GIT_AFTER = $okInstall; SIM_PYTHON_AFTER = $okInstall; SIM_VS_AFTER = $okInstall }
+       Expect = { param($r) $r.Still.Count -eq 0 -and ($global:SimCalls -join ",") -eq "git,reset,git,python,vs" } },
+    @{ Name = "TODO 438: repair declined: Python and the Build Tools from their makers, Git by hand, how to repair"; Env = @{ SIM_MISSING = "git,python,vs"; SIM_GIT = $srcBroken; SIM_RESET = "1223"; SIM_DIRECT_PYTHON = "0|1"; SIM_DIRECT_VS = "0|1" }
+       Expect = { param($r) ($r.Still -join ",") -eq "git" -and ($global:SimCalls -join ",") -eq "git,reset,direct-python,direct-vs" -and
+                  ($r.Report -join "`n") -match "Terminal \(Admin\)" -and ($r.Report -join "`n") -match "winget source reset --force" -and
+                  ($r.Report -join "`n") -match "permission was not given" -and ($r.Report -join "`n") -match "git-scm.com" } },
+    @{ Name = "TODO 438: repaired but still damaged: no second repair, makers' installers, how to repair"; Env = @{ SIM_MISSING = "git,python"; SIM_GIT = $srcBroken; SIM_DIRECT_PYTHON = "1603|0" }
+       Expect = { param($r) $r.Still.Count -eq 2 -and ($global:SimCalls -join ",") -eq "git,reset,git,direct-python" -and
+                  (($r.Report -join "`n") -split "Terminal \(Admin\)").Count -eq 3 -and ($r.Report -join "`n") -match "python.org" } },
+    @{ Name = "TODO 438: the repair fixes the source, the install then fails for another reason: that reason is shown"; Env = @{ SIM_MISSING = "vs"; SIM_VS = $srcBroken; SIM_VS_AFTER = "-1978335226|Installer failed with exit code: 3010|0" }
+       Expect = { param($r) $r.Restart -and ($r.Report -join "`n") -notmatch "Terminal \(Admin\)" } },
     @{ Name = "ARM64 PC"; Env = @{ SIM_MISSING = "vs"; SIM_VS = "1|Installer failed with exit code: 1|0"; PROCESSOR_ARCHITECTURE = "ARM64" }
        Expect = { param($r) ($r.Report -join "`n") -match "ARM" -and ($r.Report -join "`n") -match "exit code 1" } }
 )
 
 $simVars = @("SIM_MISSING", "SIM_WINGET", "SIM_GIT", "SIM_PYTHON", "SIM_VS", "SIM_VS_NOCPP", "SIM_VS_MODIFY", "SIM_VS_ACTION", "SIM_VS_LATE",
-             "SIM_PY_NOPIP", "SIM_DIRECT_PYTHON", "SIM_DIRECT_VS")
+             "SIM_PY_NOPIP", "SIM_DIRECT_PYTHON", "SIM_DIRECT_VS", "SIM_RESET", "SIM_GIT_AFTER", "SIM_PYTHON_AFTER", "SIM_VS_AFTER")
 $arch = $env:PROCESSOR_ARCHITECTURE
 
 Write-Host "1. Install-MissingPrerequisites"
@@ -149,6 +175,8 @@ try {
            Match = @("App Installer", "git-scm.com", "python.org", "Add python.exe to PATH", "Desktop development with C\+\+"); NotMatch = @("prerequisites installed") },
         @{ Name = "second player's screen ('already installed' x2): findings + Modify, no retry phrase"; Env = @{ SIM_MISSING = "python,vs"; SIM_PYTHON = $already; SIM_VS = $already }
            Match = @("still missing: Python 3.11 or newer, Visual Studio", "sim evidence \(after the installs\)", "What the setup found", "press Modify", "Add python.exe to PATH"); NotMatch = @("prerequisites installed") },
+        @{ Name = "TODO 438: source damaged, repair declined, makers' installers fail: how to repair + every link"; Env = @{ SIM_MISSING = "python,vs"; SIM_PYTHON = $srcBroken; SIM_RESET = "1223" }
+           Match = @("still missing: Python 3.11 or newer, Visual Studio", "Terminal \(Admin\)", "winget source reset --force", "python.org", "visual-cpp-build-tools"); NotMatch = @("prerequisites installed") },
         @{ Name = "success but unseen: the retry phrase tfa-setup.exe looks for"; Env = @{ SIM_MISSING = "vs"; SIM_VS = "0|Successfully installed|0" }
            Match = @("prerequisites installed, but not found yet: vs", "restart the PC"); NotMatch = @() }
     )

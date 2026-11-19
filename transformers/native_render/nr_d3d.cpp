@@ -819,7 +819,13 @@ float4 psColour(VsOut i)
         // (A CLAMP mode with + 0.25, TF_NATIVE_CLAMPFOOT=0: the footprint taken whole, as before.)
         const float2 halfTexel = float2(0.5 / tw, 0.5 / th), foot = max(abs(uvx), abs(uvy));
         const bool footWhole = frac(wrapS.x) > 0.125 || frac(wrapT.x) > 0.125;
-        const float2 hold = max(halfTexel, footWhole ? foot : lerp(foot, halfTexel, saturate(foot * 4.0 - 1.0)));
+        // (TODO 436) The lit metal's reflection (ST mode 9) held half a texel from the edge, as the GS clamps it: near the
+        // sphere map's rim its coordinates run far past 0..1 and the footprint grows, and a hold by the footprint pulled
+        // them a quarter of the map inwards - onto its bright rings: bright streaks down Optimus' face and Red Alert's
+        // chest that the PS2 (PCSX2, the emulated renderer) draws in the edge texels' colour. TF_NATIVE_REFLECTHOLD=0:
+        // the footprint's hold, as before (ST mode 9.25).
+        const bool reflectEdge = (int)mode.y == 9 && frac(mode.y) < 0.125;
+        const float2 hold = reflectEdge ? halfTexel : max(halfTexel, footWhole ? foot : lerp(foot, halfTexel, saturate(foot * 4.0 - 1.0)));
         if (wrapS.x > 1.5)
             i.uv.x = clamp(i.uv.x, (wrapS.y + 0.5) / wrapS.w, (wrapS.z + 0.5) / wrapS.w);
         else if (wrapS.x > 0.5)

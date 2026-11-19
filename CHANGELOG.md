@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.8.8
+
+**Fixed**
+- The setup no longer stops at Tools when Windows' package manager (winget) has a damaged package list ("0x8a15000f: Data required by the source is missing"). It now repairs the list itself (Windows asks for permission once: click Yes) and tries again; if that does not help, it says how to repair it by hand or where to download Git, Python and the Build Tools yourself. Python and the Build Tools then come straight from their makers.
+- Chrome characters (Optimus' face, Red Alert's chest and the like): the bright streaks along their edges are gone. The reflection now stops at the edge of its picture as on the PS2, instead of reaching back into its bright middle.
+
 ## 0.8.7
 
 **New**

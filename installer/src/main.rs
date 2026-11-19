@@ -689,12 +689,27 @@ impl Job {
             let _ = tx.send(Msg::Detail(STEP_TOOLS, "installing Git (winget)".into()));
             // (winget's exit code does not decide: "already installed, no newer version" is an error
             // code too - a player's setup stopped on it. The check after it decides.)
-            let r = self.exec("winget", &["install", "--id", "Git.Git", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements",
-                "--disable-interactivity"], None, &path_env, tx, STEP_TOOLS, &log);
+            let git_args = ["install", "--id", "Git.Git", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements",
+                "--disable-interactivity"];
+            let mut r = self.exec("winget", &git_args, None, &path_env, tx, STEP_TOOLS, &log);
             path_env = with_git_dir(&fresh_path(&path_env));
+            // (TODO 438) winget's source (its package list) damaged: every winget install fails the same way. Repaired once
+            // ("winget source reset --force", Windows asks for permission), then the install once more.
+            let mut repair = None;
+            if !has(&path_env, "git") && needs_source_repair(&r) {
+                let _ = tx.send(Msg::Detail(STEP_TOOLS, "repairing winget's package list: Windows asks for permission, click Yes".into()));
+                let outcome = source_repair_outcome(&self.exec("powershell", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", SOURCE_RESET_PS],
+                                                               None, &path_env, tx, STEP_TOOLS, &log));
+                if outcome == SourceRepair::Repaired {
+                    let _ = tx.send(Msg::Detail(STEP_TOOLS, "installing Git (winget, once more after the repair)".into()));
+                    r = self.exec("winget", &git_args, None, &path_env, tx, STEP_TOOLS, &log);
+                    path_env = with_git_dir(&fresh_path(&path_env));
+                }
+                repair = Some(outcome);
+            }
             if !has(&path_env, "git") {
                 return Err(match r {
-                    Err(e) => format!("{e}\n\n{}", git_failure_text(&e)),
+                    Err(e) => format!("{e}\n\n{}", git_failure_text(&e, repair)),
                     Ok(()) => "Git was installed but is not found: restart the setup".into(),
                 });
             }
@@ -1797,10 +1812,71 @@ fn waiting_for_permission(recent_lower: &str) -> bool {
         || recent_lower.contains("asks for permission") // (setup.ps1's own steps: the Build Tools, Visual Studio's installer)
 }
 
-/// What to do when Git could not be installed, from what winget said (`e`: its last lines, or why it did not start).
-fn git_failure_text(e: &str) -> String {
+/// (TODO 438) Whether winget's words say its source (the package list it installs from) is damaged or missing: every
+/// winget install then fails the same way. A player's screen (2026-11-18): "Failed when opening source(s); try the 'source
+/// reset' command if the problem persists. ... 0x8a15000f : Data required by the source is missing". Keep in step with
+/// tools\setup_common.ps1 Test-WingetSourceBroken (setup.ps1's own installs: Python, the Build Tools).
+fn winget_source_broken(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    ["0x8a15000f", "0x8a150044", "-1978335217", "-1978335164", "data required by the source is missing", "failed when opening source",
+     "failed when searching source", "failed in attempting to update the source", "source reset", "no sources match the given value",
+     "no sources are configured"]
+        .iter().any(|w| lower.contains(w))
+}
+
+/// (TODO 438) Whether a failed winget install calls for the source repair (asked once, after the first try).
+fn needs_source_repair(install: &Result<(), String>) -> bool {
+    matches!(install, Err(e) if winget_source_broken(e))
+}
+
+/// (TODO 438) How the repair of winget's source went.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SourceRepair {
+    Repaired,
+    Declined, // (Windows' permission question declined or unanswered)
+    Failed,
+}
+
+/// (TODO 438) "winget source reset --force" needs administrator rights: run through Windows' permission question, the same
+/// way setup.ps1 runs Visual Studio's installer (Start-Process -Verb RunAs). Its output goes to a file (an elevated
+/// program's output cannot be read directly) and is shown in the log. Exit 1223: the permission was not given.
+const SOURCE_RESET_PS: &str = concat!(
+    "$f = Join-Path $env:TEMP 'tfa_winget_source_reset.txt'; Remove-Item -LiteralPath $f -ErrorAction SilentlyContinue; ",
+    "Write-Host \"Repairing winget's package list (winget source reset --force). Windows asks for permission: click Yes\"; ",
+    "try { $p = Start-Process -FilePath cmd.exe -ArgumentList ('/c winget source reset --force > \"' + $f + '\" 2>&1') -Verb RunAs -WindowStyle Hidden -Wait -PassThru } ",
+    "catch { if ($_.Exception.NativeErrorCode -eq 1223 -or $_.Exception.Message -match 'canceled by the user|cancelled by the user') { ",
+    "Write-Host \"winget source reset: Windows' permission was not given\"; exit 1223 }; ",
+    "Write-Host \"winget source reset did not start: $($_.Exception.Message)\"; exit 1 }; ",
+    "if (Test-Path -LiteralPath $f) { Get-Content -LiteralPath $f | ForEach-Object { Write-Host $_ }; Remove-Item -LiteralPath $f -ErrorAction SilentlyContinue }; ",
+    "Write-Host \"winget source reset: exit code $($p.ExitCode)\"; exit $p.ExitCode");
+
+/// (TODO 438) The repair's outcome, from how its PowerShell step ended.
+fn source_repair_outcome(r: &Result<(), String>) -> SourceRepair {
+    match r {
+        Ok(()) => SourceRepair::Repaired,
+        Err(e) if e.contains("permission was not given") => SourceRepair::Declined,
+        Err(_) => SourceRepair::Failed,
+    }
+}
+
+/// What to do when Git could not be installed, from what winget said (`e`: its last lines, or why it did not start) and
+/// how the repair of winget's source went, if one was tried.
+fn git_failure_text(e: &str, repair: Option<SourceRepair>) -> String {
     let lower = e.to_ascii_lowercase();
     let by_hand = "Or install Git by hand: https://git-scm.com/download/win (keep the default choices), then run the setup again.";
+    // (TODO 438) winget's package list damaged, and the setup's own repair declined or no help
+    if repair == Some(SourceRepair::Declined) || winget_source_broken(e) {
+        let tried = match repair {
+            Some(SourceRepair::Declined) => "The setup tried to repair it, but Windows' permission was not given: run the setup again and click Yes. Or repair it yourself: ",
+            Some(SourceRepair::Repaired) | Some(SourceRepair::Failed) => "The setup's own repair did not help. To repair it yourself: ",
+            None => "To repair it: ",
+        };
+        return format!("Windows' package manager (winget) has a damaged package list, so the setup cannot install Git with it.\n{tried}\
+                        right-click the Start button, open 'Terminal (Admin)' (or 'Windows PowerShell (Admin)'), run: winget source reset --force , \
+                        then run the setup again.\n{by_hand}\nPython and the Visual Studio Build Tools come next; to install them by hand \
+                        too: https://www.python.org/downloads/windows/ (tick 'Add python.exe to PATH') and \
+                        https://visualstudio.microsoft.com/visual-cpp-build-tools/ (tick 'Desktop development with C++').");
+    }
     // (exit code 2: Git's installer when Windows' question was declined or closed itself unanswered - the ThinkPad test)
     let cancelled = lower.contains("you cancelled the installation")
         || lower.lines().any(|l| l.trim_end().ends_with("exit code: 2") || l.trim_end().ends_with("exit code: 1223") || l.trim_end().ends_with("exit code: 1602"));
@@ -2706,11 +2782,85 @@ mod path_tests {
 
     #[test]
     fn git_failures_say_what_to_do() {
-        assert!(git_failure_text("You cancelled the installation.\nInstaller failed with exit code: 2").contains("click Yes"));
-        assert!(git_failure_text("Installer failed with exit code: 2").contains("nobody answered"));
-        assert!(!git_failure_text("Installer failed with exit code: 21").contains("nobody answered"));
-        assert!(git_failure_text("winget could not be started: program not found").contains("App Installer"));
-        assert!(git_failure_text("something else").contains("https://git-scm.com/download/win"));
+        assert!(git_failure_text("You cancelled the installation.\nInstaller failed with exit code: 2", None).contains("click Yes"));
+        assert!(git_failure_text("Installer failed with exit code: 2", None).contains("nobody answered"));
+        assert!(!git_failure_text("Installer failed with exit code: 21", None).contains("nobody answered"));
+        assert!(git_failure_text("winget could not be started: program not found", None).contains("App Installer"));
+        assert!(git_failure_text("something else", None).contains("https://git-scm.com/download/win"));
+    }
+}
+
+// (TODO 438) not Windows-only: these run on Linux too (debianbox)
+#[cfg(test)]
+mod winget_source_tests {
+    use super::*;
+
+    // (TODO 438) the player's screen: winget's source damaged
+    const SOURCE_DAMAGED: &str = "Failed when opening source(s); try the 'source reset' command if the problem persists.\n\
+                                  An unexpected error occurred while executing the command:\n0x8a15000f : Data required by the source is missing";
+
+    #[test]
+    fn a_damaged_winget_source_is_recognised() {
+        assert!(winget_source_broken(SOURCE_DAMAGED));
+        assert!(winget_source_broken("An unexpected error occurred while executing the command:\n0x8A15000F : Data required by the source is missing"));
+        assert!(winget_source_broken("Failed when searching source: winget"));
+        assert!(winget_source_broken("Failed in attempting to update the source: winget"));
+        assert!(winget_source_broken("No sources match the given value: winget"));
+        assert!(winget_source_broken("There are no sources configured; add one with 'source add' or reset to defaults with 'source reset'"));
+        assert!(winget_source_broken("Installer failed with exit code: -1978335217"));
+        // (other failures are not: the permission question, a changed download, "already installed", no winget at all)
+        for other in ["You cancelled the installation.\nInstaller failed with exit code: 2", "Installer hash does not match",
+                      "Found an existing package already installed. No newer package versions are available from the configured sources.",
+                      "winget could not be started: program not found", "Downloading https://github.com/git-for-windows/git/releases/x.exe", ""] {
+            assert!(!winget_source_broken(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn the_repair_is_tried_only_on_a_damaged_source() {
+        assert!(needs_source_repair(&Err(SOURCE_DAMAGED.to_string())));
+        assert!(!needs_source_repair(&Err("Installer failed with exit code: 2".to_string())));
+        assert!(!needs_source_repair(&Ok(())));
+        assert_eq!(source_repair_outcome(&Ok(())), SourceRepair::Repaired);
+        assert_eq!(source_repair_outcome(&Err("Repairing ...\nwinget source reset: Windows' permission was not given".into())), SourceRepair::Declined);
+        assert_eq!(source_repair_outcome(&Err("winget source reset: exit code -1978335217".into())), SourceRepair::Failed);
+        assert_eq!(source_repair_outcome(&Err("winget source reset did not start: x".into())), SourceRepair::Failed);
+        // (the elevated reset as PowerShell runs it: RunAs, the output kept in a file, 1223 for a declined question)
+        assert!(SOURCE_RESET_PS.contains("-Verb RunAs") && SOURCE_RESET_PS.contains("winget source reset --force") && SOURCE_RESET_PS.contains("exit 1223"));
+        // (its first line starts the window's "a shield button flashes in the taskbar" hint)
+        assert!(waiting_for_permission(&SOURCE_RESET_PS.to_ascii_lowercase()));
+    }
+
+    #[test]
+    fn a_damaged_winget_source_says_how_to_repair_it() {
+        for repair in [None, Some(SourceRepair::Repaired), Some(SourceRepair::Failed), Some(SourceRepair::Declined)] {
+            let t = git_failure_text(SOURCE_DAMAGED, repair);
+            assert!(t.contains("damaged package list") && t.contains("Terminal (Admin)") && t.contains("winget source reset --force"), "{t}");
+            assert!(t.contains("https://git-scm.com/download/win") && t.contains("python.org") && t.contains("visual-cpp-build-tools"), "{t}");
+            assert!(!t.contains('\u{2014}') && !t.contains('\u{2013}'), "no dashes: {t}");
+        }
+        assert!(git_failure_text(SOURCE_DAMAGED, Some(SourceRepair::Declined)).contains("permission was not given"));
+        // (declined: the last lines are the reset's own, not winget's)
+        assert!(git_failure_text("winget source reset: Windows' permission was not given", Some(SourceRepair::Declined)).contains("click Yes"));
+        assert!(git_failure_text(SOURCE_DAMAGED, Some(SourceRepair::Failed)).contains("did not help"));
+    }
+
+    /// (TODO 438) The real repair, the way the setup runs it (powershell -Command, Windows' permission question): it
+    /// CHANGES the PC's winget sources (back to Windows' defaults), so it runs only by hand on a test PC:
+    /// TF_TEST_SOURCE_RESET=1 <test exe> --ignored --exact winget_source_tests::the_real_repair --nocapture
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn the_real_repair() {
+        if std::env::var("TF_TEST_SOURCE_RESET").as_deref() != Ok("1") {
+            return;
+        }
+        let out = Command::new("powershell").args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", SOURCE_RESET_PS]).output().unwrap();
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        println!("{text}");
+        let r = if out.status.success() { Ok(()) } else { Err(text.clone()) };
+        println!("outcome: {:?} (exit {:?})", source_repair_outcome(&r), out.status.code());
+        assert!(text.contains("winget source reset: exit code 0"), "{text}");
     }
 }
 

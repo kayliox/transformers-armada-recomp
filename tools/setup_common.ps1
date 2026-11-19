@@ -345,6 +345,45 @@ function Get-WingetProblem {
     return $null
 }
 
+# (TODO 438) Whether winget's words say its source (the package list it installs from) is damaged or missing: every
+# winget install then fails the same way, Git, Python and the Build Tools alike. A player's screen (2026-11-18): "Failed
+# when opening source(s); try the 'source reset' command if the problem persists. ... 0x8a15000f : Data required by the
+# source is missing". (0x8a15000f = -1978335217 data missing, 0x8a150044 = -1978335164; the words cover the rest: a
+# removed source, a list that could not be updated.) Keep in step with installer\src\main.rs winget_source_broken.
+function Test-WingetSourceBroken([string]$Output) {
+    return ($Output -match "0x8a15000f|0x8a150044|-1978335217|-1978335164|Data required by the source is missing|Failed when opening source|Failed when searching source|Failed in attempting to update the source|source reset|No sources match the given value|no sources are configured")
+}
+
+# (TODO 438) What a player does when winget's source stays damaged (the setup's own repair did not help or was declined).
+function Get-WingetSourceText {
+    return "Windows' package manager (winget) has a damaged package list, so the setup cannot install the tools with it. To repair it: right-click the Start button, open 'Terminal (Admin)' (or 'Windows PowerShell (Admin)'), run: winget source reset --force , then run the setup again. Or install the tools by hand (links below)."
+}
+
+# (TODO 438) Repairs winget's source: "winget source reset --force", which needs administrator rights, so Windows asks for
+# permission (the same way as Visual Studio's installer above). Its output goes to a file (an elevated program's output
+# cannot be read directly) and is shown here. Returns @{ Code; Output } (1223: Windows' question declined or unanswered).
+function Repair-WingetSource {
+    $file = Join-Path $env:TEMP "tfa_winget_source_reset.txt"
+    Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue
+    Write-Host "`n==> Repairing winget's package list (winget source reset --force). Windows asks for permission: click Yes" -ForegroundColor Cyan
+    try {
+        $p = Start-Process -FilePath "cmd.exe" -ArgumentList "/c winget source reset --force > `"$file`" 2>&1" -Verb RunAs -WindowStyle Hidden -Wait -PassThru
+        $code = $p.ExitCode
+    } catch {
+        if ($_.Exception.NativeErrorCode -eq 1223 -or $_.Exception.Message -match "canceled by the user|cancelled by the user") {
+            Write-Host "winget source reset: Windows' permission was not given"
+            return @{ Code = 1223; Output = "winget source reset: Windows' permission was not given" }
+        }
+        Write-Host "winget source reset did not start: $($_.Exception.Message)"
+        return @{ Code = -1; Output = "winget source reset did not start: $($_.Exception.Message)" }
+    }
+    $text = if (Test-Path -LiteralPath $file) { (Get-Content -LiteralPath $file -ErrorAction SilentlyContinue) -join "`n" } else { "" }
+    Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue
+    if ($text) { Write-Host $text }
+    Write-Host "winget source reset: exit code $code"
+    return @{ Code = $code; Output = "$text`nwinget source reset: exit code $code" }
+}
+
 # What an installer's exit code and last lines mean, in words a player can act on ("" when nothing is known).
 function Get-InstallFailureMeaning([int]$Code, [string]$Output) {
     # (winget's own exit code says only "the installer failed"; the installer's is in its output)
@@ -362,7 +401,7 @@ function Get-InstallFailureMeaning([int]$Code, [string]$Output) {
         return "winget says it is already installed, yet the setup does not find a working one (for Python: 3.11 or newer with pip)."
     }
     if ($Code -eq 8006) { return "another Visual Studio installer was busy: close it (or restart the PC) and run the setup again." }
-    if ($Output -match "0x8a15000f|0x8a150044|Failed when searching source|Failed in attempting to update the source") { return "winget could not read its package list (no network, or its source is broken: 'winget source reset --force' in an administrator PowerShell repairs it)." }
+    if (Test-WingetSourceBroken $Output) { return (Get-WingetSourceText) }
     if ($Output -match "0x80070070|not enough (disk )?space|There is not enough space") { return "not enough free disk space (the Build Tools need about 7 GB on C:)." }
     return ""
 }
@@ -429,6 +468,10 @@ function Install-MissingPrerequisites([string[]]$Missing) {
     $restart = $false
     $retry = $false
     $wingetProblem = Get-WingetProblem
+    # (TODO 438) winget's source: "" until a winget install says it is damaged; then "repaired" (reset done, the install
+    # tried once more), "declined" (Windows' permission not given) or "failed" (the reset did not help). Once is enough
+    # for all the tools: Git, Python and the Build Tools share the one source.
+    $sourceState = ""
     $arm = ($env:PROCESSOR_ARCHITECTURE -eq "ARM64" -or $env:PROCESSOR_ARCHITEW6432 -eq "ARM64")
     if ($wingetProblem) {
         Write-Host "warning: $wingetProblem - the setup downloads the tools from their makers instead." -ForegroundColor Yellow
@@ -459,13 +502,29 @@ function Install-MissingPrerequisites([string[]]$Missing) {
             if (& $gone) { continue }
         }
         # 2. winget, else the maker's own installer:
-        if (-not $wingetProblem -and $fix.Count -eq 0) {
+        # (TODO 438: not again once its source is known to stay damaged: the makers' installers, else the steps by hand)
+        if (-not $wingetProblem -and $fix.Count -eq 0 -and $sourceState -notin "declined", "failed") {
             Write-Host "`n==> Installing $($how[$m][0])" -ForegroundColor Cyan
             if ($m -eq "vs") { Write-Host "(a few GB: its installer shows its progress; Windows asks for permission first - click Yes)" }
             $r = Invoke-PrerequisiteCommand $how[$m][1]
             $code = $r.Code
             $out = $r.Output
             if (& $gone) { continue }
+            # (TODO 438) winget's source damaged: repaired once (Windows asks for permission), then this install once more.
+            # (a source still damaged after an earlier tool's repair: no second repair, no second try)
+            if ((Test-WingetSourceBroken "$out") -and $sourceState -eq "repaired") { $sourceState = "failed" }
+            if ((Test-WingetSourceBroken "$out") -and $sourceState -eq "") {
+                $rs = Repair-WingetSource
+                $sourceState = if ($rs.Code -eq 1223) { "declined" } elseif ($rs.Code -eq 0) { "repaired" } else { "failed" }
+                if ($sourceState -eq "repaired") {
+                    Write-Host "`n==> Installing $($how[$m][0]) (once more, after the repair)" -ForegroundColor Cyan
+                    $r = Invoke-PrerequisiteCommand $how[$m][1]
+                    $code = $r.Code
+                    $out = $r.Output
+                    if (& $gone) { continue }
+                    if ((Test-WingetSourceBroken "$out")) { $sourceState = "failed" }
+                }
+            }
             if ($m -eq "python" -and (Repair-PythonPip) -and (& $gone)) { continue }
             if ($m -eq "vs") {
                 # (winget: "already installed" - an install vswhere did not list a moment ago may be listed now)
@@ -479,7 +538,8 @@ function Install-MissingPrerequisites([string[]]$Missing) {
         }
         $inner = [regex]::Match("$out", "Installer failed with exit code: (-?\d+)").Groups[1].Value
         $permission = ("$out" -match "You cancelled the installation") -or ($code -in 1223, 1602, 5004) -or ($inner -in "2", "1223", "1602", "5004")
-        if (($wingetProblem -or "$out" -match "hash does not match|already installed|No newer package versions") -and -not $permission -and $m -in "vs", "python") {
+        $sourceBroken = ($sourceState -in "declined", "failed") -or ($sourceState -eq "" -and (Test-WingetSourceBroken "$out"))
+        if (($wingetProblem -or $sourceBroken -or "$out" -match "hash does not match|already installed|No newer package versions") -and -not $permission -and $m -in "vs", "python") {
             Write-Host "`n==> Installing $($how[$m][0]) with its maker's own installer" -ForegroundColor Cyan
             $vsDir = ""
             if ($m -eq "vs") {
@@ -491,7 +551,8 @@ function Install-MissingPrerequisites([string[]]$Missing) {
         }
         $still += $m
         if ($null -eq $code) {
-            $report.Add("- $($how[$m][0]): not installed ($wingetProblem).")
+            $why = if ($sourceBroken) { "winget's package list is damaged" } else { $wingetProblem }
+            $report.Add("- $($how[$m][0]): not installed ($why).")
         } else {
             $meaning = Get-InstallFailureMeaning $code $out
             if ($code -eq 0 -and -not $meaning) {
@@ -507,6 +568,8 @@ function Install-MissingPrerequisites([string[]]$Missing) {
         if ($m -eq "vs") { $report.Add("  What the setup found: $(Get-VsFindings)") }
         if ($m -eq "vs" -and $arm) { $report.Add("  (This PC has an ARM processor: the game's build is made for x64 PCs and is not tested on ARM.)") }
         if ($wingetProblem) { $report.Add("  (${wingetProblem}: $($manual.winget))") }
+        if ($sourceState -eq "declined") { $report.Add("  (The setup tried to repair winget's package list, but Windows' permission was not given: run the setup again and click Yes, or repair it by hand as below.)") }
+        if ($sourceBroken -and -not (Test-WingetSourceBroken "$out")) { $report.Add("  ($(Get-WingetSourceText))") }
         $report.Add("  What to do: $($manual[$m])")
     }
     return @{ Still = $still; Report = @($report); Restart = $restart; Retry = $retry }
