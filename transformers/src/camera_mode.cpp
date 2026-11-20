@@ -297,65 +297,287 @@ namespace camera_mode
             g_setState(rdram, ctx, runtime);
         }
 
-        // (TODO 429) The aiming view's camera left on after the aiming state ended. The player's camera request is the view's
-        // slot 4 (taView, the decomp's taViewScripts: types[] at +0x90, the blend times at +0xA4; taTransformerActor::
-        // SetCameraScript 0x285240 fills slot 4): taTransformerStateLook asks for type 6 (its first-person script) on entering
-        // and for 5 (the third-person one) on every exit it ends itself - but one way out, the ground dropping away under it
-        // (DoPostUpdate's last branch), walks on without it, and so does any state change made from outside. Then the robot
-        // walks with the scope's camera until a state that asks for its own camera (standing still, a jump, a fall, the
-        // car) - bbatts' report: "only a transform fixes it". Type 6 belongs to the aiming state alone (the decomp: no other
-        // caller asks for it), so: the request 6 while the player is in another state for half a second is put back to 5
-        // with the exit's own 0.2 s blend, once, logged. Not with the first-person mode or the Apex mod's aim (they use
-        // the aiming view their own way), not in a cutscene. TF_CAM_HEAL=0: off. TF_CAM_HEAL_TEST=<vblank>: a test aid -
-        // the request set to 6 at that VBlank (the stuck view made on purpose).
+        // (TODO 429) The aiming view's camera left on after the aiming state ended - a view-level guard (the 0.8.7 net
+        // watched the request alone). The camera manager (taView, the decomp's taViewScripts) shows a blend of its scripts by
+        // their weights (+0x64; in use +0x78, a fade +0x79 with its time +0x68, elapsed +0x6C, target +0x74), and switches
+        // when the request in force changes: the first enabled of slots 0-3 (+0xF8; cutscenes, effects), else the player's
+        // slot 4 (types at +0x90, blend-ins at +0xA4; taTransformerActor::SetCameraScript 0x285240 fills it). The first-person
+        // script (type 6) belongs to the aiming view alone: taTransformerStateLook (state 9) asks for it on entering and for 5
+        // on every exit it ends itself - all but the ground-drop exit (DoPostUpdate's last branch, LookWalk without a request,
+        // an original-game path) and any state change made from outside. bbatts (0.9.3, a weak laptop with a PS4 pad) and the
+        // user (0.8.6) both saw the aiming view's first-person camera stay on after leaving it, while walking, through a
+        // transform (the car seen from its own bonnet) and back - which the request-only net could not mend when the request
+        // was right and the view still was not. So, whenever the player is NOT in the aiming state and the first-person
+        // script still has the view, the view is put back to what the game asks for, by the game's own cut (the switch's
+        // zero-blend path: the asked script on at weight 1, every other off at 0):
+        //   A  the player's request is still 6 (0.5 s): it becomes 5 (the car's 21 in the car states), the exit's 0.2 s blend;
+        //   B  an enabled higher request (slots 0-3) holds 6 (0.5 s): that request is switched off (no game code asks 6 there);
+        //   C  the view is on another script but the first-person one keeps its weight, not fading out (0.25 s; a fade-out
+        //      that has not ended 2.5 s after it began counts as stuck): the cut to the asked script;
+        //   T  a transform (states 13 to the car, 8 the car, 12 back to the robot) with the first-person script still
+        //      weighted: at once (a fade-out, after 0.5 s) - a transform always resets the camera, as on the PS2.
+        // Not with the first-person mode or the Apex mod's aim (they use the aiming view their own way), not in a cutscene or
+        // photo mode. Each mend is logged ("[camera] TODO 429 (A/B/C/T) ...", 20 lines). TF_CAM_HEAL=0: off.
+        // TF_CAM_HEAL_TEST=<vblank>[:<shape>] (a test aid: the stuck view made on purpose at that VBlank outside the aiming
+        // state): 1 the request 6 (default), 2 the first-person script given the view while the request stays, 3 a higher
+        // request of 6, 4 the first-person script kept at full weight with a fade-out that never ends.
         constexpr uint32_t kRequestSlot4Type = 0x90u + 4u * 4u, kRequestSlot4Blend = 0xA4u + 4u * 4u;
-        constexpr uint32_t kLookCamera = 6u, kWalkCamera = 5u, kStateLook = 9u;
-        void healLookRequest(uint8_t *rdram, uint32_t manager, uint64_t vblank)
+        constexpr uint32_t kRequestTypes = 0x90u, kRequestOn = 0xF8u;
+        constexpr uint32_t kLookCamera = 6u, kWalkCamera = 5u, kCarCamera = 21u, kStateLook = 9u;
+        constexpr uint32_t kStateToCar = 13u, kStateCar = 8u, kStateToRobot = 12u;
+        constexpr uint32_t kInUse = 0x78u, kFading = 0x79u, kJustOn = 0x7Au, kFadeTime = 0x68u, kFadeElapsed = 0x6Cu, kFadeTarget = 0x74u;
+
+        uint8_t byteAt(const uint8_t *rdram, uint32_t address)
+        {
+            const uint8_t *p = getConstMemPtr(rdram, address);
+            return p ? *p : 0u;
+        }
+
+        // The switch's zero-blend path (taView::SetCameraScriptType_Internal with blendTime <= 0, without its camera teleport):
+        // the script `to` in use at full weight, every other script out of use at 0.
+        void cutTo(uint8_t *rdram, uint32_t manager, uint32_t to)
+        {
+            for (uint32_t i = 0; i < kSlots; ++i)
+            {
+                const uint32_t s = scriptAt(rdram, manager, i);
+                if (s < 0x00100000u || s >= PS2_RAM_SIZE - 0x80u)
+                    continue;
+                if (i == to)
+                {
+                    if (!byteAt(rdram, s + kInUse))
+                        setByte(rdram, s + kJustOn, 1u);
+                    setByte(rdram, s + kInUse, 1u);
+                    setFloat(rdram, s + kWeight, 1.0f);
+                    setByte(rdram, s + kFading, 0u);
+                }
+                else if (byteAt(rdram, s + kInUse) || readFloat(rdram, s + kWeight) != 0.0f)
+                {
+                    setByte(rdram, s + kInUse, 0u);
+                    setFloat(rdram, s + kWeight, 0.0f);
+                    setByte(rdram, s + kFading, 0u);
+                }
+            }
+        }
+
+        bool tellHeal()
+        {
+            static int n = 0;
+            return n++ < 20;
+        }
+
+        void healView(uint8_t *rdram, uint32_t manager, uint64_t vblank)
         {
             static const bool on = [] { const char *e = std::getenv("TF_CAM_HEAL"); return !(e && *e == '0'); }();
-            static const uint64_t testAt = [] { const char *e = std::getenv("TF_CAM_HEAL_TEST"); return e && *e ? std::strtoull(e, nullptr, 10) : 0ull; }();
-            static int64_t since = 0;
+            static uint64_t testAt = 0;
+            static int testShape = 1;
+            static const bool parsed = []
+            {
+                if (const char *e = std::getenv("TF_CAM_HEAL_TEST"); e && *e)
+                {
+                    char *end = nullptr;
+                    testAt = std::strtoull(e, &end, 10);
+                    if (end && *end == ':')
+                        testShape = std::atoi(end + 1);
+                }
+                return true;
+            }();
+            (void)parsed;
+            static int64_t sinceA = 0, sinceB = 0, sinceC = 0, fadeSince = 0;
             const auto valid = [](uint32_t a, uint32_t room) { return a >= 0x00100000u && a < PS2_RAM_SIZE - room; };
             const uint32_t pm = word(rdram, 0x006CF498u), node = valid(pm, 0x20u) ? word(rdram, pm + 8u) : 0u;
             const uint32_t player = valid(node, 0x20u) && node != pm + 4u ? word(rdram, node + 8u) : 0u;
             const uint32_t creature = valid(player, 0x20u) ? word(rdram, player + 8u) : 0u;
             const uint32_t actor = valid(creature, 0x60u) ? word(rdram, creature + 0x54u) : 0u;
-            if (!valid(manager, 0x100u) || !valid(actor, 0x100u))
+            const int fpIndex = valid(manager, 0x110u) ? indexOf(rdram, manager, kFirstPersonVtable) : -1;
+            if (!valid(manager, 0x110u) || !valid(actor, 0x100u) || fpIndex < 0)
             {
-                since = 0;
+                sinceA = sinceB = sinceC = fadeSince = 0;
                 return;
             }
             const uint32_t state = word(rdram, actor + 0xF8u);
+            const uint32_t fp = scriptAt(rdram, manager, static_cast<uint32_t>(fpIndex));
             if (testAt != 0u && vblank >= testAt)
             {
                 static bool done = false;
                 if (!done && state != kStateLook)
                 {
                     done = true;
-                    setWord(rdram, manager + kRequestSlot4Type, kLookCamera);
-                    std::fprintf(stderr, "[camera] TF_CAM_HEAL_TEST: the aiming view's camera asked for at VBlank %llu in state %u\n",
-                                 static_cast<unsigned long long>(vblank), state);
+                    const uint32_t current = word(rdram, manager + kCurrent);
+                    if (testShape == 2 || testShape == 4)
+                    {
+                        // (the first-person script given the view, the view's own script left at 0; 4: with a fade-out that never ends)
+                        if (const uint32_t cur = scriptAt(rdram, manager, current); cur && current != static_cast<uint32_t>(fpIndex))
+                            setFloat(rdram, cur + kWeight, 0.0f);
+                        setByte(rdram, fp + kInUse, 1u);
+                        setFloat(rdram, fp + kWeight, 1.0f);
+                        setByte(rdram, fp + kFading, testShape == 4 ? 1u : 0u);
+                        setFloat(rdram, fp + kFadeTime, 1.0e6f);
+                        setFloat(rdram, fp + kFadeElapsed, 0.0f);
+                        setFloat(rdram, fp + kFadeTarget, 0.0f);
+                    }
+                    else if (testShape == 3)
+                    {
+                        setWord(rdram, manager + kRequestTypes + 4u * 2u, kLookCamera);
+                        setByte(rdram, manager + kRequestOn + 2u, 1u);
+                    }
+                    else
+                        setWord(rdram, manager + kRequestSlot4Type, kLookCamera);
+                    std::fprintf(stderr, "[camera] TF_CAM_HEAL_TEST: shape %d made at VBlank %llu in state %u (view on %u)\n", testShape,
+                                 static_cast<unsigned long long>(vblank), state, current);
                 }
             }
-            if (!on || word(rdram, manager + kRequestSlot4Type) != kLookCamera || state == kStateLook ||
-                g_firstPerson.load(std::memory_order_relaxed) || g_adsOwner.load(std::memory_order_relaxed) ||
-                g_cutscene.load(std::memory_order_relaxed))
+            if (!on || state == kStateLook || g_firstPerson.load(std::memory_order_relaxed) || g_adsOwner.load(std::memory_order_relaxed) ||
+                g_cutscene.load(std::memory_order_relaxed) || photo_mode::active())
             {
-                since = 0;
+                sinceA = sinceB = sinceC = fadeSince = 0;
                 return;
             }
             const int64_t now = nowMs();
-            if (since == 0)
-                since = now;
-            if (now - since < 500)
+            const bool carStates = state == kStateToCar || state == kStateCar;
+            const bool transform = carStates || state == kStateToRobot;
+            // A: the player's request still 6
+            if (word(rdram, manager + kRequestSlot4Type) == kLookCamera)
+            {
+                if (sinceA == 0)
+                    sinceA = now;
+                if (transform || now - sinceA >= 500)
+                {
+                    sinceA = 0;
+                    setWord(rdram, manager + kRequestSlot4Type, carStates ? kCarCamera : kWalkCamera);
+                    setFloat(rdram, manager + kRequestSlot4Blend, 0.2f);
+                    if (tellHeal())
+                        std::fprintf(stderr, "[camera] TODO 429 (A): the aiming view's camera was still asked for in state %u: the %s camera asked for "
+                                     "(TF_CAM_HEAL=0: off)\n", state, carStates ? "car's" : "third-person");
+                }
+            }
+            else
+                sinceA = 0;
+            // B: a higher request (slots 0-3, on) holds 6
+            int high = -1;
+            for (uint32_t i = 0; i < 4u && high < 0; ++i)
+                if (byteAt(rdram, manager + kRequestOn + i) && word(rdram, manager + kRequestTypes + 4u * i) == kLookCamera)
+                    high = static_cast<int>(i);
+            if (high >= 0)
+            {
+                if (sinceB == 0)
+                    sinceB = now;
+                if (transform || now - sinceB >= 500)
+                {
+                    sinceB = 0;
+                    setByte(rdram, manager + kRequestOn + static_cast<uint32_t>(high), 0u);
+                    if (tellHeal())
+                        std::fprintf(stderr, "[camera] TODO 429 (B): request slot %d held the aiming view's camera in state %u: switched off\n", high, state);
+                }
+            }
+            else
+                sinceB = 0;
+            // C / T: the view on another script, the first-person script still weighted
+            const uint32_t current = word(rdram, manager + kCurrent);
+            const float weight = readFloat(rdram, fp + kWeight);
+            const bool weighted = byteAt(rdram, fp + kInUse) && weight > 0.01f;
+            const bool fadingOut = byteAt(rdram, fp + kFading) && readFloat(rdram, fp + kFadeTarget) == 0.0f;
+            if (!weighted || current == static_cast<uint32_t>(fpIndex) || current >= kSlots || !scriptAt(rdram, manager, current))
+            {
+                sinceC = fadeSince = 0;
                 return;
-            since = 0;
-            setWord(rdram, manager + kRequestSlot4Type, kWalkCamera);
-            setFloat(rdram, manager + kRequestSlot4Blend, 0.2f);
-            static int told = 0;
-            if (told++ < 20)
-                std::fprintf(stderr, "[camera] TODO 429: the aiming view's camera was still asked for in state %u: back to the third-person "
-                             "camera (TF_CAM_HEAL=0: off)\n", state);
+            }
+            if (fadingOut)
+            {
+                if (fadeSince == 0)
+                    fadeSince = now;
+                sinceC = 0;
+            }
+            else
+            {
+                fadeSince = 0;
+                if (sinceC == 0)
+                    sinceC = now;
+            }
+            const bool stuck = (transform && !fadingOut) || (sinceC != 0 && now - sinceC >= 250) ||
+                               (fadeSince != 0 && now - fadeSince >= (transform ? 500 : 2500));
+            if (!stuck)
+                return;
+            sinceC = fadeSince = 0;
+            cutTo(rdram, manager, current);
+            if (tellHeal())
+                std::fprintf(stderr, "[camera] TODO 429 (%s): the aiming view's camera still had the view (weight %.2f%s) in state %u: cut to "
+                             "the asked camera (script %u)\n", transform ? "T" : "C", static_cast<double>(weight),
+                             fadingOut ? ", a fade-out that did not end" : "", state, current);
+        }
+
+        // (TODO 429, a diagnostic) The view's whole camera choice, logged when it changes: the script it is on (+0x8C), the
+        // request it took (+0xF4) and the higher requests on (+0xF8, slots 0-3), the five requests' types (+0x90) and blend-ins
+        // (+0xA4; 1000000 once a request is taken), the player's state, and every script in use or with weight (its slot, its
+        // kind, the weight rounded to 0 / ~ / 1, in use +0x78, +0x7C). Names: FP the first-person script (the aiming view's),
+        // 3P the robot's third-person one, CAR the car's. Up to 400 lines a run (TF_CAM_VIEW_LOG=0: none, =2: no limit) - so
+        // a player's log says where the camera stuck. Before the update (the request it sees) and after (what it did).
+        void viewLog(uint8_t *rdram, uint32_t manager, const char *when)
+        {
+            static const int mode = [] { const char *e = std::getenv("TF_CAM_VIEW_LOG"); return e && *e ? std::atoi(e) : 1; }();
+            static int lines = 0;
+            static std::string last;
+            if (mode == 0 || (mode == 1 && lines >= 400) || manager < 0x00100000u || manager >= PS2_RAM_SIZE - 0x110u)
+                return;
+            const auto kind = [](uint32_t vt) -> const char *
+            { return vt == kFirstPersonVtable ? "FP" : vt == kThirdPersonVtable ? "3P" : vt == kVehicleVtable ? "CAR" : nullptr; };
+            const uint32_t actor = g_stateActor.load(std::memory_order_relaxed);
+            const uint32_t state = actor >= 0x00100000u && actor < PS2_RAM_SIZE - 0x100u ? word(rdram, actor + 0xF8u) : ~0u;
+            char buf[160];
+            std::string sig;
+            std::snprintf(buf, sizeof(buf), "on %u req %u hi %u%u%u%u types %d,%d,%d,%d,%d state %d%s%s", word(rdram, manager + kCurrent),
+                          word(rdram, manager + 0xF4u), *getConstMemPtr(rdram, manager + 0xF8u), *getConstMemPtr(rdram, manager + 0xF9u),
+                          *getConstMemPtr(rdram, manager + 0xFAu), *getConstMemPtr(rdram, manager + 0xFBu),
+                          static_cast<int>(word(rdram, manager + 0x90u)), static_cast<int>(word(rdram, manager + 0x94u)),
+                          static_cast<int>(word(rdram, manager + 0x98u)), static_cast<int>(word(rdram, manager + 0x9Cu)),
+                          static_cast<int>(word(rdram, manager + 0xA0u)), static_cast<int>(state),
+                          g_firstPerson.load(std::memory_order_relaxed) ? " fpmode" : "", g_cutscene.load(std::memory_order_relaxed) ? " cutscene" : "");
+            sig = buf;
+            sig += " |";
+            for (uint32_t i = 0; i < kSlots; ++i)
+            {
+                const uint32_t s = scriptAt(rdram, manager, i);
+                if (s < 0x00100000u || s >= PS2_RAM_SIZE - 0x80u)
+                    continue;
+                const float w = readFloat(rdram, s + kWeight);
+                const uint8_t inUse = *getConstMemPtr(rdram, s + 0x78u), x7c = *getConstMemPtr(rdram, s + 0x7Cu);
+                if (!inUse && !(w > 0.01f))
+                    continue;
+                const char *k = kind(word(rdram, s));
+                std::snprintf(buf, sizeof(buf), " %u%s%s:w%s%s%s", i, k ? "=" : "", k ? k : "", w > 0.99f ? "1" : w > 0.01f ? "~" : "0",
+                              inUse ? "" : " UNUSED", x7c ? " 7c" : "");
+                sig += buf;
+            }
+            if (sig == last)
+                return;
+            last = sig;
+            ++lines;
+            std::fprintf(stderr, "[camera] view %s: %s | blend-in %g,%g,%g,%g,%g\n", when, sig.c_str(), readFloat(rdram, manager + 0xA4u),
+                         readFloat(rdram, manager + 0xA8u), readFloat(rdram, manager + 0xACu), readFloat(rdram, manager + 0xB0u),
+                         readFloat(rdram, manager + 0xB4u));
+        }
+
+        // (TODO 429, the diagnostic) taView::SetCameraScriptType (0x2C4BC0: view, slot, type, f12 blend, cut): who asks the view for
+        // which camera, logged with the caller (repeats of the same ask in a row left out; the view log's limit).
+        constexpr uint32_t kSetType = 0x002C4BC0u;
+        PS2Runtime::RecompiledFunction g_setType = nullptr;
+        void setTypeFn(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            static const int mode = [] { const char *e = std::getenv("TF_CAM_VIEW_LOG"); return e && *e ? std::atoi(e) : 1; }();
+            static int lines = 0;
+            static uint64_t last = 0;
+            const uint32_t slot = getRegU32(ctx, 5), type = getRegU32(ctx, 6), from = getRegU32(ctx, 31);
+            float blend;
+            std::memcpy(&blend, &ctx->f[12], sizeof(blend));
+            const uint64_t key = (static_cast<uint64_t>(from) << 16) ^ (static_cast<uint64_t>(slot) << 8) ^ type;
+            if (mode != 0 && (mode != 1 || lines < 400) && key != last)
+            {
+                ++lines;
+                const uint32_t actor = g_stateActor.load(std::memory_order_relaxed);
+                std::fprintf(stderr, "[camera] ask slot %u type %u blend %g cut %u from %08x (state %d)\n", slot, type, blend, getRegU32(ctx, 7) & 0xFFu, from,
+                             actor >= 0x00100000u && actor < PS2_RAM_SIZE - 0x100u ? static_cast<int>(word(rdram, actor + 0xF8u)) : -1);
+            }
+            last = key;
+            g_setType(rdram, ctx, runtime);
         }
 
         void update(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -367,7 +589,7 @@ namespace camera_mode
                 g_wanted = static_cast<int>(word(rdram, manager + kCurrent));
             }
             g_cutscene.store(tf::port::cutscenePlaying(rdram), std::memory_order_relaxed);
-            healLookRequest(rdram, manager, runtime->eeScheduler().currentVSyncTick());
+            healView(rdram, manager, runtime->eeScheduler().currentVSyncTick());
             const bool want = firstPersonNow();
             if (want != g_applied)
             {
@@ -397,10 +619,14 @@ namespace camera_mode
                 g_r3Frames.store(4, std::memory_order_relaxed);
             }
             g_updatedMs.store(nowMs(), std::memory_order_relaxed);
+            viewLog(rdram, manager, "in");
             const uint32_t ra = getRegU32(ctx, 31);
             g_update(rdram, ctx, runtime); // (our writes come first: the recompiled update may stop part way)
             if (ctx->pc == ra) // (it finished: the camera placed for the frame)
+            {
+                viewLog(rdram, manager, "out");
                 freeLook(rdram, manager);
+            }
         }
     }
 
@@ -573,6 +799,8 @@ namespace camera_mode
             runtime.registerFunction(kUpdate, update);
         if ((g_setState = runtime.lookupFunction(kSetState)) != nullptr)
             runtime.registerFunction(kSetState, setStateFn);
+        if ((g_setType = runtime.lookupFunction(kSetType)) != nullptr)
+            runtime.registerFunction(kSetType, setTypeFn);
     }
 
     bool firstPerson() { return g_firstPerson.load(); }

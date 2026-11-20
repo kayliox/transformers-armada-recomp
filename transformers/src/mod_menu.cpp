@@ -60,6 +60,7 @@
 
 #if defined(PS2X_ENABLE_DEBUG_UI)
 #include "imgui.h"
+#include "imgui_internal.h" // (TODO 431: the input queue's length - ImGuiContext::InputEventsQueue)
 #include "raylib.h"
 #include "rlgl.h"
 #include "runtime/ps2_host_present.h" // (nr_core S13a: the overlay layers around the test shots)
@@ -222,6 +223,47 @@ namespace mod_menu
             io.AddKeyEvent(ImGuiMod_Ctrl, IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL));
             io.AddKeyEvent(ImGuiMod_Shift, IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT));
             io.AddKeyEvent(ImGuiMod_Alt, IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT));
+        }
+
+        // (TODO 431, bbatts 0.9.3: "the F1 menu freezes up and refuses input; sometimes after 1-2 min all the inputs pass to
+        // the menu as fast as possible one at a time") ImGui keeps the input it is given in a queue (ImGuiContext::
+        // InputEventsQueue) that its frame empties - but TRICKLED (io.ConfigInputTrickleEventQueue, on by default): a frame
+        // stops at the first event that clashes with one it already took (a second change of the same mouse button, a key
+        // after a button change, the mouse's place after a key change). And the menu's ImGui frame runs only while F1 is
+        // open, while syncInputState gives ImGui the mouse buttons and Ctrl / Shift / Alt every picture: in play every shot
+        // (the left button, Alt) and every Shift went into the queue and stayed. Opened, the menu took that whole session
+        // back at about one button change a picture - minutes at 30 frames a second - with the player's new clicks waiting
+        // behind it; and the old clicks landed wherever the pointer now was (a Change button: the key capture started again
+        // and again, taking his real clicks and wheel as the binding, his clip b). Open with a pad's stick off its centre
+        // and the mouse moving, the queue also grew a picture with each click. So: shut, nothing reads it - it is dropped
+        // once it holds more than a few pictures' worth; opened, what came before is dropped and the state given afresh;
+        // open, more than kQueueCatchUp waiting are all taken that picture (no trickle) - never seconds behind.
+        // TF_MENU_QUEUE_GUARD=0: as before. TF_MENU_QUEUE_LOG=1: the queue's length once a second (and the drops).
+        constexpr int kQueueShutLimit = 64, kQueueCatchUp = 48;
+        bool queueGuardOn()
+        {
+            static const bool on = [] { const char *e = std::getenv("TF_MENU_QUEUE_GUARD"); return !(e && *e == '0'); }();
+            return on;
+        }
+        bool queueLogOn()
+        {
+            static const bool on = std::getenv("TF_MENU_QUEUE_LOG") && *std::getenv("TF_MENU_QUEUE_LOG") == '1';
+            return on;
+        }
+        int inputQueueLength()
+        {
+            const ImGuiContext *c = ImGui::GetCurrentContext();
+            return c ? c->InputEventsQueue.Size : 0;
+        }
+        void dropInputQueue(const char *why)
+        {
+            ImGuiContext *c = ImGui::GetCurrentContext();
+            if (!c || c->InputEventsQueue.Size == 0)
+                return;
+            static int told = 0;
+            if (told++ < 20 || queueLogOn())
+                std::fprintf(stderr, "[mod menu] input queue: %d waiting events dropped (%s) (TODO 431)\n", c->InputEventsQueue.Size, why);
+            c->InputEventsQueue.resize(0);
         }
 
         // (TODO 170 / 174) Typed characters and the wheel: raylib keeps only its last poll's (each PollInputEvents clears its
@@ -709,6 +751,8 @@ namespace mod_menu
         int g_capturing = -1;     // the row waiting for a key or a mouse button
         bool g_captureAdd = false; // add it to the row's list (else replace the list)
         bool g_captureArmed = false; // everything held at the click let go
+        double g_captureAt = 0.0;      // (TODO 431) when the capture began (ImGui's clock): it ends by itself after 8 s
+        double g_captureEndedAt = -1.0; // (TODO 431) when the last one ended: Change / Add take no click for 0.4 s after
         bool g_controlsLoaded = false;
 
         fs::path controlsFile() { return fs::current_path() / "controls.txt"; }
@@ -1091,9 +1135,19 @@ namespace mod_menu
 
         void drawControls()
         {
-            ImGui::TextWrapped("Click Change, then press the key or mouse button, or turn the mouse wheel (Esc cancels). Add keeps the old ones too. "
+            ImGui::TextWrapped("Click Change, then press the key or mouse button, or turn the mouse wheel (Esc, the controller's Circle / B, or "
+                               "waiting 8 seconds, cancels). Add keeps the old ones too. Default puts that row back as it came; Clear empties it. "
                                "WASD, the mouse and a gamepad work as before; this changes only the keyboard and mouse.");
             const std::string layout = ps2_host_input::keyBindings();
+            // (TODO 431) A capture ends by itself after 8 s, Esc's every press cancels it (the per-picture count: raylib's own read
+            // saw only the last ~1 ms), and it shows on its own row too (the line above scrolls away with the page).
+            if (g_capturing >= 0 && (takePictureKeyPresses(KEY_ESCAPE) > 0 || ImGui::GetTime() - g_captureAt > 8.0))
+            {
+                std::fprintf(stderr, "[mod menu] keys: the key capture for '%s' %s\n", kControls[g_capturing].label,
+                             ImGui::GetTime() - g_captureAt > 8.0 ? "timed out (8 s)" : "cancelled by Esc");
+                g_capturing = -1;
+                g_captureEndedAt = ImGui::GetTime();
+            }
             if (g_capturing >= 0)
             {
                 ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Press a key or mouse button, or turn the wheel, for: %s", kControls[g_capturing].label);
@@ -1122,7 +1176,10 @@ namespace mod_menu
                 if (!anyHeld)
                     g_captureArmed = true;
                 if (code == KEY_ESCAPE)
+                {
                     g_capturing = -1;
+                    g_captureEndedAt = ImGui::GetTime();
+                }
                 else if (code > 0)
                 {
                     const std::string input = kControls[g_capturing].input;
@@ -1131,7 +1188,9 @@ namespace mod_menu
                     if (list.find(name) == std::string::npos)
                         list += (list.empty() ? "" : ",") + name;
                     setList(input, list);
+                    std::fprintf(stderr, "[mod menu] keys: '%s' is now %s\n", kControls[g_capturing].label, list.c_str());
                     g_capturing = -1;
+                    g_captureEndedAt = ImGui::GetTime();
                 }
             }
             if (ImGui::BeginTable("controls", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX))
@@ -1144,24 +1203,38 @@ namespace mod_menu
                     ImGui::TextUnformatted(kControls[i].label);
                     ImGui::TableSetColumnIndex(1);
                     const std::string list = listFor(layout, kControls[i].input);
-                    ImGui::TextUnformatted(list.empty() ? "-" : list.c_str());
+                    if (g_capturing == i)
+                        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Press a key... (Esc cancels, %.0f s)",
+                                           std::max(0.0, 8.0 - (ImGui::GetTime() - g_captureAt)));
+                    else
+                        ImGui::TextUnformatted(list.empty() ? "-" : list.c_str());
                     ImGui::TableSetColumnIndex(2);
-                    if (menu_style::smallButton("Change"))
+                    // (TODO 431) The click that ended a capture (a mouse button taken as the key) is not also a new Change / Add,
+                    // nor one of a capture under way: 0.4 s after one ends, and while one runs, they take no click.
+                    const bool take = g_capturing < 0 && ImGui::GetTime() - g_captureEndedAt > 0.4;
+                    if (menu_style::smallButton("Change") && take)
                     {
                         g_capturing = i;
                         g_captureAdd = false;
                         g_captureArmed = false;
+                        g_captureAt = ImGui::GetTime();
+                        std::fprintf(stderr, "[mod menu] keys: waiting for a key for '%s' (Change)\n", kControls[i].label);
                     }
                     ImGui::SameLine();
-                    if (menu_style::smallButton("Add"))
+                    if (menu_style::smallButton("Add") && take)
                     {
                         g_capturing = i;
                         g_captureAdd = true;
                         g_captureArmed = false;
+                        g_captureAt = ImGui::GetTime();
+                        std::fprintf(stderr, "[mod menu] keys: waiting for a key for '%s' (Add)\n", kControls[i].label);
                     }
                     ImGui::TableSetColumnIndex(3);
-                    if (menu_style::smallButton("Clear"))
+                    if (menu_style::smallButton("Clear") && take)
                         setList(kControls[i].input, "");
+                    ImGui::SameLine();
+                    if (menu_style::smallButton("Default") && take)
+                        setList(kControls[i].input, listFor(ps2_host_input::defaultKeyBindings(), kControls[i].input)); // (TODO 431: one row back)
                     ImGui::PopID();
                 }
                 ImGui::EndTable();
@@ -2855,6 +2928,15 @@ namespace mod_menu
         {
             const MenuPad pad = readMenuPad();
             menu_style::NavInput in = navPresses(pad);
+            if (g_capturing >= 0 && in.back)
+            {
+                // (TODO 431) A key being chosen for a Controls row: the controller's Circle / B cancels it (it waits for a key or
+                // a mouse button, so a pad player had no way out but Esc), and does nothing else this frame.
+                g_capturing = -1;
+                g_captureEndedAt = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0.0;
+                std::fprintf(stderr, "[mod menu] keys: the key capture cancelled by the controller's Circle / B\n");
+                in = menu_style::NavInput{};
+            }
             if (ImGui::GetCurrentContext())
             {
                 const ImGuiIO &io = ImGui::GetIO();
@@ -3645,6 +3727,8 @@ namespace mod_menu
         gpu_recovery::frame(runtime); // (a lost graphics device: the game saved and started again - gpu_recovery.h)
         state_manager::frame(runtime); // (a save or load asked for in the Debug page: its answer - state_manager.h)
         // (A window host that hands ImGui every input event itself - SDL3's, ps2_overlay.h - needs none of the two.)
+        if (!g_open && queueGuardOn() && inputQueueLength() > kQueueShutLimit)
+            dropInputQueue("the menu is shut: nothing reads them"); // (TODO 431)
         if (!ps2_overlay::hostFeedsInput())
             syncInputState(); // (also for the runtime's debugger, drawn after this with the same ImGui; the input: above)
         typeTestFrame(runtime.eeScheduler().currentVSyncTick());
@@ -3851,13 +3935,44 @@ namespace mod_menu
                 quitNow(runtime);
             }
         }
+        static bool menuFramed = false; // (TODO 431: the menu's ImGui frame ran last picture)
         if (!g_open)
+        {
+            menuFramed = false;
             return;
+        }
         menu_style::prepare(); // (fonts: before ImGui's frame)
 
         const bool ownInput = !ps2_overlay::hostFeedsInput(); // (rlImGui reads once a picture: TODO 170 / 174)
         if (ownInput)
             dropRaylibCharacters(); // (TODO 170: the characters come from the window's messages - feedOverlayInput)
+        // (TODO 431) The input queue: dropped as the menu opens (what came in while it was shut is not for it; the mouse and
+        // modifiers given afresh), all taken at once when more than a few pictures' worth wait (never trickled minutes behind).
+        if (queueGuardOn())
+        {
+            if (!menuFramed)
+            {
+                dropInputQueue("the menu opened: what came while it was shut is not for it");
+                if (ownInput)
+                    syncInputState();
+            }
+            const int waiting = inputQueueLength();
+            const bool catchUp = waiting > kQueueCatchUp;
+            ImGui::GetIO().ConfigInputTrickleEventQueue = !catchUp;
+            static int toldCatchUp = 0;
+            if (catchUp && (toldCatchUp++ < 20 || queueLogOn()))
+                std::fprintf(stderr, "[mod menu] input queue: %d events waiting: all taken this picture (TODO 431)\n", waiting);
+        }
+        menuFramed = true;
+        if (queueLogOn())
+        {
+            static double lastLog = 0.0;
+            if (const double t = ImGui::GetTime(); t - lastLog >= 1.0)
+            {
+                lastLog = t;
+                std::fprintf(stderr, "[mod menu] input queue: %d waiting before this picture (open)\n", inputQueueLength());
+            }
+        }
         ps2_overlay::begin();
         if (ownInput)
             feedOverlayInput();

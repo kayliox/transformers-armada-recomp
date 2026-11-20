@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.9.4
+
+**Fixed**
+- The scope (aiming) view: if the camera stays inside the robot after you leave the scope, it now goes back to the normal view right away, and transforming always resets the camera again. The game's log also notes the camera's choices, so a report of this can show what happened.
+- The F1 menu no longer freezes after you have played a while, and no longer does your old clicks a minute or two later: the clicks and Shift / Alt presses from playing were kept and played back into the menu when it opened (worst on slower PCs).
+- F1 > Controls, changing a key: the row you are changing now says so, Esc or the controller's Circle / B cancels it, and it stops waiting by itself after 8 seconds. The click that sets a key no longer starts another change. A new Default button puts one row back as it was (Clear empties a row, and "Reset all to the default layout" below the list puts every row back). If a key of yours was changed to a mouse button by this, press Default on that row.
+
 ## 0.9.3
 
 **Fixed**
