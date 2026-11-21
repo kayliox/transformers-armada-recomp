@@ -124,6 +124,20 @@ The game checks for updates with Git in the background. Check your internet conn
 hand: start `tfa-setup.exe` in the folder you installed into while holding **Shift**, then **Update**, or run
 `.\update.ps1` in its `transformers-armada-recomp` folder.
 
+### The game crashes right at start on a laptop with NVIDIA graphics
+
+On a laptop with NVIDIA graphics beside Intel or AMD built-in graphics, an old NVIDIA driver can crash the game before
+the main menu, every time.
+
+1. Update the NVIDIA driver: download the newest one for your graphics from [nvidia.com](https://www.nvidia.com/Download/index.aspx)
+   and install it.
+2. If it still crashes, Windows may keep putting the old driver back. Remove it fully with Display Driver Uninstaller
+   (DDU) in Windows safe mode, then start Windows normally and install the newest driver from nvidia.com.
+
+The newest `play_*.err` file in the install's `logs` folder shows how far the start got: its `[start]` lines name each
+big step (settings, the HD textures, the window and its graphics, loading the game, the game running). Please add it to
+a report.
+
 ### The game crashes
 
 Open an [issue](https://github.com/kayliox/transformers-armada-recomp/issues) and say:

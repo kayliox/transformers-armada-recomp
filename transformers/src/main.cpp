@@ -309,6 +309,14 @@ extern "C" __declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
 extern "C" __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 #endif
 
+// (TODO 447) One line before each big step of the start, written out at once: a report of a start that freezes or crashes
+// names the step it got to even when the process ends before the log's next flush.
+static void startStep(const char *what)
+{
+    std::fprintf(stderr, "[start] %s\n", what);
+    std::fflush(stderr);
+}
+
 int main(int argc, char *argv[])
 {
 #if defined(__linux__)
@@ -384,6 +392,7 @@ int main(int argc, char *argv[])
     // The settings panel's choices (settings.ini, F5 while playing) into the environment before
     // anything reads it: a variable already set wins (ps2_settings.h).
     ps2_settings::loadFile();
+    startStep("settings read");
     // Respect saved display choices; a first launch from the couch starts full screen.
     if (const char *mode = std::getenv("RECOMPLAUNCHER_MODE"); mode && std::string(mode) == "bigpicture" &&
         !std::getenv("PS2X_FULLSCREEN"))
@@ -434,6 +443,7 @@ int main(int argc, char *argv[])
     // A scripted test run's start screens said in the environment, so a play recording keeps them (start_screens.h).
     start_screens::noteScriptedRun();
     // (TODO 298) The HD set's index on a thread of its own, while the window opens (nr_install.h).
+    startStep("the HD textures' index read in the background");
     nr::prepareHires();
     // Play recording on (TF_PLAY_RECORDING / TF_PLAY_RECORD): VIF1 on the game's thread for the session (playrec.h).
     playrec::prepareRecord();
@@ -601,6 +611,7 @@ int main(int argc, char *argv[])
             setenv("PS2X_MONITOR", index.c_str(), 1);
 #endif
         }
+        startStep("the window and its graphics open");
         nr::beforeWindow(); // (Vulkan's own present of SDL3's window: nr_install.h)
         if (!runtime.initialize("Transformers Armada"))
         {
@@ -628,6 +639,7 @@ int main(int argc, char *argv[])
 #if defined(__linux__)
         g_tfMonitorHz.store(GetMonitorRefreshRate(GetCurrentMonitor())); // (GLFW: on the main thread)
 #endif
+        startStep("the window is open; the game's program is loaded");
         if (!runtime.loadELF(elfPath.string()))
         {
             std::cerr << "Failed to load " << elfPath.string() << std::endl;
@@ -678,6 +690,7 @@ int main(int argc, char *argv[])
         // game's first instruction, when this build can take it.
         updates::beginResume(runtime);
 
+        startStep("the game runs (the disc's files are read from here on)");
         runtime.run();
         playrec::finish("the game ended");
         // (a resume the runtime refused stopped it: the game once more, normally - TODO 104)

@@ -1,5 +1,14 @@
 # What's new
 
+## 0.9.6
+
+**New**
+- The troubleshooting page has an entry for a game that crashes right at start on a laptop with NVIDIA graphics: update
+  the NVIDIA driver, and if Windows keeps putting the old one back, how to remove it fully first.
+
+**Changed**
+- The game's log now names each big step of the start, so a report of a start that freezes or crashes shows how far it got.
+
 ## 0.9.5
 
 **Fixed**
