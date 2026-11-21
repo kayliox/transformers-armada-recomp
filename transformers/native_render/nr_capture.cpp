@@ -4148,6 +4148,20 @@ namespace nr
                 shadow(0x48u, d.test2);
                 shadow(0x07u, d.tex02);
                 shadow(0x09u, d.clamp2);
+                {
+                    // (TODO 432, a measuring aid: TF_NATIVE_CLAMP2LOG=1 - each context-2 texture's CLAMP_2 once, and where it came
+                    // from: the state block, the register shadow, or neither (left at 0, repeat).)
+                    static const bool clamp2Log = std::getenv("TF_NATIVE_CLAMP2LOG") && *std::getenv("TF_NATIVE_CLAMP2LOG") == '1';
+                    if (clamp2Log && d.tex02)
+                    {
+                        static std::unordered_set<uint64_t> told;
+                        const bool fromBlock = g_stateBlock && word(rdram, g_stateBlock + 0x88u) == 0x09u;
+                        const bool fromShadow = shadowHolds(0x09u) && g_registerWrite[0x09u];
+                        if (told.insert(d.tex02 ^ (d.clamp2 << 1) ^ (fromBlock ? 1ull : 0ull) ^ (fromShadow ? 2ull : 0ull)).second)
+                            std::fprintf(stderr, "[native render] clamp2: tex0_2 %016llx clamp_2 %llx from %s\n", static_cast<unsigned long long>(d.tex02),
+                                         static_cast<unsigned long long>(d.clamp2), fromShadow ? "the shadow" : fromBlock ? "the block" : "nowhere (0)");
+                    }
+                }
                 d.zbuf = qword64(kGsShadow + 8u * 0x4Eu);
                 d.tex1 = qword64(kGsShadow + 8u * 0x14u); // (TEX1 from the shadow; on the renderer's thread, the list's)
                 d.tex12 = qword64(kGsShadow + 8u * 0x15u);

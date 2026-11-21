@@ -1,6 +1,9 @@
 # What's new
 
-## Unreleased
+## 0.9.5
+
+**Fixed**
+- Mini-Cons in a level (Deflector, Kickback, Shieldwall and the other Mini-Cons built on the same model) have their lower legs textured again: dark brown panels with their pattern, as on the PlayStation 2, instead of plain flat orange.
 
 ## 0.9.4
 

@@ -1,0 +1,27 @@
+# Posts a version's release notes to the Discord updates channel by hand (Actions > Discord announcement >
+# Run workflow), for a version whose automatic post was missed. Uses the DISCORD_WEBHOOK secret and
+# installer/post_discord.ps1, the same as the post at the end of the setup release.
+name: Discord announcement
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release to announce, e.g. setup-v0.9.4"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  announce:
+    if: github.repository == 'kayliox/transformers-armada-recomp'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Post to Discord
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: pwsh
+        run: ./installer/post_discord.ps1 -Tag $env:RELEASE_TAG

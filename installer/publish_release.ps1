@@ -86,3 +86,5 @@ elseif ($LinuxExe) { Write-Warning "no Linux tfa-setup at ${LinuxExe}: published
 & gh release create $tag @assets @repoArgs --target $Commit --title $title --notes $notes --latest
 if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
 Write-Host "publish_release: $tag published."
+# Tell the workflow which release this run made (the Discord post announces only a new version's first release).
+if ($env:GITHUB_OUTPUT) { Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "published=$tag" -Encoding utf8 }

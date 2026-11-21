@@ -57,7 +57,18 @@ jobs:
           name: tfa-setup-linux
           path: linux-setup
       - name: Publish it as a release of its own
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: ./installer/publish_release.ps1 -Exe installer/target/release/tfa-setup.exe -LinuxExe linux-setup/tfa-setup -Commit $env:GITHUB_SHA
+      - name: Announce the new version on Discord
+        # Only a new version's first release (setup-v<VERSION>), never a rebuild (setup-v<VERSION>-2 ...), and only
+        # when the DISCORD_WEBHOOK secret is set (forks and test repos skip it). A failed post never fails the release.
+        if: steps.publish.outputs.published != ''
+        continue-on-error: true
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          RELEASE_TAG: ${{ steps.publish.outputs.published }}
+        shell: pwsh
+        run: ./installer/post_discord.ps1 -Tag $env:RELEASE_TAG

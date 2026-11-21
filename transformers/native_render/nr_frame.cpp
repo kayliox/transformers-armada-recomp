@@ -2756,7 +2756,9 @@ namespace nr::frame
                 }
                 static const bool drawVerts = std::getenv("TF_NATIVE_DRAWVERTS") != nullptr;
                 if (drawVerts && d.mesh && !d.mesh->immediate)
-                    std::fprintf(stderr, "[native render]   clamp %llx fromList %d scissor %g,%g..%g,%g\n", static_cast<unsigned long long>(d.clamp), d.fromList ? 1 : 0,
+                    std::fprintf(stderr, "[native render]   clamp %llx (context 2: %llx, tex0 %016llx) fromList %d scissor %g,%g..%g,%g\n",
+                                 static_cast<unsigned long long>(d.clamp), static_cast<unsigned long long>(d.clamp2),
+                                 static_cast<unsigned long long>(d.tex02), d.fromList ? 1 : 0,
                                  d.scissor[0], d.scissor[1], d.scissor[2], d.scissor[3]);
                 if (drawVerts && d.mesh && d.mesh->immediate)
                 {

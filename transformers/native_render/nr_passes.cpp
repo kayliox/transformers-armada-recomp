@@ -218,6 +218,14 @@ namespace nr
                 base.tex1 = d.tex12;
                 base.alpha = d.alpha2;
                 base.test = d.test2;
+                // (TODO 432 / 445 / 336 (5)) The base texture's own wrap mode: CLAMP_2, as the GS samples context 2 with it.
+                // Taken from context 1 (the reflection's sphere map, held at its edges: CLAMP 5), a base texture whose
+                // coordinates run past 0..1 and wrap on the PS2 was held at its first row instead - the Mini-Cons' lower
+                // legs (SAFEG02, v about -4..-3.3) came out a flat orange strip (the texture's top edge) where the PS2
+                // shows dark brown patterned panels. TF_NATIVE_LITCLAMP=1: context 1's, as before.
+                static const bool litClampOld = std::getenv("TF_NATIVE_LITCLAMP") && *std::getenv("TF_NATIVE_LITCLAMP") == '1';
+                if (!litClampOld)
+                    base.clamp = d.clamp2;
                 base.prim = d.mesh ? d.mesh->prim2 : 0u;
                 out.push_back(reflection);
                 out.push_back(base);
