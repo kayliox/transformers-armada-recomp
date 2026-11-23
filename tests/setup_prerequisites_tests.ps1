@@ -250,8 +250,8 @@ Remove-Item $an
 $Root = $Root0
 
 Write-Host "4. which Visual Studio builds, and the compiler named in the log (build.ps1, TODO 407)"
-$defs = $ast.FindAll({ param($n) ($n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in "ConvertTo-VsCppInstances", "Select-VsInstances", "Get-CompilerReport") -or
-                               ($n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$TestedVsMajor') }, $true)
+$defs = $ast.FindAll({ param($n) ($n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in "ConvertTo-VsCppInstances", "Select-VsInstances", "Get-CompilerReport", "Get-VsCppInstances", "Get-GeneratorArgs") -or
+                               ($n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -in '$TestedVsMajor', '$MinVsVersion') }, $true)
 foreach ($d in $defs) { Invoke-Expression $d.Extent.Text }
 $vsJson = @'
 [{"installationPath":"C:/VS/2026","installationVersion":"18.3.11312.210","displayName":"Visual Studio Community 2026","catalog":{"productDisplayVersion":"18.3.0"}},
@@ -271,6 +271,35 @@ $old = @(ConvertTo-VsCppInstances @($list[0]) $helpOld)
 Check ($old.Count -eq 1 -and -not $old[0].Known -and @(Select-VsInstances $old).Count -eq 0) "2026 alone with a CMake from before it: not usable (build.ps1 then says to update CMake)"
 $future = @(ConvertTo-VsCppInstances @([pscustomobject]@{ installationPath = "C:\VS\X"; installationVersion = "19.0.1.2"; displayName = "Visual Studio 2028" }) $helpNew)
 Check ($future.Count -eq 1 -and -not $future[0].Known -and $future[0].Generator -eq "Visual Studio 19") "an unknown later major: listed, not known"
+# (hotfix) Visual Studio 2017 (a player's: MSVC 19.16, fmt's format.h stopped at C1012) and early 2019s are too old: never chosen.
+$help17 = "$helpNew`n  Visual Studio 15 2017"
+$vs2017 = [pscustomobject]@{ installationPath = "C:/VS/2017"; installationVersion = "15.9.37202.16"; displayName = "Visual Studio Community 2017"; catalog = [pscustomobject]@{ productDisplayVersion = "15.9.69" } }
+$vs2019old = [pscustomobject]@{ installationPath = "C:/VS/2019old"; installationVersion = "16.9.31313.79"; displayName = "Visual Studio Community 2019" }
+$with17 = @(ConvertTo-VsCppInstances @($vs2017, $list[1]) $help17)
+Check (@($with17 | Where-Object { $_.TooOld }).Count -eq 1 -and @(Select-VsInstances $with17).Count -eq 1 -and @(Select-VsInstances $with17)[0].Major -eq 17) "2017 + 2022: 2022, never 2017"
+$only17 = @(ConvertTo-VsCppInstances @($vs2017) $help17)
+Check ($only17[0].TooOld -and $only17[0].Known -and @(Select-VsInstances $only17).Count -eq 0) "2017 alone: known to CMake, but too old: not usable"
+$early19 = @(ConvertTo-VsCppInstances @($vs2019old, $list[2]) $help17)
+Check (@(Select-VsInstances $early19).Count -eq 1 -and @(Select-VsInstances $early19)[0].Version -eq [version]"16.11.36631.11") "2019 16.9 + 2019 16.11: only 16.11"
+Check (-not @(ConvertTo-VsCppInstances @($list[2]) $help17)[0].TooOld) "2019 16.11 itself: new enough"
+# build.ps1's generator choice with only 2017: it stops at once, in plain words, before any compile
+$Generator = $null
+function Get-VsAllCpp { $script:SimVsAll }
+$script:SimVsAll = $only17
+$msg = ""
+try { $null = Get-GeneratorArgs (Join-Path ([IO.Path]::GetTempPath()) "tcvs_none_$PID") } catch { $msg = "$($_.Exception.Message)" }
+Check ($msg -match "Visual Studio Community 2017 15\.9\.69 is too old to build the game" -and $msg -match "installs Visual Studio 2022's Build Tools") "2017 alone: the build stops before compiling: $msg"
+$script:SimVsAll = $with17
+$genA = @(Get-GeneratorArgs (Join-Path ([IO.Path]::GetTempPath()) "tcvs_none_$PID"))
+Check (($genA -join " ") -eq "-A x64 -G Visual Studio 17 2022 -DCMAKE_GENERATOR_INSTANCE=C:/VS/2022") "2017 + 2022: the 2022 generator and folder given to CMake explicitly: $($genA -join ' ')"
+# a build folder set up with 2017 (a failed build): set up again with 2022
+$dir17 = Join-Path ([IO.Path]::GetTempPath()) "tcvs17_$PID"
+New-Item -ItemType Directory -Force (Join-Path $dir17 "CMakeFiles") | Out-Null
+Set-Content (Join-Path $dir17 "CMakeCache.txt") @("CMAKE_GENERATOR:INTERNAL=Visual Studio 15 2017", "CMAKE_GENERATOR_INSTANCE:UNINITIALIZED=C:\VS\2017")
+$genB = @(Get-GeneratorArgs $dir17)
+Check (($genB -join " ") -match "Visual Studio 17 2022" -and -not (Test-Path (Join-Path $dir17 "CMakeCache.txt"))) "a folder set up with 2017: its cache cleared, set up again with 2022"
+Remove-Item -Recurse -Force $dir17
+Remove-Item Function:\Get-VsAllCpp
 # (a build folder as CMake leaves it: the cache and the compiler file of its compiler test)
 $dir = Join-Path ([IO.Path]::GetTempPath()) "tc407_$PID"
 New-Item -ItemType Directory -Force (Join-Path $dir "CMakeFiles\4.1.2") | Out-Null
@@ -295,6 +324,17 @@ Check (@(Get-VsUnknownToCmake @() $helpOld).Count -eq 0) "setup: no Visual Studi
 # parameter turned the missing help text into "" (never $null), so no CMake ever "knew" any Visual Studio and the setup
 # stopped at Tools on every PC with Visual Studio (0.8.3 and 0.8.4).
 Check ((Get-Command Get-VsUnknownToCmake).Parameters["CMakeHelp"].ParameterType -ne [string]) "setup: the CMake help text parameter is not a [string] (a missing one must stay null)"
+# (hotfix) The setup never repairs a Visual Studio too old for the game (adding the C++ tools to 2017 would not help): it
+# installs the 2022 Build Tools instead. Get-VsInstances stood in for (what vswhere lists).
+function Get-VsInstances { $script:SimInst }
+function Test-WindowsSdk { $true }
+$script:SimInst = @([pscustomobject]@{ Path = "C:\VS\2017"; Complete = $true; Cpp = $false; Version = [version]"15.9.37202.16"; TooOld = $true })
+Check (@(Get-VsToRepair).Count -eq 0) "setup: 2017 without the C++ tools: not repaired (the 2022 Build Tools are installed)"
+$script:SimInst = @([pscustomobject]@{ Path = "C:\VS\2017"; Complete = $false; Cpp = $true; Version = [version]"15.9.37202.16"; TooOld = $true },
+                    [pscustomobject]@{ Path = "C:\VS\2022"; Complete = $true; Cpp = $false; Version = [version]"17.14.36717.8"; TooOld = $false })
+$rep17 = @(Get-VsToRepair)
+Check ($rep17.Count -eq 1 -and $rep17[0].Path -eq "C:\VS\2022" -and $rep17[0].Action -eq "modify") "setup: incomplete 2017 + 2022 without C++: only 2022 repaired"
+Check ((Get-VsMinVersion) -eq [version]"16.11") "setup and build agree on the oldest Visual Studio: 2019 16.11"
 
 Write-Host "5. the Microsoft Store's Python is never used (TODO 444)"
 . (Join-Path $Root "tools\setup_common.ps1")

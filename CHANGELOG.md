@@ -1,5 +1,10 @@
 # What's new
 
+## 0.9.7
+
+**Fixed**
+- The setup no longer fails at "Disc and game" on PCs that have only an old Visual Studio 2017 (or an early Visual Studio 2019): the build stopped in a library with "C1012: unmatched parenthesis". The setup now uses a new enough Visual Studio (2022, or 2019 version 16.11 or newer) and installs Visual Studio 2022 Build Tools beside the old one when there is none; your old Visual Studio stays as it is. An update or a build that finds only a too-old Visual Studio now says so at once, in plain words.
+
 ## 0.9.6
 
 **New**

@@ -399,6 +399,13 @@ if ($needBuild -and $Binaries) {
     # (TODO 439) Every update builds the game on this PC, so it needs Visual Studio's C++ tools: a player who removed them
     # after the setup (the README says they can go when you never update) is told plainly, not by a compiler error.
     if (@(Get-MissingPrerequisites) -contains "vs") {
+        # (hotfix) Only a Visual Studio too old for the game (2017): said as such, not as "not installed".
+        $old = @(Get-VsInstances | Where-Object { $_.TooOld -and $_.Cpp })
+        if ($old) {
+            Fail ("this update rebuilds the game on this PC, and the Visual Studio here ($(($old | ForEach-Object { "$($_.Path) $($_.Version)" }) -join ', ')) " +
+                "is too old for it: it needs Visual Studio 2022 (or 2019 version 16.11 or newer). Run the setup once (tfa-setup.exe in the folder " +
+                "you installed into, Set up again): it installs Visual Studio 2022's Build Tools beside it and brings the game up to date.")
+        }
         Fail ("this update rebuilds the game on this PC, which needs Visual Studio's C++ build tools, and they are not installed " +
             "(removed since the setup?). Run the setup once (tfa-setup.exe in the folder you installed into, Set up again): it installs " +
             "them again and brings the game up to date.")

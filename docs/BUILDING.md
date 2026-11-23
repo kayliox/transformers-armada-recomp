@@ -6,7 +6,7 @@ for example to work on the port.
 ## What you need
 
 - Windows 10 or 11, 64-bit.
-- **Visual Studio 2022** (or 2019) with **Desktop development with C++**. The free Build Tools are enough.
+- **Visual Studio 2022** (or 2019 version 16.11 or newer) with **Desktop development with C++**. The free Build Tools are enough. Visual Studio 2017 is too old: the build stops at once if it finds only that one.
 - **CMake 3.21 or newer.** `pip install cmake` works if Visual Studio's own CMake is older.
 - **Python 3.11 or newer** with Pillow and numpy (`pip install pillow numpy`).
 - **Git.**

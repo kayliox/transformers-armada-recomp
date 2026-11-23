@@ -563,6 +563,11 @@ if (-not (Test-Path (Join-Path $Game $ElfName))) {
 # (TODO 407) Each build says which Visual Studio and which compiler it used (Write-CompilerReport), and a failed
 # compile says it in its message: a player's report then names the compiler that failed.
 $TestedVsMajor = 17
+# (hotfix, a player's setup with only Visual Studio 2017: fmt's format.h stopped at "C1012: unmatched parenthesis") The
+# oldest Visual Studio the game builds with: 2019 version 16.11 (MSVC 19.29, the first with /std:c++20, which the code and
+# its libraries need; built and checked with it, 0.8.6). An older install is never used: the build says so before it
+# starts, and the setup installs Visual Studio 2022's Build Tools instead.
+$MinVsVersion = [version]"16.11"
 # vswhere's C++ installs (its JSON objects) as: Path, Version, Major, Name, Shown (the version Visual Studio shows),
 # Generator (CMake's name for it) and Known (whether this CMake has that generator).
 function ConvertTo-VsCppInstances($List, [string]$CMakeHelp) {
@@ -572,13 +577,15 @@ function ConvertTo-VsCppInstances($List, [string]$CMakeHelp) {
         $gen = if ($names.ContainsKey($major)) { $names[$major] } else { "Visual Studio $major" }
         $shown = if ($_.catalog -and $_.catalog.productDisplayVersion) { "$($_.catalog.productDisplayVersion)" } else { "$($_.installationVersion)" }
         $name = if ($_.displayName) { "$($_.displayName)" } else { $gen }
-        [pscustomobject]@{ Path = "$($_.installationPath)"; Version = [version]"$($_.installationVersion)"; Major = $major; Name = $name
-                           Shown = $shown; Generator = $gen; Known = ($names.ContainsKey($major) -and $CMakeHelp.Contains($gen)) }
+        $version = [version]"$($_.installationVersion)"
+        [pscustomobject]@{ Path = "$($_.installationPath)"; Version = $version; Major = $major; Name = $name
+                           Shown = $shown; Generator = $gen; Known = ($names.ContainsKey($major) -and $CMakeHelp.Contains($gen))
+                           TooOld = ($version -lt $MinVsVersion) }
     })
 }
-# The order they are tried in: the known ones, the tested major first, then the newest.
+# The order they are tried in: the known ones new enough to build the game, the tested major first, then the newest.
 function Select-VsInstances($All) {
-    $known = @($All | Where-Object { $_.Known })
+    $known = @($All | Where-Object { $_.Known -and -not $_.TooOld })
     @(@($known | Where-Object { $_.Major -eq $TestedVsMajor } | Sort-Object Version -Descending) +
       @($known | Where-Object { $_.Major -ne $TestedVsMajor } | Sort-Object Version -Descending))
 }
@@ -645,6 +652,15 @@ function Get-GeneratorArgs([string]$Dir) {
     if ($Generator) { return $a + @("-G", $Generator) }
     $vs = @(Get-VsCppInstances)
     if (-not $vs) {
+        # Only a Visual Studio too old for the game (2017, an early 2019): said now, in plain words, instead of a compile
+        # that stops deep in a library with an error that names no cause (fmt: "C1012: unmatched parenthesis").
+        $old = @(Get-VsAllCpp | Where-Object { $_.TooOld })
+        if ($old) {
+            throw "$(($old | ForEach-Object { "$($_.Name) $($_.Shown)" }) -join ' and ') $(if ($old.Count -gt 1) { 'are' } else { 'is' }) too old to build the game: " +
+                "it needs Visual Studio 2022 (or Visual Studio 2019 version 16.11 or newer). Run the setup (tfa-setup.exe) again: it installs " +
+                "Visual Studio 2022's Build Tools next to it (your old Visual Studio stays as it is), and finished steps are kept. Or install them " +
+                "yourself from https://visualstudio.microsoft.com/visual-cpp-build-tools/ (tick 'Desktop development with C++')."
+        }
         # (TODO 407) C++ installs there, but none this CMake knows (Visual Studio 2026 with a CMake from before it): CMake's
         # own choice would stop with "could not find any instance of Visual Studio" - say what to do instead.
         $newer = @(Get-VsAllCpp | Where-Object { -not $_.Known })
@@ -662,7 +678,7 @@ function Get-GeneratorArgs([string]$Dir) {
         $m = Select-String -LiteralPath $cache -Pattern '^CMAKE_GENERATOR_INSTANCE(?::[A-Za-z]+)?=(.*)$' | Select-Object -First 1
         $was = if ($m) { & $norm $m.Matches[0].Groups[1].Value } else { "" }
         if ($was -and @($vs | Where-Object { (& $norm $_.Path) -eq $was })) { return $a }
-        Write-Host "  (the build folder $(Split-Path $Dir -Leaf) was set up with a Visual Studio without the C++ tools: setting it up again)" -ForegroundColor Yellow
+        Write-Host "  (the build folder $(Split-Path $Dir -Leaf) was set up with another Visual Studio (one without the C++ tools, or one too old): setting it up again with $($vs[0].Name) $($vs[0].Shown))" -ForegroundColor Yellow
         Remove-Item -LiteralPath $cache -Force
         $files = Join-Path $Dir "CMakeFiles"
         if (Test-Path -LiteralPath $files) { Remove-Item -LiteralPath $files -Recurse -Force }

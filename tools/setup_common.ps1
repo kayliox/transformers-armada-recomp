@@ -145,13 +145,18 @@ function Invoke-OptionalFonts([string]$Python, [string]$Port) {
 function Get-UsaDiscSize { 2900951040 }
 function Get-PalDiscSize { 4546691072 }
 
-# What the build needs and is not there: "git", "python", "vs" (Visual Studio's C++ tools).
+# (hotfix) The oldest Visual Studio the game builds with (build.ps1's $MinVsVersion): 2019 version 16.11. An older install
+# with the C++ tools (Visual Studio 2017) does not count: the setup installs Visual Studio 2022's Build Tools beside it.
+function Get-VsMinVersion { [version]"16.11" }
+
+# What the build needs and is not there: "git", "python", "vs" (Visual Studio's C++ tools, 2019 16.11 or newer).
 function Get-MissingPrerequisites {
     $m = @()
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { $m += "git" }
     if (-not (Find-Python)) { $m += "python" }   # (a real one: not Windows' Microsoft Store shortcut)
     $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-    $vs = (Test-Path $vswhere) -and [bool](Invoke-Probe { & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath })
+    $min = "[$(Get-VsMinVersion),"
+    $vs = (Test-Path $vswhere) -and [bool](Invoke-Probe { & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -version $min -property installationPath })
     # (the C++ tools alone are not enough: without the Windows SDK, CMake's compiler test fails with "No
     # CMAKE_C_COMPILER could be found" - a player's setup, 2026-11-10. The SDK counts as part of "vs".)
     if (-not $vs -or -not (Test-WindowsSdk)) { $m += "vs" }
@@ -206,7 +211,7 @@ function Get-VsWithoutCpp {
     return @(Get-VsToRepair | ForEach-Object { $_.Path })
 }
 
-# The installs as objects: @{ Path; Complete; Cpp } (vswhere -all; its JSON says whether each is complete).
+# The installs as objects: @{ Path; Complete; Cpp; Version; TooOld } (vswhere -all; its JSON says whether each is complete).
 function Get-VsInstances {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
     if (-not (Test-Path $vswhere)) { return @() }
@@ -215,12 +220,17 @@ function Get-VsInstances {
     $list = @()
     try { $list = @($json | ConvertFrom-Json | ForEach-Object { $_ }) } catch { }
     return @($list | Where-Object { $_.installationPath } | ForEach-Object {
-        [pscustomobject]@{ Path = $_.installationPath; Complete = ($_.isComplete -ne $false); Cpp = ($cpp -contains $_.installationPath) } })
+        $v = $null
+        try { $v = [version]"$($_.installationVersion)" } catch { }
+        [pscustomobject]@{ Path = $_.installationPath; Complete = ($_.isComplete -ne $false); Cpp = ($cpp -contains $_.installationPath)
+                           Version = $v; TooOld = ($null -ne $v -and $v -lt (Get-VsMinVersion)) } })
 }
 
 # The installs to repair, best first: @{ Path; Action = "resume" (finish an incomplete one) or "modify" (add the C++ tools) }.
+# (hotfix) Never one too old for the game (Visual Studio 2017): repaired it would still not build it, so the setup installs
+# Visual Studio 2022's Build Tools instead.
 function Get-VsToRepair {
-    $all = @(Get-VsInstances)
+    $all = @(Get-VsInstances | Where-Object { -not $_.TooOld })
     $sdk = Test-WindowsSdk
     $out = @()
     $out += $all | Where-Object { -not $_.Complete } | ForEach-Object { [pscustomobject]@{ Path = $_.Path; Action = "resume" } }
@@ -240,7 +250,7 @@ function Get-VsFindings {
     $i = @(Get-VsInstances)
     if ($i.Count -eq 0) { return "Visual Studio's installer is there but lists no install" }
     $sdk = if (Test-WindowsSdk) { "a Windows SDK is there" } else { "no Windows 10/11 SDK" }
-    return "found: " + (($i | ForEach-Object { "$($_.Path) (" + $(if (-not $_.Complete) { "incomplete" } elseif ($_.Cpp) { "with the C++ tools" } else { "WITHOUT the C++ tools" }) + ")" }) -join "; ") + "; $sdk"
+    return "found: " + (($i | ForEach-Object { "$($_.Path)$(if ($_.Version) { " $($_.Version)" }) (" + $(if ($_.TooOld) { "too old for the game: it needs 2019 version $(Get-VsMinVersion) or newer" } elseif (-not $_.Complete) { "incomplete" } elseif ($_.Cpp) { "with the C++ tools" } else { "WITHOUT the C++ tools" }) + ")" }) -join "; ") + "; $sdk"
 }
 
 # The evidence behind the checks, written into the setup's log (setup.log): every Python found and what it answered,

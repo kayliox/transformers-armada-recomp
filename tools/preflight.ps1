@@ -53,10 +53,11 @@ function Test-UnderFolder([string]$Path, [string]$Folder) {
     return $p.StartsWith($f, [StringComparison]::OrdinalIgnoreCase)
 }
 
-# Whether a Visual Studio with the C++ tools is installed (vswhere). A function of its own so the tests can stand in for it.
+# Whether a Visual Studio with the C++ tools, new enough for the game (2019 version 16.11 or newer: build.ps1's
+# $MinVsVersion), is installed (vswhere). A function of its own so the tests can stand in for it.
 function Test-PreflightVsCpp {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-    return (Test-Path -LiteralPath $vswhere) -and [bool]("$(& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null)".Trim())
+    return (Test-Path -LiteralPath $vswhere) -and [bool]("$(& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -version '[16.11,' -property installationPath 2>$null)".Trim())
 }
 
 # (TODO 441) How the drive holding a path is connected: "USB", "SD", "SATA", "NVMe", ... ("" when unknown). A function

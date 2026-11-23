@@ -201,14 +201,16 @@ fn has_python(path: &str) -> bool {
     false
 }
 
-/// Visual Studio (any edition, the Build Tools too) with the C++ tools, and a Windows SDK.
+/// Visual Studio (any edition, the Build Tools too) with the C++ tools, new enough for the game (2019 version 16.11 or
+/// newer, build.ps1's $MinVsVersion: an older one, Visual Studio 2017, gets the Build Tools installed beside it), and a
+/// Windows SDK.
 #[cfg(windows)]
 fn has_vs() -> bool {
     let pf86 = std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
     let vswhere = Path::new(&pf86).join("Microsoft Visual Studio").join("Installer").join("vswhere.exe");
     let cpp = vswhere.is_file()
         && Command::new(&vswhere)
-            .args(["-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"])
+            .args(["-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-version", "[16.11,", "-property", "installationPath"])
             .stdin(Stdio::null()).stderr(Stdio::null()).creation_flags_no_window().output()
             .is_ok_and(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty());
     cpp && has_windows_sdk(&pf86)
