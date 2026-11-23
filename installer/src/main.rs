@@ -29,6 +29,7 @@ mod launcher;
 #[cfg(windows)]
 mod frame_watch;
 mod plan; // (TODO 439: the plan before anything runs, the clean-up after)
+mod compact; // (TODO 451: the game's own update in a small window in the F1 menu's look)
 #[cfg(not(windows))]
 use winapi::{desktop_shortcut_once, start_hd_maker};
 
@@ -167,6 +168,7 @@ struct App {
     leftovers_rx: Option<Receiver<Option<plan::Leftovers>>>,
     clean_rx: Option<Receiver<Result<String, String>>>,
     clean_note: String,
+    compact: compact::Compact, // (TODO 451) --compact: the game's update in the small window (its notes, its placing)
 }
 
 const STEP_TOOLS: usize = 0;
@@ -228,6 +230,7 @@ impl App {
             leftovers_rx: None,
             clean_rx: None,
             clean_note: String::new(),
+            compact: compact::Compact::default(),
         }
     }
 
@@ -474,6 +477,7 @@ impl App {
             }
         }
         let mut want_leftovers = false;
+        let mut want_notes = false;
         let Some(rx) = &self.rx else { return };
         while let Ok(msg) = rx.try_recv() {
             match msg {
@@ -513,6 +517,7 @@ impl App {
                     self.done_at = Some(Instant::now());
                     // (TODO 439) after a setup: the build's leftovers, for the clean-up offer (asked for below)
                     want_leftovers = !self.update;
+                    want_notes = self.compact.on;
                     // (TODO 426) whether the update started the game (an update script from before the choice starts it
                     // whenever it was told to)
                     let repo = self.repo();
@@ -527,6 +532,7 @@ impl App {
                     }
                     self.error = e;
                     self.phase = Phase::Done(false);
+                    want_notes = self.compact.on;
                     // (the update script starts the game as it was after a failure too, when it starts it at all)
                     let repo = self.repo();
                     self.play_started = self.update && self.play
@@ -536,6 +542,11 @@ impl App {
         }
         if want_leftovers {
             self.start_leftovers();
+        }
+        // (TODO 451) the versions read again once the update has moved the install on (the version it came from kept)
+        if want_notes {
+            let from = Some(self.compact.notes.from.clone()).filter(|f| !f.is_empty());
+            self.start_notes(from);
         }
         for s in &mut self.steps {
             if s.status == Status::Active {
@@ -1527,6 +1538,11 @@ fn game_exe(repo: &Path) -> PathBuf {
 /// A copy of this program in the install folder (tfa-setup.exe; tfa-setup on Linux), for the game's own "Update now".
 fn copy_self(folder: &Path) {
     let Ok(me) = std::env::current_exe() else { return };
+    // (TODO 451) never an older copy over the setup program an update has just put in place: the running program's file
+    // was renamed to tfa-setup.old.exe then (tools\setup_refresh.ps1)
+    if me.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.to_ascii_lowercase().starts_with("tfa-setup.old")) {
+        return;
+    }
     let target = folder.join(SETUP_EXE);
     let same = std::fs::canonicalize(&me).ok().zip(std::fs::canonicalize(&target).ok()).is_some_and(|(a, b)| a == b);
     if !same {
@@ -2248,12 +2264,16 @@ impl eframe::App for App {
         #[cfg(windows)]
         frame_watch::frame(); // (TODO 421: TF_SETUP_FRAMELOG)
         self.poll();
-        if self.phase == Phase::Running || self.check_rx.is_some() || self.found_rx.is_some() || self.leftovers_rx.is_some() || self.clean_rx.is_some() {
+        if self.phase == Phase::Running || self.check_rx.is_some() || self.found_rx.is_some() || self.leftovers_rx.is_some() || self.clean_rx.is_some()
+            || self.compact.notes_rx.is_some()
+        {
             ui.ctx().request_repaint_after(TICK); // (TODO 303: was every 100 ms, and every frame for the Spinner)
         }
         // (the update done and the game starting - this window goes after a moment)
         if self.play_started && self.phase == Phase::Done(true) {
-            if self.done_at.is_some_and(|t| t.elapsed().as_secs() >= 5) {
+            // (TODO 451: the small window a little sooner - the game is in front by then)
+            let after = if self.compact.on { 3 } else { 5 };
+            if self.done_at.is_some_and(|t| t.elapsed().as_secs() >= after) {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
@@ -2263,7 +2283,8 @@ impl eframe::App for App {
             // (the plan's "already installed" and the build's leftovers are found on threads: the picture waits for them)
             let settled = (self.phase == Phase::Installed && self.check.done && self.leftovers_rx.is_none())
                 || matches!(self.phase, Phase::Done(_))
-                || (self.phase == Phase::Form && self.found_rx.is_none());
+                || (self.phase == Phase::Form && self.found_rx.is_none())
+                || (self.compact.demo.is_some() && self.compact.notes_rx.is_none());
             if settled && self.settled_at.is_none() {
                 self.settled_at = Some(Instant::now());
             }
@@ -2280,6 +2301,11 @@ impl eframe::App for App {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        // (TODO 451) the game's update in the small window
+        if self.compact.on {
+            egui::CentralPanel::default().frame(egui::Frame::new().inner_margin(0.0)).show(ui, |ui| compact::view(self, ui));
+            return;
         }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(0x15, 0x17, 0x1C)).inner_margin(28.0)).show(ui, |ui| {
             match self.phase {
@@ -2834,14 +2860,17 @@ fn main() -> eframe::Result {
             _ => {}
         }
     }
+    // (TODO 451) --compact with --update (the game's own "Update now"): the update in the small window in the F1 menu's
+    // look. On its own, or without an install, it changes nothing: the full window as before.
+    let want_compact = all.iter().any(|a| a == "--compact");
+    let offscreen = all.iter().any(|a| a == "--offscreen");
     // (TODO 289) A step left running by a setup whose window died: this window follows it to its end.
     if !check {
         if let Some(left) = LeftStep::find(Path::new(&app.folder)) {
+            let compact = want_compact && left.update;
             app.follow_left_step(left);
-            return eframe::run_native("Transformers Armada - Setup", options, Box::new(|cc| {
-                cc.egui_ctx.set_visuals(egui::Visuals::dark());
-                Ok(Box::new(app))
-            }));
+            let options = if compact { app.compact_window(offscreen) } else { options };
+            return run_window(app, options);
         }
     }
     if check {
@@ -2868,7 +2897,15 @@ fn main() -> eframe::Result {
         }
         std::process::exit(if !c.error.is_empty() { 1 } else if c.available { 10 } else { 0 });
     }
-    if update && app.installed() {
+    let demo = std::env::var("TFA_COMPACT_DEMO").ok().filter(|d| !d.is_empty() && want_compact); // (tests: TFA_COMPACT_DEMO)
+    let mut options = options;
+    if let Some(state) = demo {
+        options = app.compact_window(offscreen);
+        app.compact_demo(&state);
+    } else if update && app.installed() {
+        if want_compact {
+            options = app.compact_window(offscreen);
+        }
         app.start_update();
     } else if start && !app.retail.is_empty() {
         app.start();
@@ -2876,8 +2913,18 @@ fn main() -> eframe::Result {
         app.phase = Phase::Installed;
         app.start_check();
     }
-    eframe::run_native("Transformers Armada - Setup", options, Box::new(|cc| {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+    run_window(app, options)
+}
+
+/// The window, in its look: the full setup's, or (TODO 451) the small updater's in the F1 menu's.
+fn run_window(app: App, options: eframe::NativeOptions) -> eframe::Result {
+    let (compact, game) = (app.compact.on, game_folder(&app.repo()));
+    eframe::run_native("Transformers Armada - Setup", options, Box::new(move |cc| {
+        if compact {
+            compact::apply_theme(&cc.egui_ctx, &game);
+        } else {
+            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        }
         Ok(Box::new(app))
     }))
 }

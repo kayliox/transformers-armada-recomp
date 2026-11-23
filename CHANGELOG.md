@@ -1,5 +1,16 @@
 # What's new
 
+## 0.9.9
+
+**New**
+- Updating from the game now shows a small window in the style of the F1 menu, with the patch notes and the progress, and no command window. If an update stops, the window says why and offers the report to attach when you ask for help. Installs made with an older setup program get the new window a little later: from the update after the next one, or at once if you download the setup program again.
+
+**Fixed**
+- The camera behind your robot springs back out again after you leave the scope view or bump into a wall or a rock. At 30 frames a second it could stay pulled in close behind the robot (or almost inside it) until the next transform.
+
+**Changed**
+- From the next update on, updating also brings the setup program in your install folder up to date. The new copy is checked against the release before it is used, and the old one is kept beside it.
+
 ## 0.9.8
 
 **Fixed**

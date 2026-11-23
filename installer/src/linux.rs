@@ -917,7 +917,7 @@ fn data_home() -> PathBuf {
 }
 
 /// The desktop folder (xdg-user-dir DESKTOP), when there is one.
-fn desktop_dir() -> Option<PathBuf> {
+pub fn desktop_dir() -> Option<PathBuf> {
     let out = Command::new("xdg-user-dir").arg("DESKTOP").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|d| !d.is_empty());
     let home = std::env::var("HOME").unwrap_or_default();
@@ -1681,3 +1681,14 @@ mod tests {
         }
     }
 }
+
+// (TODO 451) The compact updater window: the window manager places it (Wayland lets no program place its own window).
+pub fn game_monitor_area(_pid: u32) -> Option<[i32; 4]> {
+    None
+}
+
+pub fn centre_own_window(_area: [i32; 4]) -> bool {
+    true
+}
+
+pub fn square_own_window() {}

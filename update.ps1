@@ -318,6 +318,12 @@ if (-not $Python) {
 }
 Use-Python $Python
 
+# (TODO 451) A setup program downloaded by the last update whose swap did not happen then: put in place now.
+if (Test-Path -LiteralPath (Join-Path $Port "tools\setup_refresh.ps1")) {
+    . (Join-Path $Port "tools\setup_refresh.ps1")
+    Complete-StagedSetupProgram -Repo $Repo
+}
+
 Step "Checking the repository for new changes" "checking"
 if ((Invoke-Native { & git -C $Repo fetch --quiet origin }) -ne 0) { Fail "git fetch failed (no network, or the repository cannot be reached)" }
 $branch = (& git -C $Repo rev-parse --abbrev-ref HEAD).Trim()
@@ -326,6 +332,7 @@ $new = (& git -C $Repo rev-parse "origin/$branch").Trim()
 $built = if ($state.PSObject.Properties["SetUpAt"]) { $state.SetUpAt } else { "" }
 if ($old -eq $new -and $built -eq $old -and -not $Force) {
     Write-Host "Up to date ($($old.Substring(0, 7)))." -ForegroundColor Green
+    if (Get-Command Update-SetupProgram -ErrorAction SilentlyContinue) { Update-SetupProgram -Repo $Repo -Port $Port }
     Result "ok $old"
     Start-Game
     try { Stop-Transcript | Out-Null } catch {}
@@ -359,6 +366,9 @@ if ($old -ne $new) {
     if ((Invoke-Native { & git -C $Repo merge --ff-only --quiet "origin/$branch" }) -ne 0) { Fail ("the new changes could not be brought in (git merge failed)" + $(if ($kept) { ". " + (Kept-Text $kept) } else { "" })) }
     if ((Invoke-Native { & git -C $Repo submodule update --init --recursive }) -ne 0) { Fail "git submodule update failed" }
 }
+# (TODO 451, tests) TF_UPDATE_TEST_FAIL=1: the update stops here on purpose, as a real stop does (the report written, the game
+# started again), to see the updater window show it.
+if ($env:TF_UPDATE_TEST_FAIL -eq "1") { Fail "a test stop on purpose (TF_UPDATE_TEST_FAIL=1)" }
 
 # What changed since the last build (or since the old head when the setup never recorded one).
 $since = if ($built) { $built } else { $old }
@@ -367,7 +377,7 @@ $changed = if ($Force) { @("${pre}build.ps1", "${pre}tools/hd_textures/") } else
 # (TODO 425: the scripts' own tests and the Linux scripts too - a release that changed only them ran a whole build check)
 $noBuild = @("docs/*", "*.md", "installer/*", ".github/*", ".githooks/*", "setup.ps1", "update.ps1", "Play.bat",
     "tools/setup_common.ps1", "tools/step_log.ps1", "tools/check_no_game_data.py", "tools/check_publishable.py", "LICENSE", ".gitignore", ".gitattributes",
-    "tests/*", "tools/update_forecast.ps1", "tools/clean_build.ps1", "tools/clean_build.sh", "tools/clean_env.sh", "tools/preflight.ps1", "tools/setup_report.ps1", "setup.sh", "update.sh", "play.sh")
+    "tests/*", "tools/update_forecast.ps1", "tools/clean_build.ps1", "tools/clean_build.sh", "tools/clean_env.sh", "tools/preflight.ps1", "tools/setup_report.ps1", "tools/setup_refresh.ps1", "tools/setup_refresh.sh", "setup.sh", "update.sh", "play.sh")
 $needBuild = @($changed | Where-Object {
     $path = $_
     $path.StartsWith($pre) -and -not ($noBuild | Where-Object { $path.Substring($pre.Length) -like $_ })
@@ -507,6 +517,12 @@ Write-Host ("`nUp to date ({0}), in {1}{2}. Play with Play.bat." -f (& git -C $R
     $(if ($spentOn.Count -gt 1) { ": " + ($spentOn -join ", ") } else { "" })) -ForegroundColor Green
 Add-DesktopShortcutOnce -Repo $Repo -Port $Port
 if (Get-Command Write-StepLog -ErrorAction SilentlyContinue) { Write-StepLog "update: up to date" }
+# (TODO 451) The install folder's setup program brought to this version's release (tools\setup_refresh.ps1, as pulled now;
+# it never fails the update)
+if (Test-Path -LiteralPath (Join-Path $Port "tools\setup_refresh.ps1")) {
+    . (Join-Path $Port "tools\setup_refresh.ps1")
+    Update-SetupProgram -Repo $Repo -Port $Port
+}
 Result "ok $((& git -C $Repo rev-parse HEAD).Trim())"
 Start-Game
 try { Stop-Transcript | Out-Null } catch {}

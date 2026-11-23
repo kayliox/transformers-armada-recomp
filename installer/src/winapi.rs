@@ -360,3 +360,155 @@ pub fn graphics_cards() -> Vec<(String, u64)> {
     }
     cards
 }
+
+// ------------------------------------------------------------------------------------------------
+// (TODO 451) The compact updater window: placed in the middle of the monitor the game was on, and the report it offers.
+
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct Rect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct MonitorInfo {
+    size: u32,
+    monitor: Rect,
+    work: Rect,
+    flags: u32,
+}
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn EnumWindows(callback: extern "system" fn(Handle, isize) -> i32, param: isize) -> i32;
+    fn GetWindowThreadProcessId(window: Handle, pid: *mut u32) -> u32;
+    fn IsWindowVisible(window: isize) -> i32; // (isize, as frame_watch.rs declares it)
+    fn GetWindow(window: Handle, command: u32) -> Handle;
+    fn GetWindowRect(window: Handle, rect: *mut Rect) -> i32;
+    fn SetWindowPos(window: Handle, after: Handle, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
+    fn MonitorFromWindow(window: Handle, flags: u32) -> Handle;
+    fn MonitorFromPoint(point: Point, flags: u32) -> Handle;
+    fn GetMonitorInfoW(monitor: Handle, info: *mut MonitorInfo) -> i32;
+    fn GetCursorPos(point: *mut Point) -> i32;
+}
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetCurrentProcessId() -> u32;
+}
+
+#[link(name = "shell32")]
+unsafe extern "system" {
+    fn SHGetFolderPathW(window: Handle, folder: i32, token: Handle, flags: u32, path: *mut u16) -> i32;
+}
+
+/// The search for a process's main window (EnumWindows' parameter): the pid asked for, the window found.
+struct WindowSearch {
+    pid: u32,
+    found: Handle,
+}
+
+extern "system" fn window_of_process(window: Handle, param: isize) -> i32 {
+    const GW_OWNER: u32 = 4;
+    let search = unsafe { &mut *(param as *mut WindowSearch) };
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(window, &mut pid) };
+    if pid != search.pid || unsafe { IsWindowVisible(window as isize) } == 0 || !unsafe { GetWindow(window, GW_OWNER) }.is_null() {
+        return 1;
+    }
+    let mut r = Rect::default();
+    if unsafe { GetWindowRect(window, &mut r) } == 0 || r.right <= r.left || r.bottom <= r.top {
+        return 1;
+    }
+    search.found = window;
+    0 // (found: the search stops)
+}
+
+/// A process's main window: visible, not owned by another, with a size. None when it has none (yet, or any more).
+fn main_window(pid: u32) -> Option<Handle> {
+    let mut search = WindowSearch { pid, found: std::ptr::null_mut() };
+    unsafe { EnumWindows(window_of_process, &mut search as *mut WindowSearch as isize) };
+    (!search.found.is_null()).then_some(search.found)
+}
+
+/// The work area (the screen without the taskbar), in pixels, of the monitor the game `pid` is on; without its window
+/// (closed already, or no game) the monitor the mouse pointer is on: the player clicked "Update now" there.
+pub fn game_monitor_area(pid: u32) -> Option<[i32; 4]> {
+    const MONITOR_DEFAULTTONEAREST: u32 = 2;
+    let monitor = match main_window(pid).filter(|_| pid != 0) {
+        Some(window) => unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) },
+        None => {
+            let mut p = Point::default();
+            unsafe { GetCursorPos(&mut p) };
+            unsafe { MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST) }
+        }
+    };
+    if monitor.is_null() {
+        return None;
+    }
+    let mut info = MonitorInfo { size: std::mem::size_of::<MonitorInfo>() as u32, ..Default::default() };
+    if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+        return None;
+    }
+    let w = info.work;
+    Some([w.left, w.top, w.right, w.bottom])
+}
+
+/// This program's own window put in the middle of `area` (pixels). True when it is there already (nothing moved).
+/// Called again after a move: Windows gives a window that changes monitor that monitor's scale, so its size changes.
+pub fn centre_own_window(area: [i32; 4]) -> bool {
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    let Some(window) = main_window(unsafe { GetCurrentProcessId() }) else { return false };
+    let mut r = Rect::default();
+    if unsafe { GetWindowRect(window, &mut r) } == 0 {
+        return false;
+    }
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    let x = area[0] + ((area[2] - area[0]) - w).max(0) / 2;
+    let y = area[1] + ((area[3] - area[1]) - h).max(0) / 2;
+    if (r.left - x).abs() <= 1 && (r.top - y).abs() <= 1 {
+        return true;
+    }
+    unsafe { SetWindowPos(window, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+    false
+}
+
+/// The player's Desktop folder (where tools\setup_report.ps1 writes its report first), when Windows names one.
+pub fn desktop_dir() -> Option<std::path::PathBuf> {
+    const CSIDL_DESKTOPDIRECTORY: i32 = 0x0010;
+    let mut path = vec![0u16; 1024];
+    if unsafe { SHGetFolderPathW(std::ptr::null_mut(), CSIDL_DESKTOPDIRECTORY, std::ptr::null_mut(), 0, path.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let len = path.iter().position(|&c| c == 0).unwrap_or(0);
+    (len > 0).then(|| std::path::PathBuf::from(String::from_utf16_lossy(&path[..len])))
+}
+
+#[link(name = "dwmapi")]
+unsafe extern "system" {
+    fn DwmSetWindowAttribute(window: Handle, attribute: u32, value: *const c_void, size: u32) -> i32;
+}
+
+/// (TODO 451) Square corners on this program's own window, as the F1 menu's panels (Windows 11 rounds every window by
+/// default; earlier Windows ignore the request).
+pub fn square_own_window() {
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWCP_DONOTROUND: u32 = 1;
+    if let Some(window) = main_window(unsafe { GetCurrentProcessId() }) {
+        let value = DWMWCP_DONOTROUND;
+        unsafe { DwmSetWindowAttribute(window, DWMWA_WINDOW_CORNER_PREFERENCE, (&value as *const u32).cast(), 4) };
+    }
+}

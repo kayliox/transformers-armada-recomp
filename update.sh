@@ -177,6 +177,7 @@ old=$(g rev-parse HEAD)
 new=$(g rev-parse "origin/$branch") || fail "origin/$branch not found"
 if [ "$old" = "$new" ] && [ "$built" = "$old" ] && [ "$force" = 0 ]; then
     echo "Up to date (${old:0:7})."
+    if [ -f "$port/tools/setup_refresh.sh" ]; then . "$port/tools/setup_refresh.sh"; tfa_update_setup_program "$repo" "$port"; fi
     result "ok $old"
     start_game
     exit 0
@@ -207,7 +208,7 @@ if [ "$force" = 0 ]; then
     while IFS= read -r path; do
         case "$path" in
         docs/* | *.md | installer/* | .github/* | .githooks/* | setup.ps1 | update.ps1 | Play.bat | setup.sh | update.sh | play.sh | \
-            tools/setup_common.ps1 | tools/step_log.ps1 | tools/clean_build.ps1 | tools/clean_build.sh | tools/clean_env.sh | tools/preflight.ps1 | tools/setup_report.ps1 | tools/check_no_game_data.py | tools/check_publishable.py | LICENSE | .gitignore | .gitattributes) ;;
+            tools/setup_common.ps1 | tools/step_log.ps1 | tools/clean_build.ps1 | tools/clean_build.sh | tools/clean_env.sh | tools/preflight.ps1 | tools/setup_report.ps1 | tools/setup_refresh.ps1 | tools/setup_refresh.sh | tools/check_no_game_data.py | tools/check_publishable.py | LICENSE | .gitignore | .gitattributes) ;;
         *) need_build=1 ;;
         esac
     done < <(g diff --name-only "$since" HEAD)
@@ -241,5 +242,8 @@ json.dump(data, open(sys.argv[1], "w"), indent=2)
 EOF
 if [ -n "$kept" ]; then kept_text "$kept"; fi
 printf '\nUp to date (%s), in %d s. Play with ./play.sh.\n' "${now:0:7}" "$((SECONDS - start_time))"
+# (TODO 451) The install folder's setup program brought to this version's release (tools/setup_refresh.sh, as pulled now;
+# it never fails the update)
+if [ -f "$port/tools/setup_refresh.sh" ]; then . "$port/tools/setup_refresh.sh"; tfa_update_setup_program "$repo" "$port"; fi
 result "ok $now"
 start_game

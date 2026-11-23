@@ -11,7 +11,9 @@
       - tag setup-v<VERSION> (the VERSION file, e.g. setup-v0.2.2), at the commit it was built from;
       - a second build at the same VERSION gets setup-v<VERSION>-2, then -3 and so on;
       - marked "latest", so /releases/latest/download/tfa-setup.exe is always the newest;
-      - a commit that has a release already gets none again (a workflow run repeated).
+      - a commit that has a release already gets none again (a workflow run repeated);
+      - SHA256SUMS.txt beside the files ("<sha-256>  <name>" lines, as sha256sum writes them): an install's update
+        checks the tfa-setup.exe it downloads against it before using it (tools\setup_refresh.ps1, TODO 451).
     The exe holds no game code or data: it runs setup.ps1 on the player's PC with their own disc.
 
     Needs: gh (GitHub CLI) signed in, or GH_TOKEN (the workflow's token); git.
@@ -73,7 +75,14 @@ The setup program for the Transformers (PS2) PC port, v$version (built from $sho
 Download tfa-setup.exe, run it, pick your own Transformers (USA, SLUS-20668) disc image and a folder: it installs the tools the build needs, then builds the game on your PC from your disc. The setup contains no game code and no game data.
 "@
 
+# (TODO 451) The SHA-256 of the files the release carries, for the installs' updates to check their download against.
+function Get-Sha256Line([string]$Path, [string]$Name) { "{0}  {1}" -f (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant(), $Name }
+$exeSum = Get-Sha256Line $Exe "tfa-setup.exe"
+$notes += "`n`nSHA-256 of tfa-setup.exe: $($exeSum.Split(' ')[0]) (all the files: SHA256SUMS.txt)."
+
 if ($DryRun) {
+    Write-Host "publish_release (dry run): SHA256SUMS.txt would hold (with the package and the Linux setup beside it):"
+    Write-Host "  $exeSum"
     Write-Host "publish_release (dry run): would create $tag ('$title') at $Commit with $Exe, marked latest."
     Write-Host "Existing setup releases for v$($version): $(if ($mine) { $mine -join ', ' } else { 'none' })"
     exit 0
@@ -83,6 +92,11 @@ if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) { throw 'RecompLauncher p
 $assets = @($Exe, $zip)
 if ($LinuxExe -and (Test-Path -LiteralPath $LinuxExe -PathType Leaf)) { $lin = Join-Path ([IO.Path]::GetTempPath()) "tfa-setup-linux"; Copy-Item -LiteralPath $LinuxExe -Destination $lin -Force; $assets += $lin }
 elseif ($LinuxExe) { Write-Warning "no Linux tfa-setup at ${LinuxExe}: published without it" }
+# (TODO 451) SHA256SUMS.txt: one line per file, under the name it has in the release; LF line ends (sha256sum -c reads it)
+if ((Split-Path $Exe -Leaf) -ne "tfa-setup.exe") { throw "the setup must be published as tfa-setup.exe, not $(Split-Path $Exe -Leaf)" }
+$sums = Join-Path ([IO.Path]::GetTempPath()) "SHA256SUMS.txt"
+[IO.File]::WriteAllText($sums, ((@($assets | ForEach-Object { Get-Sha256Line $_ (Split-Path $_ -Leaf) }) -join "`n") + "`n"), [Text.Encoding]::ASCII)
+$assets += $sums
 & gh release create $tag @assets @repoArgs --target $Commit --title $title --notes $notes --latest
 if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
 Write-Host "publish_release: $tag published."

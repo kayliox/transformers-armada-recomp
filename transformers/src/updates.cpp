@@ -7,6 +7,7 @@
 #include "updates.h"
 
 #include "guest_code.h"
+#include "install_layout.h"
 #include "tf_version.h"
 
 #include "ps2_runtime.h"
@@ -844,6 +845,10 @@ namespace updates
         uint64_t g_savedBefore = 0u, g_failedBefore = 0u;
         Clock::time_point g_savingSince;
         std::string g_phaseMessage;
+        // (TODO 451) The updater runs without a window of its own (no tfa-setup.exe beside the install, or
+        // TF_UPDATE_HIDDEN): About says it is updating in the background, and where its log is.
+        bool g_updaterHidden = false;
+        std::string g_updateLog;
         // (TODO 426) "Start the game when the update is done" as the About shows it (states/update_options.json)
         bool g_startGame = true, g_startGameLoaded = false;
         std::string g_startGameNote;
@@ -874,6 +879,16 @@ namespace updates
             return text;
         }
 
+        // (TODO 451) Where the update writes its log (update.ps1 / update.sh: the install's logs\ in the new layout, else
+        // update.log in the copy).
+        fs::path updateLogPath(const fs::path &repo)
+        {
+            std::error_code ec;
+            if (install_layout::isNew() && fs::is_directory(install_layout::root() / "logs", ec))
+                return install_layout::root() / "logs" / "update.log";
+            return repo / "update.log";
+        }
+
         // The updater waits for this process to end and starts the game again afterwards.
         bool launchUpdater(std::string &error)
         {
@@ -888,20 +903,29 @@ namespace updates
             const bool hidden = [] { const char *e = std::getenv("TF_UPDATE_HIDDEN"); return e && *e == '1'; }();
             std::error_code ec;
             const fs::path setup = repo.parent_path() / "tfa-setup.exe";
+            const bool withSetup = !hidden && fs::exists(setup, ec);
             std::wstring command;
-            if (!hidden && fs::exists(setup, ec))
-                command = quoted(setup) + L" --folder " + quoted(repo.parent_path()) + L" --update --play --wait-pid " + std::to_wstring(pid);
+            std::vector<std::wstring> env = childEnvironment();
+            if (withSetup)
+                // (TODO 451) The setup program's small updater window (the F1 menu's look: the versions, the patch notes, the
+                // progress, a failure and its report); a setup from before it ignores --compact and shows its full window.
+                command = quoted(setup) + L" --folder " + quoted(repo.parent_path()) + L" --update --compact --play --wait-pid " + std::to_wstring(pid);
             else
+            {
                 // (RemoteSigned: the copy's own scripts came with git, so they carry no Mark of the Web and run)
-                command = L"powershell.exe -NoProfile -ExecutionPolicy RemoteSigned" + std::wstring(hidden ? L" -NonInteractive" : L"") +
-                          L" -File " + quoted(repo / "update.ps1") + L" -WaitForPid " + std::to_wstring(pid) + L" -Play -StashLocalChanges";
+                // (TODO 451) No tfa-setup.exe: update.ps1 runs hidden too (never a command window), its output in update.log.
+                command = L"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File " + quoted(repo / "update.ps1") +
+                          L" -WaitForPid " + std::to_wstring(pid) + L" -Play -StashLocalChanges";
+                setVariable(env, L"TFA_UPDATE_NO_PAUSE", L"1"); // (no 30 s pause after a failure: nobody sees the window)
+            }
             std::vector<wchar_t> line(command.begin(), command.end());
             line.push_back(L'\0');
-            std::wstring block = environmentBlock(childEnvironment());
+            std::wstring block = environmentBlock(env);
             STARTUPINFOW si{};
             si.cb = sizeof(si);
             PROCESS_INFORMATION pi{};
-            const DWORD flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_PROCESS_GROUP | (hidden ? CREATE_NO_WINDOW : CREATE_NEW_CONSOLE);
+            // (CREATE_NO_WINDOW for both: the setup is a windows program, update.ps1 gets a console nobody sees)
+            const DWORD flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
             // (out of the game's job, when it is in one that allows it: the updater outlives the game)
             BOOL ok = CreateProcessW(nullptr, line.data(), nullptr, nullptr, FALSE, flags | CREATE_BREAKAWAY_FROM_JOB, block.data(),
                                      repo.wstring().c_str(), &si, &pi);
@@ -914,6 +938,8 @@ namespace updates
             }
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
+            g_updaterHidden = !withSetup;
+            g_updateLog = updateLogPath(repo).string();
             std::fprintf(stderr, "[updates] the updater started: %ls\n", command.c_str());
             return true;
 #else
@@ -924,7 +950,17 @@ namespace updates
                 error = "cannot read " + updater.string() + ": " + std::strerror(errno);
                 return false;
             }
-            const std::vector<std::string> command{"bash", updater.string(), "--wait-pid", std::to_string(getpid()), "--play"};
+            // (TODO 451) The setup program's small updater window when it is beside the install and a desktop can show it
+            // (not in the Steam Deck's Game Mode, where update.sh runs on its own as before).
+            const bool hidden = [] { const char *e = std::getenv("TF_UPDATE_HIDDEN"); return e && *e == '1'; }();
+            const auto set = [](const char *name) { const char *e = std::getenv(name); return e && *e; };
+            const fs::path setup = repo.parent_path() / "tfa-setup";
+            const bool withSetup = !hidden && access(setup.c_str(), X_OK) == 0 && (set("DISPLAY") || set("WAYLAND_DISPLAY")) &&
+                                   !set("GAMESCOPE_WAYLAND_DISPLAY") && !set("SteamGamepadUI");
+            const std::vector<std::string> command =
+                withSetup ? std::vector<std::string>{setup.string(), "--folder", repo.parent_path().string(), "--update", "--compact", "--play",
+                                                     "--wait-pid", std::to_string(getpid())}
+                          : std::vector<std::string>{"bash", updater.string(), "--wait-pid", std::to_string(getpid()), "--play"};
             const std::vector<std::string> environment = childEnvironment();
             std::vector<char *> argv = pointers(command), env = pointers(environment);
             posix_spawn_file_actions_t actions;
@@ -958,8 +994,9 @@ namespace updates
                 error = "could not start the updater: " + std::string(std::strerror(status));
                 return false;
             }
-            std::fprintf(stderr, "[updates] the updater started: bash %s --wait-pid %ld --play\n", updater.c_str(),
-                         static_cast<long>(getpid()));
+            g_updaterHidden = !withSetup;
+            g_updateLog = updateLogPath(repo).string();
+            std::fprintf(stderr, "[updates] the updater started: %s (%s)\n", command[0].c_str(), withSetup ? "its window" : "in the background");
             return true;
 #endif
         }
@@ -1413,6 +1450,14 @@ namespace updates
             ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(menu_style::colour("red")), "%s", g_startGameNote.c_str());
         if (g_phase == Phase::Saving)
             ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(menu_style::colour("amber")), "Saving this moment...");
+        else if (g_phase == Phase::Quitting && g_updaterHidden)
+        {
+            // (TODO 451) no updater window: said here, with the log to look at
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(menu_style::colour("amber")), "%s",
+                               g_startGame ? "Updating in the background; the game starts again when it is done."
+                                           : "Updating in the background; the game stays closed afterwards (the choice below).");
+            ImGui::TextDisabled("The update's log: %s", g_updateLog.c_str());
+        }
         else if (g_phase == Phase::Quitting)
             ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(menu_style::colour("amber")), "The game closes for the update and comes back by itself.");
         else if (g_phase == Phase::Failed)

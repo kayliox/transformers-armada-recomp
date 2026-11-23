@@ -3149,9 +3149,43 @@ namespace
     // before's length and the camera marked not arrived, so the game's own ease lets it out from there (about half a
     // second, at any rate - the share above); the pull-in and the game's cut (+0x32A) stay its own. In normal play it acts
     // on a frame now and then (1 in 42,000 in a 4-minute soak). TF_CAM_RELEASE=0: as before.
+    // (TODO 452) Two limits, both measured against the game's own code: (1) the release acts only on the game's RAW
+    // let-out (the camera arrived, +0x329 = 0, when 0x2CA0B0 ran). Once it is marked not arrived, the game's ease steps
+    // the boom by the share x the gap, and at 30 a second (share 0.06) any gap over 8.3 units made a step over 0.5 - which
+    // the 0.9.8 rule took back every frame, so the boom never grew again: the camera stayed pulled in close behind the
+    // robot after a wall or the scope until a transform's cut (bbatts, Iris Xe laptop at cap 30; the full boom is ~14 units,
+    // so at 60 and above the gap never got that big). (2) It acts only when the camera was held in by the collision the
+    // frame before (its boom then short of the eye the scripts wanted by more than 0.1 unit). A let-out that just follows
+    // the scripts' own eye - the 0.2 s blend back from the scope's first-person view, a zoom, the car's camera - is the
+    // game's, as on the PS2. TF_CAM452=0: the 0.9.8 rule (the hold may stick, for A/B). TF_CAM_BOOM_LOG=1: a line a frame
+    // (the boom before, the game's, shown; the eye wanted; the first sweep's point; arrived; held), 3000 at most.
+    // TF_CAM452_TEST=<n>[,<n>]: at those calls the boom is left as a wall's pull-in leaves it (a test aid, below).
     constexpr uint32_t kCameraBoom = 0x002CA0B0u;
     PS2Runtime::RecompiledFunction g_cameraBoom = nullptr;
     bool g_camRelease = true;
+    bool g_cam452 = true;
+    int g_camBoomLog = 0;              // lines left to write (TF_CAM_BOOM_LOG)
+    // Per camera (one a player's view; split screen has two): the scripts' eye from the target at its previous boom.
+    struct BoomWanted
+    {
+        uint32_t camera = 0u;
+        float wanted = -1.0f; // (-1: none yet)
+    };
+    BoomWanted g_boomWanted[4];
+    BoomWanted &boomWantedFor(uint32_t camera)
+    {
+        for (BoomWanted &b : g_boomWanted)
+            if (b.camera == camera)
+                return b;
+        for (BoomWanted &b : g_boomWanted)
+            if (b.camera == 0u)
+            {
+                b.camera = camera;
+                return b;
+            }
+        g_boomWanted[0] = BoomWanted{camera, -1.0f}; // (more cameras than slots: start that one afresh)
+        return g_boomWanted[0];
+    }
     void cameraBoomRelease(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
         const uint32_t camera = getRegU32(ctx, 4), position = getRegU32(ctx, 5), sweepAt = getRegU32(ctx, 6), target = getRegU32(ctx, 8); // (a0, a1, a2, t0)
@@ -3167,11 +3201,43 @@ namespace
             std::memcpy(t, rdram + target, sizeof(t));
             return std::sqrt((v[0] - t[0]) * (v[0] - t[0]) + (v[1] - t[1]) * (v[1] - t[1]) + (v[2] - t[2]) * (v[2] - t[2]));
         };
-        float before = 0.0f;
+        // (TODO 452, a test aid) TF_CAM452_TEST=<n>[,<n>...]: at those calls of the boom the camera is left as a wall's pull-in
+        // leaves it - the boom at 2 units, arrived - so the next let-out is the collision's (the wall shape made on purpose).
+        static std::vector<uint64_t> testCalls = []
+        {
+            std::vector<uint64_t> v;
+            if (const char *e = std::getenv("TF_CAM452_TEST"))
+                for (const char *p = e; *p;)
+                {
+                    char *end = nullptr;
+                    const unsigned long long n = std::strtoull(p, &end, 10);
+                    if (end == p)
+                        break;
+                    v.push_back(n);
+                    p = *end == ',' ? end + 1 : end;
+                }
+            return v;
+        }();
+        static uint64_t calls = 0;
+        ++calls;
+        if (ok && !testCalls.empty() && std::find(testCalls.begin(), testCalls.end(), calls) != testCalls.end())
+        {
+            const float pulled = 2.0f;
+            std::memcpy(rdram + camera + 0x31Cu, &pulled, 4);
+            rdram[camera + 0x329u] = 0u;
+            std::fprintf(stderr, "[camera] TF_CAM452_TEST: call %llu, the boom left at 2 units as a wall leaves it\n",
+                         static_cast<unsigned long long>(calls));
+        }
+        float before = 0.0f, wanted = -1.0f, sweep = -1.0f;
+        uint8_t arrivedFlag = 1u; // (+0x329 as the frame before left it: 0 = arrived, the boom taken raw this call)
         flight_recorder::Camera rec{};
         if (ok)
         {
             std::memcpy(&before, rdram + camera + 0x31Cu, 4);
+            arrivedFlag = rdram[camera + 0x329u];
+            wanted = distTo(position);
+            if (g_camBoomLog > 0)
+                sweep = distTo(sweepAt);
             if (record)
             {
                 rec.wanted = distTo(position); // (the scripts' eye before the boom: the sweeps work on copies)
@@ -3192,7 +3258,11 @@ namespace
         float after = 0.0f;
         std::memcpy(&after, rdram + camera + 0x31Cu, 4);
         bool held = false;
-        if (g_camRelease && before > 0.0f && after > before + 0.5f && rdram[camera + 0x32Au] == 0u)
+        // (TODO 452) the let-out is the collision's (held in the frame before) and taken raw by the game (not its ease)
+        BoomWanted &previous = boomWantedFor(camera);
+        const bool collisionLetOut = !g_cam452 || (arrivedFlag == 0u && previous.wanted > 0.0f && before < previous.wanted - 0.1f);
+        previous.wanted = wanted;
+        if (g_camRelease && before > 0.0f && after > before + 0.5f && rdram[camera + 0x32Au] == 0u && collisionLetOut)
         {
             float p[3], t[3];
             std::memcpy(p, rdram + position, sizeof(p));
@@ -3207,6 +3277,15 @@ namespace
                 rdram[camera + 0x329u] = 1u;
                 held = true;
             }
+        }
+        if (g_camBoomLog > 0)
+        {
+            --g_camBoomLog;
+            float shown = 0.0f;
+            std::memcpy(&shown, rdram + camera + 0x31Cu, 4);
+            std::fprintf(stderr, "[camera] boom %.2f -> game %.2f shown %.2f | wanted %.2f sweep %.2f | arrived-in %u out %u cut %u%s\n", before,
+                         after, shown, wanted, sweep, arrivedFlag == 0u ? 1u : 0u, rdram[camera + 0x329u] == 0u ? 1u : 0u,
+                         rdram[camera + 0x32Au], held ? " HELD" : "");
         }
         if (!record)
             return;
@@ -11649,8 +11728,11 @@ namespace
         {
             // (TODO 405) The boom's release (on; TF_CAM_RELEASE=0 off) and the flight recorder (TF_FLIGHT_RECORDER=1).
             g_camRelease = !(std::getenv("TF_CAM_RELEASE") && *std::getenv("TF_CAM_RELEASE") == '0');
+            g_cam452 = !(std::getenv("TF_CAM452") && *std::getenv("TF_CAM452") == '0'); // (TODO 452)
+            if (const char *e = std::getenv("TF_CAM_BOOM_LOG"); e && *e && *e != '0')
+                g_camBoomLog = 3000;
             flight_recorder::install(runtime);
-            if ((g_camRelease || flight_recorder::enabled()) && (g_cameraBoom = runtime.lookupFunction(TF_GA(kCameraBoom))) != nullptr)
+            if ((g_camRelease || flight_recorder::enabled() || g_camBoomLog > 0) && (g_cameraBoom = runtime.lookupFunction(TF_GA(kCameraBoom))) != nullptr)
                 runtime.registerFunction(TF_GA(kCameraBoom), cameraBoomRelease);
             if (flight_recorder::enabled())
             {
@@ -11665,6 +11747,8 @@ namespace
             }
             if (!g_camRelease)
                 std::fprintf(stderr, "[tf] TF_CAM_RELEASE=0: the camera's boom lets out at once against walls, as the game does (TODO 405)\n");
+            else if (!g_cam452)
+                std::fprintf(stderr, "[tf] TF_CAM452=0: the camera's boom release as in 0.9.8 (it may keep the camera pulled in at 30 a second, TODO 452)\n");
         }
         if ((g_slerp = runtime.lookupFunction(kSlerp)) != nullptr)
             runtime.registerFunction(kSlerp, slerpAtRate);
