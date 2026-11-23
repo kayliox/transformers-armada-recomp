@@ -996,6 +996,31 @@ float probePs(float4 pos : SV_Position) : SV_Target
 }
 )";
 
+        // (gfx::Effect::ChannelCopy, the native build's CopyGreenToAlpha) One weighted channel of t0 into the target's alpha:
+        // t0 Load-ed at the target pixel + offset.xy (point, clamped to t0), dot with the weights, in all four channels -
+        // the pipeline's write mask keeps only alpha. The rect is the viewport + scissor (the full-screen triangle fills it).
+        const char kChannelCopyShader[] = R"(
+cbuffer ChannelCopy : register(b0)
+{
+    float4 offset;
+    float4 weights;
+};
+Texture2D<float4> srcTex : register(t0);
+float4 copyVs(uint id : SV_VertexID) : SV_Position
+{
+    float2 p = float2((id << 1) & 2, id & 2);
+    return float4(p * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+}
+float4 copyPs(float4 pos : SV_Position) : SV_Target
+{
+    uint w, h;
+    srcTex.GetDimensions(w, h);
+    int2 q = clamp(int2(floor(pos.xy + offset.xy)), int2(0, 0), int2(w, h) - 1);
+    float v = dot(srcTex.Load(int3(q, 0)), weights);
+    return float4(v, v, v, v);
+}
+)";
+
         // (TODO 27) The warp tunnel's sparks (nr_warp.cpp, drawCloud): each point of a set an instance - its place through
         // the set's rows to the GS's screen (kept on the eye's side, s.w < 0, as VU1 keeps it), narrowed about the centre for
         // Hor+, and a soft dot there (a Gaussian, its radius in the picture's pixels) added to the picture.
@@ -1690,6 +1715,7 @@ float4 smaaBlendPs(SmaaBlendOut i) : SV_Target
             // a readback of 16 KB a slot, and whether the slot's frame took one (and its tick).
             ID3D12PipelineState *cloudPipeline = nullptr; // (TODO 27: the warp tunnel's sparks - kCloudShader, drawCloud)
             ID3D12PipelineState *probePipeline = nullptr;
+            ID3D12PipelineState *channelCopyPipeline = nullptr; // (gfx::Effect::ChannelCopy: kChannelCopyShader)
         } g;
 
 #if defined(__linux__)
@@ -5854,6 +5880,39 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                 if (!g.probePipeline)
                     std::fprintf(stderr, "[native render] the sun's occlusion probe could not be made: the game reads the GS's\n");
             }
+            // (gfx::Effect::ChannelCopy) One channel of t0 into the target's alpha, its colour kept (RGBA8; none: the effect
+            // is not there, and a caller asks dev.effect first).
+            {
+                ID3DBlob *cv = compile("copyVs", "vs_5_1", kChannelCopyShader, sizeof(kChannelCopyShader) - 1),
+                         *cp = compile("copyPs", "ps_5_1", kChannelCopyShader, sizeof(kChannelCopyShader) - 1);
+                if (cv && cp)
+                {
+                    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+                    pd.pRootSignature = g.root;
+                    pd.VS = {cv->GetBufferPointer(), cv->GetBufferSize()};
+                    pd.PS = {cp->GetBufferPointer(), cp->GetBufferSize()};
+                    D3D12_RENDER_TARGET_BLEND_DESC &rt = pd.BlendState.RenderTarget[0];
+                    rt.SrcBlend = rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+                    rt.DestBlend = rt.DestBlendAlpha = D3D12_BLEND_ZERO;
+                    rt.BlendOp = rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                    rt.LogicOp = D3D12_LOGIC_OP_NOOP;
+                    rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALPHA;
+                    pd.SampleMask = 0xFFFFFFFFu;
+                    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+                    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+                    pd.RasterizerState.DepthClipEnable = TRUE;
+                    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+                    pd.NumRenderTargets = 1;
+                    pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+                    pd.SampleDesc.Count = 1;
+                    if (FAILED(g.device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&g.channelCopyPipeline))))
+                        g.channelCopyPipeline = nullptr;
+                }
+                release(cv);
+                release(cp);
+                if (!g.channelCopyPipeline)
+                    std::fprintf(stderr, "[native render] the channel copy effect could not be made\n");
+            }
             // (TODO 27) The warp tunnel's sparks: the points of a set as instances (their x y z the per-instance stream), four
             // corners each (a strip), added to the picture - its colour only (none: they are left out, told once).
             {
@@ -7115,6 +7174,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                 case gfx::Effect::BloomUp: return g.bloomUpPipeline != nullptr;
                 case gfx::Effect::ToneMap: return g.tonePipeline != nullptr;
                 case gfx::Effect::LocalContrast: return g.clarityPipeline != nullptr;
+                case gfx::Effect::ChannelCopy: return g.channelCopyPipeline != nullptr;
                 }
                 return false;
             }
@@ -7259,6 +7319,7 @@ void CsWrite(uint3 id : SV_DispatchThreadID)
                     case gfx::Effect::BloomUp: pso = g.bloomUpPipeline; break;
                     case gfx::Effect::ToneMap: pso = g.tonePipeline; break;
                     case gfx::Effect::LocalContrast: pso = g.clarityPipeline; break;
+                    case gfx::Effect::ChannelCopy: pso = g.channelCopyPipeline; break;
                     default: break;
                     }
                     if (!pso)
@@ -8366,6 +8427,8 @@ namespace nr::d3d
         }
         take(compile("probeVs", "vs_5_1", kProbeShader, sizeof(kProbeShader) - 1));
         take(compile("probePs", "ps_5_1", kProbeShader, sizeof(kProbeShader) - 1));
+        take(compile("copyVs", "vs_5_1", kChannelCopyShader, sizeof(kChannelCopyShader) - 1));
+        take(compile("copyPs", "ps_5_1", kChannelCopyShader, sizeof(kChannelCopyShader) - 1));
         take(compile("cloudVs", "vs_5_1", kCloudShader, sizeof(kCloudShader) - 1));
         take(compile("cloudPs", "ps_5_1", kCloudShader, sizeof(kCloudShader) - 1));
         if (!ok)

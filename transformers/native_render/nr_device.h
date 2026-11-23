@@ -92,6 +92,10 @@ namespace nr::gfx
         LocalContrast, // (TODO 108) the local contrast: the picture's copy (t0) with its luminance's difference from a blur
                        // of it (t1, any size, sampled linear) added, k times, into the picture - its colour only (alpha kept),
                        // RGBA8. b0: 1 / the target's width, height; k
+        ChannelCopy, // (the native build's CopyGreenToAlpha: a grass shadow's green into the alpha mask) one weighted channel
+                     // of t0 into the target's ALPHA only (its colour kept), RGBA8: t0 Load-ed (point) at the target pixel +
+                     // b0.xy, the value = dot(t0, b0's second float4: the channel weights, 0,1,0,0 = green). The rect is the
+                     // viewport (+ scissor): the full-screen triangle fills it. Nothing in the recomp uses it.
     };
 
     // (TODO 299) PipelineDesc::writeMask's bit for a draw that writes its motion into the target's motion target (the scene's 3D).

@@ -1,5 +1,11 @@
 # What's new
 
+## 0.9.8
+
+**Fixed**
+- The game no longer opens an empty command window next to it when it starts.
+- Trees far away now take the same distance haze as the hills they stand on. With a long Forest distance (Far 3D, Very far 3D) most of the far 3D trees stayed dark and sharp against the hazy hills, while the flat trees they replace blended in. Near trees look as before.
+
 ## 0.9.7
 
 **Fixed**

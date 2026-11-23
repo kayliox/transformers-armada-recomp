@@ -2114,7 +2114,16 @@ fn start_game(repo: &Path) -> Option<std::process::Child> {
     if !moved && !settings.exists() && example.exists() {
         let _ = std::fs::copy(&example, &settings);
     }
-    match Command::new(game_exe(repo)).current_dir(&game).spawn() {
+    let mut command = Command::new(game_exe(repo));
+    command.current_dir(&game);
+    // (Windows: never a console window beside the game - the game is a windows program now, and a console one built
+    // before that, still in place when a build failed, gets none either; its log goes to logs\play_*.err / .out)
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    match command.spawn() {
         Ok(child) => Some(child),
         Err(error) => {
             // (TODO 371: the game's exe itself refused - os error 4551)

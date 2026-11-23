@@ -4032,8 +4032,60 @@ namespace nr::frame
                 // (TODO 399) The game draws its 3D trees after the fog's pass: one drawn after it takes the fog in its own shader
                 // (the far trees this port draws had none while the terrain behind them did). TF_NATIVE_TREEFOG=0: as before.
                 static const bool treeFogOn = !(std::getenv("TF_NATIVE_TREEFOG") && *std::getenv("TF_NATIVE_TREEFOG") == '0');
+                // (TODO 449) Not only the instanced trees (0x1ac0 of image bec5, Deep Amazon's): most of the Amazon's 3D trees and
+                // the far ones the forest distance adds are plain transformed meshes (1410 + 0480 with a colour routine: 1c20, 2150,
+                // 13b0, 0x1ac0 / 21f0 lighting), drawn after the fog's pass as well - and stayed unfogged, dark on the hazy hills
+                // (Forest distance x8, a player's report; measured: every tree on the far hill came after the pass). A 3D mesh drawn
+                // after the pass into its target with only those routines takes the fog too. Left out: sprites, 2D, clouds and the
+                // other routines (water, chrome, projections, effects), and additive blends (below). TF_NATIVE_TREEFOG=instances:
+                // the instanced trees only, as before.
+                static const bool treeFogMeshes = !(std::getenv("TF_NATIVE_TREEFOG") && std::strcmp(std::getenv("TF_NATIVE_TREEFOG"), "instances") == 0);
+                // (The transform and the clip by their place as well: 0x1410 / 0x0480 are known by the image's core, which some
+                // levels' images do not match byte for byte - their routine then reads Unknown, as nr_capture's own checks allow.)
+                const auto plainMesh = [&]() {
+                    if (!treeFogMeshes || !draw.mesh || draw.mesh->sprites || draw.mesh->immediate || draw.cloud)
+                        return false;
+                    bool transform = false;
+                    for (uint32_t k = 0; k < draw.shader.count && k < kMaxRoutines; ++k)
+                    {
+                        const Routine r = draw.shader.routine[k];
+                        const uint16_t at = draw.shader.address[k];
+                        if (r == Routine::TransformKick || (r == Routine::Unknown && at == 0x1410u))
+                        {
+                            transform = true;
+                            continue;
+                        }
+                        if (r == Routine::Clip || (r == Routine::Unknown && at == 0x0480u))
+                            continue;
+                        switch (r)
+                        {
+                        case Routine::ConstantColour:
+                        case Routine::ScaleColours:
+                        case Routine::ScaleAndOffsetColours:
+                        case Routine::LightNormals:
+                        case Routine::LightWithHighlight:
+                            break;
+                        default:
+                            return false;
+                        }
+                    }
+                    return transform;
+                };
                 GpuTexture *treeFogPalette = nullptr;
-                if (treeFogOn && !fog && draw.shader.blockOf(Routine::Instances))
+                static const bool treeFogLog = std::getenv("TF_NATIVE_FOGLOG") != nullptr;
+                if (treeFogLog && !shotPath.empty() && treeFogOn && !fog && !draw.shader.blockOf(Routine::Instances) && !plainMesh() &&
+                    fogPalettes.find(found->first) != fogPalettes.end())
+                {
+                    // (TODO 449, TF_NATIVE_FOGLOG) A draw after the fog pass that the trees' fog leaves out: its routines, once each.
+                    static std::unordered_set<std::string> told;
+                    std::string sig;
+                    for (uint32_t k = 0; k < draw.shader.count && k < kMaxRoutines; ++k)
+                        sig += (k ? " " : "") + std::to_string(draw.shader.address[k]) + ":" + std::to_string(static_cast<int>(draw.shader.routine[k]));
+                    sig += draw.mesh ? (draw.mesh->sprites ? " sprites" : draw.mesh->immediate ? " 2D" : " mesh") : " no mesh";
+                    if (told.insert(sig).second)
+                        std::fprintf(stderr, "[native render] after the fog pass, no fog (address:routine): %s\n", sig.c_str());
+                }
+                if (treeFogOn && !fog && (draw.shader.blockOf(Routine::Instances) || plainMesh()))
                 {
                     const auto fp = fogPalettes.find(found->first);
                     if (fp != fogPalettes.end())
@@ -4775,7 +4827,25 @@ namespace nr::frame
                 }
                 // (t0 the draw's texture; t1 the fog's palette, else TEST's DATE copy, else the top-byte read's palette; t2 the
                 // fog's depth. Unused, t1 and t2 are left at what they were bound to: the shader reads them only for those.)
-                const bool treeFog = treeFogPalette && !destSlot && !topSource;
+                // (TODO 449: never on an additive blend - its colour moved towards the fog's would add the fog's colour)
+                const bool treeFog = treeFogPalette && !destSlot && !topSource && !(blend.enabled && blend.dst == gfx::Blend::One);
+                if (treeFogPalette && fogLog)
+                {
+                    // (TODO 449, TF_NATIVE_FOGLOG) The trees' fog: passes given it, and the ones left out by why - every 600 such passes.
+                    static uint64_t given = 0, byDate = 0, byTop = 0, byAdd = 0;
+                    if (treeFog)
+                        ++given;
+                    else if (destSlot)
+                        ++byDate;
+                    else if (topSource)
+                        ++byTop;
+                    else
+                        ++byAdd;
+                    if ((given + byDate + byTop + byAdd) % 600u == 0u)
+                        std::fprintf(stderr, "[native render] trees' fog: %llu passes given it; left out: %llu destination alpha test, %llu top-byte read, %llu additive\n",
+                                     static_cast<unsigned long long>(given), static_cast<unsigned long long>(byDate),
+                                     static_cast<unsigned long long>(byTop), static_cast<unsigned long long>(byAdd));
+                }
                 c.fogx[0] = treeFog ? 1.0f : 0.0f;
                 {
                     // (TODO 351 b: the fade range in Z24 units; negative = an additive blend, whose colour fades too)

@@ -140,6 +140,15 @@ add_executable(TransformersRecomp
     ${TF_NATIVE_RENDER_SOURCES}
     $<TARGET_OBJECTS:nr_core_objects>
 )
+# (Windows) A windows program, not a console one: started from the setup, the launcher, a shortcut, Steam or a double
+# click, Windows opened an empty command window beside the game (its output goes to logs\play_*.err / .out). main()
+# stays the entry (mainCRTStartup). Started from a command window, main.cpp attaches to it (console_attach.cpp).
+if(WIN32)
+    set_target_properties(TransformersRecomp PROPERTIES WIN32_EXECUTABLE ON)
+    if(MSVC)
+        target_link_options(TransformersRecomp PRIVATE /ENTRY:mainCRTStartup)
+    endif()
+endif()
 
 target_include_directories(TransformersRecomp PRIVATE
     "${TF_GENERATED_DIR}"

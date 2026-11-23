@@ -17,6 +17,7 @@
 #include "port_ext.h"
 #include "hd_movies.h"
 #include "graphics_driver.h"
+#include "console_attach.h"
 #include "laptop_reset.h"
 #include "hd_progress.h"
 #include "mod_menu.h"
@@ -319,6 +320,8 @@ static void startStep(const char *what)
 
 int main(int argc, char *argv[])
 {
+    // (the game is a windows program: started from a command window, it writes into it - console_attach.h)
+    console_attach::attachParent();
 #if defined(__linux__)
     if (argc > 1 && std::string(argv[1]) == "--gl-probe") // (chooseGlDriver's child)
         return glProbe();

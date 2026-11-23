@@ -10,7 +10,8 @@ if not exist settings.ini if exist overlay\settings.example.ini copy /y overlay\
 if not exist settings.ini if exist settings.example.ini copy /y settings.example.ini settings.ini >nul
 :play
 rem (TODO 371) Windows 11's Smart App Control can refuse the game, which is built on this PC and unsigned: one line when
-rem it is on, and after a start it refused, what to do. The game runs in this window (it is a console program).
+rem it is on, and after a start it refused, what to do. The game writes into this window (a windows program, it attaches
+rem to it; its log goes to logs\play_*.err / .out as before).
 set "sac="
 for /f "tokens=3" %%V in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy" /v VerifiedAndReputablePolicyState 2^>nul ^| find "REG_DWORD"') do set "sac=%%V"
 if /i "%sac%"=="0x1" echo Note: Windows' Smart App Control is on. If it blocks the game, this window says what to do.
