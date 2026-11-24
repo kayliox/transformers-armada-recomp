@@ -1,15 +1,20 @@
 # Posts a new version's release notes to the Discord server's updates channel through a channel webhook.
 # Input: -Tag (the release the workflow just published, setup-v<VERSION>); env DISCORD_WEBHOOK (a repository
 # secret: Discord channel > Edit Channel > Integrations > Webhooks > Copy Webhook URL). Without the secret it does
-# nothing. Rebuild releases (setup-v<VERSION>-2 ...) are skipped, so each version is announced once.
-# The text is CHANGELOG.md's "## <VERSION>" section (the same plain-language notes as the GitHub release).
+# nothing. Rebuild releases (setup-v<VERSION>-2 ...) are skipped, so each version is announced once, except a
+# hotfix: a rebuild whose version has a "## <VERSION> hotfix" section in CHANGELOG.md is announced as that hotfix.
+# The text is CHANGELOG.md's "## <VERSION>" section (or "## <VERSION> hotfix"), the same plain-language notes as
+# the GitHub release.
 param([Parameter(Mandatory = $true)][string]$Tag, [switch]$DryRun)
 # -DryRun prints the message instead of posting it (works without the secret).
 $ErrorActionPreference = 'Stop'
 
 if (-not $env:DISCORD_WEBHOOK -and -not $DryRun) { Write-Host 'post_discord: no DISCORD_WEBHOOK secret, nothing posted.'; exit 0 }
-if ($Tag -notmatch '^setup-v(\d+\.\d+\.\d+)$') { Write-Host "post_discord: $Tag is a rebuild or not a version release, not announced."; exit 0 }
+if ($Tag -notmatch '^setup-v(\d+\.\d+\.\d+)(-\d+)?$') { Write-Host "post_discord: $Tag is not a version release, not announced."; exit 0 }
 $version = $Matches[1]
+$hotfix = [bool]$Matches[2]
+# A version's own section is "## 0.9.9" (anything after it but "hotfix"); a hotfix's is "## 0.9.9 hotfix".
+$heading = if ($hotfix) { '^## ' + [regex]::Escape($version) + '\s+hotfix\s*$' } else { '^## ' + [regex]::Escape($version) + '(\s(?!\s*hotfix\s*$)|$)' }
 
 $top = Split-Path -Parent $PSScriptRoot
 $notes = ''
@@ -17,7 +22,8 @@ $log = Join-Path $top 'CHANGELOG.md'
 if (Test-Path -LiteralPath $log) {
     $lines = Get-Content -LiteralPath $log -Encoding UTF8
     $start = -1
-    for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match ('^## ' + [regex]::Escape($version) + '(\s|$)')) { $start = $i; break } }
+    for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match $heading) { $start = $i; break } }
+    if ($hotfix -and $start -lt 0) { Write-Host "post_discord: $Tag is a rebuild (no '## $version hotfix' notes), not announced."; exit 0 }
     if ($start -ge 0) {
         $end = $start + 1
         while ($end -lt $lines.Count -and $lines[$end] -notmatch '^## ') { $end++ }
@@ -40,7 +46,7 @@ if ($notes.Length -gt $max) {
 $body = @{
     username = 'Transformers Armada updates'
     embeds   = @(@{
-        title       = "Version $version is out"
+        title       = $(if ($hotfix) { "Version $version hotfix is out" } else { "Version $version is out" })
         url         = $url
         description = $notes + $footer
         color       = 3447003
