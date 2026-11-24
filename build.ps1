@@ -454,6 +454,21 @@ function Get-PatchedTreeState {
         "$_ $(if (Test-Path -LiteralPath $path -PathType Leaf) { (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash } else { 'absent' })"
     }) -join "`n"
 }
+# (TODO 456) Some patches were written on Windows with CRLF lines, while PS2Recomp's files are LF in its commit. A CRLF patch
+# applied as it is only matches a submodule checked out with CRLF (core.autocrlf=true, Git for Windows' usual setting); with
+# autocrlf false or input the first one (0028) failed: "patch does not apply" (public issue #35). Each patch is applied as an
+# LF copy (its CR bytes taken out, the same rule as build.sh's `tr -d '\r'`), written under out\patches-lf; the .patch files
+# themselves stay as they are (and the series' record keeps hashing the originals).
+$patchLfDir = Join-Path $Root "out\patches-lf"
+function Get-LfPatch($patch) {
+    $bytes = [IO.File]::ReadAllBytes($patch.FullName)
+    if ([Array]::IndexOf($bytes, [byte]13) -lt 0) { return $patch.FullName }
+    New-Item -ItemType Directory -Force $patchLfDir | Out-Null
+    $lf = Join-Path $patchLfDir $patch.Name
+    $latin1 = [Text.Encoding]::GetEncoding(28591) # (byte for byte: every byte one character and back)
+    [IO.File]::WriteAllBytes($lf, $latin1.GetBytes($latin1.GetString($bytes).Replace("`r", "")))
+    return $lf
+}
 $treeChanged = $false
 if ($patches -and $recorded -eq $series) {
     $state = Get-PatchedTreeState
@@ -480,7 +495,7 @@ if ($patches -and ($recorded -ne $series -or $treeChanged)) {
         $allIn = $true
         foreach ($patch in $patches) {
             $ErrorActionPreference = "Continue"
-            & git -C $ps2recomp apply --reverse --check $patch.FullName 2>$null
+            & git -C $ps2recomp apply --reverse --check (Get-LfPatch $patch) 2>$null
             if ($LASTEXITCODE -ne 0) { $allIn = $false }
             $ErrorActionPreference = "Stop"
             if (-not $allIn) { break }
@@ -503,7 +518,7 @@ if ($patches -and ($recorded -ne $series -or $treeChanged)) {
         Run git @("-C", $ps2recomp, "clean", "-fdq")
         foreach ($patch in $patches) {
             Write-Host "  $($patch.Name)"
-            Run git @("-C", $ps2recomp, "apply", "--whitespace=nowarn", $patch.FullName)
+            Run git @("-C", $ps2recomp, "apply", "--whitespace=nowarn", (Get-LfPatch $patch))
         }
         $same = 0
         foreach ($rel in $before.Keys) {

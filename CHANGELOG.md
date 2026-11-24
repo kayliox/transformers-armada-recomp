@@ -1,5 +1,10 @@
 # What's new
 
+## 0.9.9 hotfix
+
+**Fixed**
+- The setup no longer stops at the step that prepares the recompiler with "patch does not apply" on PCs where Git is set to keep line endings as they are (core.autocrlf false or input).
+
 ## 0.9.9
 
 **New**
